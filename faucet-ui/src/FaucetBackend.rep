@@ -1,0 +1,25 @@
+class FaucetBackend
+{
+    PROP(bool walletExists READONLY)
+    PROP(bool busy READONLY)
+    PROP(QString accountId READONLY)
+    PROP(QString balance READONLY)
+    PROP(QString lastTxHash READONLY)
+    PROP(QString sequencerUrl READONLY)
+    PROP(bool recoverySupported READONLY)
+
+    // Operations start native jobs and return {"ok":true,"job_id":"..."}
+    // immediately. jobStatus() returns queued/running/progress/terminal JSON.
+    // The one-time mnemonic is returned only in the terminal create job result;
+    // it is never a property, setting, signal payload, or log value.
+    SLOT(QString bootstrap())
+    SLOT(QString startCreate(QString password))
+    SLOT(QString startOpen())
+    SLOT(QString startVerifyFingerprint())
+    SLOT(QString startInitializeAccount())
+    SLOT(QString startBalance())
+    SLOT(QString startClaimOnce())
+    SLOT(QString startClaimUntilTarget(QString target, int maxClaims))
+    SLOT(QString cancelJob(QString jobId))
+    SLOT(QString jobStatus(QString jobId))
+}
