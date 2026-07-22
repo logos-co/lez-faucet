@@ -1,0 +1,24 @@
+language = "C"
+include_guard = "LEZ_FAUCET_FFI_H"
+pragma_once = true
+documentation = true
+usize_is_size_t = true
+
+[parse]
+parse_deps = false
+
+[export]
+include = [
+  "FaucetHandle",
+  "FfiCreateOutput",
+  "FfiProgressCallback",
+  "lez_faucet_create",
+  "lez_faucet_open",
+  "lez_faucet_destroy",
+  "lez_faucet_string_free",
+  "lez_faucet_verify_fingerprint",
+  "lez_faucet_create_and_initialize_account",
+  "lez_faucet_get_balance",
+  "lez_faucet_claim_once",
+  "lez_faucet_claim_until_target",
+]
