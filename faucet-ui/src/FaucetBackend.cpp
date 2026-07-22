@@ -8,18 +8,14 @@
 #include <QStandardPaths>
 #include <QtGlobal>
 
-#include "logos_api.h"
-#include "logos_api_client.h"
+#include "logos_sdk.h"
 
 namespace {
-constexpr auto CORE_MODULE = "lez_faucet";
 constexpr auto DEFAULT_SEQUENCER_URL = "https://testnet.lez.logos.co";
-const Timeout NO_TIMEOUT{-1};
 }
 
-FaucetBackend::FaucetBackend(LogosAPI* logosAPI, QObject* parent)
-    : FaucetBackendSimpleSource(parent),
-      m_logosAPI(logosAPI)
+FaucetBackend::FaucetBackend(QObject* parent)
+    : FaucetBackendSimpleSource(parent)
 {
     const QString dataRoot = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
         + QStringLiteral("/lez-faucet");
@@ -46,7 +42,7 @@ FaucetBackend::~FaucetBackend()
     const auto terminalJobIds = m_terminalResponses.keys();
     for (const QString& jobId : terminalJobIds)
         clearTerminalResponse(jobId);
-    if (m_logosAPI)
+    if (isContextReady())
         invokeCore(QStringLiteral("destroy"));
 }
 
@@ -80,17 +76,46 @@ QString FaucetBackend::bootstrap()
 
 QString FaucetBackend::invokeCore(const QString& method, const QVariantList& arguments)
 {
-    if (!m_logosAPI)
+    if (!isContextReady())
         return localError(QStringLiteral("Logos bridge is not available"));
-
-    auto* client = m_logosAPI->getClient(QLatin1String(CORE_MODULE));
-    if (!client)
-        return localError(QStringLiteral("LEZ Faucet core module is not available"));
 
     // Never log method arguments or raw results: create carries a password in,
     // and its one-shot result carries the mnemonic out.
-    return client->invokeRemoteMethod(
-        QLatin1String(CORE_MODULE), method, arguments, NO_TIMEOUT).toString();
+    logos::CallError error;
+    auto& core = modules().lez_faucet;
+    QString result;
+    if (method == QStringLiteral("create") && arguments.size() == 4) {
+        result = core.create(arguments[0].toString(), arguments[1].toString(),
+                             arguments[2].toString(), arguments[3].toString(), &error);
+    } else if (method == QStringLiteral("open") && arguments.size() == 3) {
+        result = core.open(arguments[0].toString(), arguments[1].toString(),
+                           arguments[2].toString(), &error);
+    } else if (method == QStringLiteral("destroy") && arguments.isEmpty()) {
+        result = core.destroy(&error);
+    } else if (method == QStringLiteral("verifyFingerprint") && arguments.isEmpty()) {
+        result = core.verifyFingerprint(&error);
+    } else if (method == QStringLiteral("createAndInitializeAccount") && arguments.isEmpty()) {
+        result = core.createAndInitializeAccount(&error);
+    } else if (method == QStringLiteral("balance") && arguments.size() == 1) {
+        result = core.balance(arguments[0].toString(), &error);
+    } else if (method == QStringLiteral("claimOnce") && arguments.size() == 1) {
+        result = core.claimOnce(arguments[0].toString(), &error);
+    } else if (method == QStringLiteral("claimUntilTarget") && arguments.size() == 3) {
+        result = core.claimUntilTarget(arguments[0].toString(), arguments[1].toString(),
+                                       arguments[2].toInt(), &error);
+    } else if (method == QStringLiteral("cancel") && arguments.size() == 1) {
+        result = core.cancel(arguments[0].toString(), &error);
+    } else if (method == QStringLiteral("jobStatus") && arguments.size() == 1) {
+        result = core.jobStatus(arguments[0].toString(), &error);
+    } else if (method == QStringLiteral("jobResultAck") && arguments.size() == 1) {
+        result = core.jobResultAck(arguments[0].toString(), &error);
+    } else {
+        return localError(QStringLiteral("Unsupported core method invocation"));
+    }
+
+    if (!error.ok())
+        return localError(QString::fromStdString(error.message));
+    return result;
 }
 
 QString FaucetBackend::startCoreJob(

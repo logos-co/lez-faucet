@@ -11,11 +11,10 @@ logos_module(
     NAME lez_faucet_ui
     REP_FILE src/FaucetBackend.rep
     SOURCES
-        src/FaucetPluginInterface.h
-        src/FaucetPlugin.h
-        src/FaucetPlugin.cpp
         src/FaucetBackend.h
         src/FaucetBackend.cpp
+    INCLUDE_DIRS
+        src
     FIND_PACKAGES
         Qt6Gui
     LINK_LIBRARIES

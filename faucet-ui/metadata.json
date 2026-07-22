@@ -3,6 +3,7 @@
   "display_name": "LEZ Faucet",
   "version": "0.1.0",
   "type": "ui_qml",
+  "interface": "universal",
   "category": "blockchain",
   "description": "Create and fund one public LEZ testnet account from Basecamp",
   "author": "Logos",
@@ -10,6 +11,11 @@
   "icon": null,
   "view": "qml/FaucetView.qml",
   "dependencies": ["lez_faucet"],
+  "codegen": {
+    "rep": "src/FaucetBackend.rep",
+    "backend_class": "FaucetBackend",
+    "backend_header": "FaucetBackend.h"
+  },
   "nix": {
     "packages": {
       "build": [],

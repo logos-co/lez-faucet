@@ -9,16 +9,16 @@
 #include <QString>
 #include <QVariantList>
 
+#include "logos_ui_plugin_context.h"
 #include "rep_FaucetBackend_source.h"
 
-class LogosAPI;
-
-class FaucetBackend : public FaucetBackendSimpleSource
+class FaucetBackend : public FaucetBackendSimpleSource,
+                      public LogosUiPluginContext
 {
     Q_OBJECT
 
 public:
-    explicit FaucetBackend(LogosAPI* logosAPI, QObject* parent = nullptr);
+    explicit FaucetBackend(QObject* parent = nullptr);
     ~FaucetBackend() override;
 
 public slots:
@@ -50,7 +50,6 @@ private:
     void applyTerminalResult(const QString& kind, const QJsonObject& status);
     void clearTerminalResponse(const QString& jobId);
 
-    LogosAPI* m_logosAPI = nullptr;
     QString m_configPath;
     QString m_storagePath;
     QHash<QString, QString> m_jobKinds;
