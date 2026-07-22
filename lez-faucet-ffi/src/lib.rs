@@ -11,7 +11,10 @@ use std::{
     path::{Path, PathBuf},
     ptr,
     str::FromStr as _,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::Duration,
 };
 
@@ -27,6 +30,7 @@ use wallet::{
     program_facades::{native_token_transfer::NativeTokenTransfer, pinata::Pinata},
     AccountIdentity, WalletCore,
 };
+use zeroize::{Zeroize as _, Zeroizing};
 
 /// The exact public-testnet reward encoded by the v0.2.0 Piñata guest.
 pub const PINATA_PRIZE: u128 = 150;
@@ -37,12 +41,17 @@ pub const STORAGE_SECURITY_WARNING: &str = "Public-testnet wallet only. LEZ v0.2
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_TX_DEADLINE: Duration = Duration::from_secs(300);
 const DEFAULT_STALE_RETRIES: usize = 3;
+const DEFAULT_SOLVE_DEADLINE: Duration = Duration::from_secs(60);
+const DEFAULT_MAX_SOLVE_ATTEMPTS: u64 = 1 << 28;
+const MAX_SAFE_PINATA_DIFFICULTY: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct FaucetPolicy {
     pub poll_interval: Duration,
     pub transaction_deadline: Duration,
     pub max_stale_challenge_retries: usize,
+    pub solve_deadline: Duration,
+    pub max_solve_attempts: u64,
 }
 
 impl Default for FaucetPolicy {
@@ -51,6 +60,8 @@ impl Default for FaucetPolicy {
             poll_interval: DEFAULT_POLL_INTERVAL,
             transaction_deadline: DEFAULT_TX_DEADLINE,
             max_stale_challenge_retries: DEFAULT_STALE_RETRIES,
+            solve_deadline: DEFAULT_SOLVE_DEADLINE,
+            max_solve_attempts: DEFAULT_MAX_SOLVE_ATTEMPTS,
         }
     }
 }
@@ -73,7 +84,7 @@ pub struct InitializedAccount {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ClaimReceipt {
-    pub tx_hash: String,
+    pub tx_hash: Option<String>,
     pub balance_before: u128,
     pub balance_after: u128,
     pub stale_challenge_retries: usize,
@@ -99,7 +110,7 @@ pub struct ClaimUntilResult {
 pub struct CreatedWallet {
     pub client: FaucetClient,
     /// Display this exactly once, never log it, then discard it.
-    pub mnemonic: String,
+    pub mnemonic: Zeroizing<String>,
     pub security_warning: &'static str,
 }
 
@@ -110,11 +121,20 @@ pub struct FaucetClient {
     state_path: PathBuf,
     state: FaucetState,
     policy: FaucetPolicy,
+    cancel_generation: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 struct FaucetState {
+    active_public_account: Option<ActivePublicAccount>,
     pending_public_account: Option<PendingPublicAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ActivePublicAccount {
+    account_id: String,
+    init_tx_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,6 +153,7 @@ impl FaucetClient {
         let config_path = config_path.into();
         let storage_path = storage_path.into();
         let state_path = state_path_for(&storage_path);
+        ensure_create_paths_absent(&config_path, &storage_path, &state_path)?;
         prepare_private_path(&config_path)?;
         prepare_private_path(&storage_path)?;
 
@@ -152,6 +173,7 @@ impl FaucetClient {
             state_path,
             state: FaucetState::default(),
             policy: FaucetPolicy::default(),
+            cancel_generation: Arc::new(AtomicU64::new(0)),
         };
         client.persist_wallet()?;
         client.persist_state()?;
@@ -164,7 +186,7 @@ impl FaucetClient {
 
         Ok(CreatedWallet {
             client,
-            mnemonic: mnemonic.to_string(),
+            mnemonic: Zeroizing::new(mnemonic.to_string()),
             security_warning: STORAGE_SECURITY_WARNING,
         })
     }
@@ -192,6 +214,7 @@ impl FaucetClient {
             state: load_state(&state_path)?,
             state_path,
             policy: FaucetPolicy::default(),
+            cancel_generation: Arc::new(AtomicU64::new(0)),
         };
         client.restrict_wallet_files()?;
         Ok(client)
@@ -216,6 +239,17 @@ impl FaucetClient {
     pub async fn create_and_initialize_public_account(&mut self) -> Result<InitializedAccount> {
         self.verify_program_fingerprint().await?;
 
+        if let Some(active) = self.state.active_public_account.clone() {
+            let account_id = parse_account_id(&active.account_id)
+                .context("persisted active account ID is invalid")?;
+            let current = self
+                .wallet
+                .get_account_public(account_id)
+                .await
+                .with_context(|| format!("failed to inspect active account {account_id}"))?;
+            return initialized_active_account(&active, &current);
+        }
+
         let pending = if let Some(pending) = self.state.pending_public_account.clone() {
             pending
         } else {
@@ -226,8 +260,9 @@ impl FaucetClient {
                 account_id: account_id.to_string(),
                 init_tx_hash: None,
             };
-            self.state.pending_public_account = Some(pending.clone());
-            self.persist_state()?;
+            let mut next_state = self.state.clone();
+            next_state.pending_public_account = Some(pending.clone());
+            self.replace_state(next_state)?;
             pending
         };
         let account_id = parse_account_id(&pending.account_id)
@@ -239,12 +274,13 @@ impl FaucetClient {
             .await
             .with_context(|| format!("failed to inspect pending account {account_id}"))?;
         if current.program_owner == programs::authenticated_transfer().id() {
-            self.finish_pending_account()?;
-            return Ok(InitializedAccount {
+            let initialized = InitializedAccount {
                 account_id: account_id.to_string(),
-                init_tx_hash: pending.init_tx_hash,
+                init_tx_hash: pending.init_tx_hash.clone(),
                 balance: current.balance,
-            });
+            };
+            self.activate_pending_account(&pending)?;
+            return Ok(initialized);
         }
         ensure!(
             current == Account::default(),
@@ -269,12 +305,13 @@ impl FaucetClient {
                     refreshed.program_owner == programs::authenticated_transfer().id(),
                     "initialization transaction {previous_hash} was included but pending account {account_id} has the wrong owner"
                 );
-                self.finish_pending_account()?;
-                return Ok(InitializedAccount {
+                let initialized = InitializedAccount {
                     account_id: account_id.to_string(),
                     init_tx_hash: Some(previous_hash.to_string()),
                     balance: refreshed.balance,
-                });
+                };
+                self.activate_pending_account(&pending)?;
+                return Ok(initialized);
             }
         }
 
@@ -282,12 +319,13 @@ impl FaucetClient {
             .register_account(AccountIdentity::Public(account_id))
             .await
             .context("failed to submit authenticated-transfer initialization")?;
-        self.state
+        let mut next_state = self.state.clone();
+        next_state
             .pending_public_account
             .as_mut()
             .context("pending account state disappeared")?
             .init_tx_hash = Some(init_hash.to_string());
-        self.persist_state()?;
+        self.replace_state(next_state)?;
         self.wallet
             .poll_native_token_transfer(init_hash)
             .await
@@ -311,7 +349,12 @@ impl FaucetClient {
             "newly initialized account unexpectedly has balance {}",
             account.balance
         );
-        self.finish_pending_account()?;
+        let persisted_pending = self
+            .state
+            .pending_public_account
+            .clone()
+            .context("pending account state disappeared after initialization")?;
+        self.activate_pending_account(&persisted_pending)?;
 
         Ok(InitializedAccount {
             account_id: account_id.to_string(),
@@ -328,7 +371,19 @@ impl FaucetClient {
     }
 
     pub async fn claim_once(&self, winner_id: AccountId) -> Result<ClaimReceipt> {
+        let operation_generation = self.cancel_generation.load(Ordering::SeqCst);
+        self.claim_once_at_generation(winner_id, operation_generation)
+            .await
+    }
+
+    async fn claim_once_at_generation(
+        &self,
+        winner_id: AccountId,
+        operation_generation: u64,
+    ) -> Result<ClaimReceipt> {
+        ensure_not_cancelled(&self.cancel_generation, operation_generation)?;
         self.verify_program_fingerprint().await?;
+        ensure_not_cancelled(&self.cancel_generation, operation_generation)?;
         let winner = self
             .wallet
             .get_account_public(winner_id)
@@ -347,6 +402,7 @@ impl FaucetClient {
         let pinata_id = system_accounts::pinata_account_id();
 
         for stale_retries in 0..=self.policy.max_stale_challenge_retries {
+            ensure_not_cancelled(&self.cancel_generation, operation_generation)?;
             let pinata = self
                 .wallet
                 .get_account_public(pinata_id)
@@ -361,11 +417,12 @@ impl FaucetClient {
                 "Piñata pool has insufficient balance"
             );
             let challenge = challenge_bytes(&pinata)?;
-            let solution = tokio::task::spawn_blocking(move || solve_challenge(challenge))
-                .await
-                .context("Piñata solver task failed")??;
+            let solution = self
+                .solve_challenge(challenge, operation_generation)
+                .await?;
 
             // Avoid submitting work that became stale while the CPU solver was running.
+            ensure_not_cancelled(&self.cancel_generation, operation_generation)?;
             let latest = self
                 .wallet
                 .get_account_public(pinata_id)
@@ -374,19 +431,38 @@ impl FaucetClient {
             if challenge_bytes(&latest)? != challenge {
                 continue;
             }
+            ensure_not_cancelled(&self.cancel_generation, operation_generation)?;
 
-            let tx_hash = Pinata(&self.wallet)
+            // Once this call begins, a transport error may mean the sequencer
+            // accepted the transaction. Cancellation must not interrupt the
+            // bounded reconciliation below or permit a racing resubmission.
+            let (tx_hash, submission_error) = match Pinata(&self.wallet)
                 .claim(pinata_id, winner_id, solution)
                 .await
-                .context("failed to submit Piñata claim")?;
+            {
+                Ok(tx_hash) => (Some(tx_hash), None),
+                Err(error) => (
+                    None,
+                    Some(format!("failed to submit Piñata claim: {error:#}")),
+                ),
+            };
 
             match self
-                .await_claim(tx_hash, winner_id, balance_before, challenge)
+                .await_claim(
+                    tx_hash,
+                    winner_id,
+                    balance_before,
+                    challenge,
+                    submission_error,
+                )
                 .await?
             {
-                ClaimOutcome::Credited(balance_after) => {
+                ClaimOutcome::Credited {
+                    balance_after,
+                    tx_hash,
+                } => {
                     return Ok(ClaimReceipt {
-                        tx_hash: tx_hash.to_string(),
+                        tx_hash: tx_hash.map(|hash| hash.to_string()),
                         balance_before,
                         balance_after,
                         stale_challenge_retries: stale_retries,
@@ -412,12 +488,13 @@ impl FaucetClient {
     where
         F: FnMut(&ClaimProgress),
     {
+        let operation_generation = self.cancel_generation.load(Ordering::SeqCst);
         let initial_balance = self.balance(winner_id).await?;
         run_claim_loop(
             initial_balance,
             target,
             max_claims,
-            || self.claim_once(winner_id),
+            || self.claim_once_at_generation(winner_id, operation_generation),
             on_progress,
         )
         .await
@@ -425,69 +502,102 @@ impl FaucetClient {
 
     async fn await_claim(
         &self,
-        tx_hash: HashType,
+        tx_hash: Option<HashType>,
         winner_id: AccountId,
         balance_before: u128,
         submitted_challenge: [u8; 33],
+        submission_error: Option<String>,
     ) -> Result<ClaimOutcome> {
         let expected = balance_before
             .checked_add(PINATA_PRIZE)
             .context("winner balance overflow")?;
         let deadline = tokio::time::Instant::now() + self.policy.transaction_deadline;
         let pinata_id = system_accounts::pinata_account_id();
+        let mut last_poll_error = submission_error;
 
         loop {
-            let included = self
-                .wallet
-                .sequencer_client
-                .get_transaction(tx_hash)
-                .await
-                .with_context(|| format!("failed to poll claim transaction {tx_hash}"))?
-                .is_some();
-            let balance = self.balance(winner_id).await?;
-
-            ensure!(
-                balance <= expected,
-                "winner balance changed by more than one Piñata prize (before {balance_before}, now {balance})"
-            );
-            if included && balance == expected {
-                return Ok(ClaimOutcome::Credited(balance));
-            }
-            if included && balance == balance_before {
-                bail!("claim transaction {tx_hash} was included without the expected +150 credit");
-            }
-
-            let current_pinata = self
-                .wallet
-                .get_account_public(pinata_id)
-                .await
-                .context("failed to monitor Piñata challenge")?;
-            if challenge_bytes(&current_pinata)? != submitted_challenge {
-                // Re-read both values after observing the challenge change to avoid a
-                // false stale result from two RPC calls straddling the same block.
-                let confirmed_balance = self.balance(winner_id).await?;
-                let confirmed_included = self
-                    .wallet
-                    .sequencer_client
-                    .get_transaction(tx_hash)
-                    .await
-                    .with_context(|| format!("failed to confirm claim transaction {tx_hash}"))?
-                    .is_some();
-                if confirmed_included && confirmed_balance == expected {
-                    return Ok(ClaimOutcome::Credited(confirmed_balance));
+            let included = if let Some(hash) = tx_hash {
+                match self.wallet.sequencer_client.get_transaction(hash).await {
+                    Ok(transaction) => Some(transaction.is_some()),
+                    Err(error) => {
+                        last_poll_error = Some(format!(
+                            "failed to poll claim transaction {hash}: {error:#}"
+                        ));
+                        None
+                    }
                 }
-                if !confirmed_included && confirmed_balance == balance_before {
-                    return Ok(ClaimOutcome::Stale);
+            } else {
+                None
+            };
+            let balance = match self.balance(winner_id).await {
+                Ok(balance) => Some(balance),
+                Err(error) => {
+                    last_poll_error = Some(format!("failed to poll winner balance: {error:#}"));
+                    None
+                }
+            };
+            let current_challenge = match self.wallet.get_account_public(pinata_id).await {
+                Ok(account) => match challenge_bytes(&account) {
+                    Ok(challenge) => Some(challenge),
+                    Err(error) => return Err(error),
+                },
+                Err(error) => {
+                    last_poll_error = Some(format!("failed to poll Piñata challenge: {error:#}"));
+                    None
+                }
+            };
+            let observation = ClaimObservation {
+                included,
+                balance,
+                challenge: current_challenge,
+            };
+            match classify_claim_observation(
+                tx_hash.is_some(),
+                balance_before,
+                expected,
+                submitted_challenge,
+                observation,
+            )? {
+                ClaimDecision::Continue => {}
+                ClaimDecision::Credited(balance_after) => {
+                    return Ok(ClaimOutcome::Credited {
+                        balance_after,
+                        tx_hash,
+                    });
+                }
+                ClaimDecision::Stale => return Ok(ClaimOutcome::Stale),
+                ClaimDecision::IncludedWithoutCredit => {
+                    let hash = tx_hash.context("included claim had no transaction hash")?;
+                    bail!(
+                        "claim transaction {hash} was included without the expected +{PINATA_PRIZE} credit"
+                    );
                 }
             }
 
             if tokio::time::Instant::now() >= deadline {
-                bail!(
-                    "timed out waiting for claim transaction {tx_hash} and +150 balance evidence"
-                );
+                return Err(reconciliation_timeout_error(
+                    tx_hash.map(|hash| hash.to_string()),
+                    last_poll_error.as_deref(),
+                ));
             }
             tokio::time::sleep(self.policy.poll_interval).await;
         }
+    }
+
+    async fn solve_challenge(
+        &self,
+        challenge: [u8; 33],
+        operation_generation: u64,
+    ) -> Result<u128> {
+        solve_challenge_with_limits(
+            challenge,
+            self.policy.max_solve_attempts,
+            self.policy.solve_deadline,
+            Arc::clone(&self.cancel_generation),
+            operation_generation,
+            None,
+        )
+        .await
     }
 
     fn persist_wallet(&self) -> Result<()> {
@@ -498,19 +608,30 @@ impl FaucetClient {
     }
 
     fn persist_state(&self) -> Result<()> {
-        let serialized = serde_json::to_vec_pretty(&self.state)?;
-        let temporary = self.state_path.with_extension("json.tmp");
-        std::fs::write(&temporary, serialized)
-            .with_context(|| format!("failed to write {}", temporary.display()))?;
-        restrict_file(&temporary)?;
-        std::fs::rename(&temporary, &self.state_path)
-            .with_context(|| format!("failed to replace {}", self.state_path.display()))?;
-        restrict_file(&self.state_path)
+        persist_state_to(&self.state_path, &self.state)
     }
 
-    fn finish_pending_account(&mut self) -> Result<()> {
-        self.state.pending_public_account = None;
-        self.persist_state()
+    fn replace_state(&mut self, next_state: FaucetState) -> Result<()> {
+        replace_persisted_state(&self.state_path, &mut self.state, next_state)
+    }
+
+    fn activate_pending_account(&mut self, pending: &PendingPublicAccount) -> Result<()> {
+        let mut next_state = self.state.clone();
+        next_state.active_public_account = Some(ActivePublicAccount {
+            account_id: pending.account_id.clone(),
+            init_tx_hash: pending.init_tx_hash.clone(),
+        });
+        next_state.pending_public_account = None;
+        self.replace_state(next_state)
+    }
+
+    #[must_use]
+    fn cancellation_token(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.cancel_generation)
+    }
+
+    pub fn cancel_pending_work(&self) {
+        self.cancel_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     fn restrict_wallet_files(&self) -> Result<()> {
@@ -520,9 +641,144 @@ impl FaucetClient {
     }
 }
 
+fn initialized_active_account(
+    active: &ActivePublicAccount,
+    current: &Account,
+) -> Result<InitializedAccount> {
+    ensure!(
+        current.program_owner == programs::authenticated_transfer().id(),
+        "active account {} is owned by an unexpected program",
+        active.account_id
+    );
+    Ok(InitializedAccount {
+        account_id: active.account_id.clone(),
+        init_tx_hash: active.init_tx_hash.clone(),
+        balance: current.balance,
+    })
+}
+
+fn persist_state_to(state_path: &Path, state: &FaucetState) -> Result<()> {
+    let serialized = serde_json::to_vec_pretty(state)?;
+    let temporary = state_path.with_extension("json.tmp");
+    std::fs::write(&temporary, serialized)
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    restrict_file(&temporary)?;
+    std::fs::rename(&temporary, state_path)
+        .with_context(|| format!("failed to replace {}", state_path.display()))?;
+    restrict_file(state_path)
+}
+
+fn replace_persisted_state(
+    state_path: &Path,
+    current_state: &mut FaucetState,
+    next_state: FaucetState,
+) -> Result<()> {
+    persist_state_to(state_path, &next_state)?;
+    *current_state = next_state;
+    Ok(())
+}
+
 enum ClaimOutcome {
+    Credited {
+        balance_after: u128,
+        tx_hash: Option<HashType>,
+    },
+    Stale,
+}
+
+#[derive(Debug)]
+struct OutcomeUnknown {
+    tx_hash: Option<String>,
+    detail: String,
+}
+
+impl std::fmt::Display for OutcomeUnknown {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "claim outcome is unknown: {}", self.detail)
+    }
+}
+
+impl std::error::Error for OutcomeUnknown {}
+
+fn reconciliation_timeout_error(
+    tx_hash: Option<String>,
+    last_error: Option<&str>,
+) -> anyhow::Error {
+    OutcomeUnknown {
+        tx_hash,
+        detail: format!(
+            "timed out reconciling claim outcome{}",
+            last_error
+                .map(|error| format!("; last observation error: {error}"))
+                .unwrap_or_default()
+        ),
+    }
+    .into()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClaimObservation {
+    included: Option<bool>,
+    balance: Option<u128>,
+    challenge: Option<[u8; 33]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimDecision {
+    Continue,
     Credited(u128),
     Stale,
+    IncludedWithoutCredit,
+}
+
+fn classify_claim_observation(
+    has_known_tx_hash: bool,
+    balance_before: u128,
+    expected_balance: u128,
+    submitted_challenge: [u8; 33],
+    observation: ClaimObservation,
+) -> Result<ClaimDecision> {
+    if let Some(balance) = observation.balance {
+        ensure!(
+            balance <= expected_balance,
+            "winner balance changed by more than one Piñata prize (before {balance_before}, now {balance})"
+        );
+    }
+
+    let challenge_changed = observation
+        .challenge
+        .is_some_and(|challenge| challenge != submitted_challenge);
+    if observation.balance == Some(expected_balance)
+        && (observation.included == Some(true) || (!has_known_tx_hash && challenge_changed))
+    {
+        return Ok(ClaimDecision::Credited(expected_balance));
+    }
+    if has_known_tx_hash
+        && observation.included == Some(true)
+        && observation.balance == Some(balance_before)
+        && challenge_changed
+    {
+        return Ok(ClaimDecision::IncludedWithoutCredit);
+    }
+    if has_known_tx_hash
+        && observation.included == Some(false)
+        && observation.balance == Some(balance_before)
+        && challenge_changed
+    {
+        return Ok(ClaimDecision::Stale);
+    }
+    Ok(ClaimDecision::Continue)
+}
+
+fn ensure_not_cancelled(
+    cancellation_generation: &AtomicU64,
+    expected_generation: u64,
+) -> Result<()> {
+    ensure!(
+        cancellation_generation.load(Ordering::SeqCst) == expected_generation,
+        "claim cancelled before submission"
+    );
+    Ok(())
 }
 
 fn wallet_overrides(sequencer_url: &str) -> Result<WalletConfigOverrides> {
@@ -546,15 +802,95 @@ fn challenge_bytes(account: &Account) -> Result<[u8; 33]> {
 }
 
 pub fn solve_challenge(challenge: [u8; 33]) -> Result<u128> {
+    solve_challenge_bounded(challenge, DEFAULT_MAX_SOLVE_ATTEMPTS, || false)
+}
+
+fn solve_challenge_bounded(
+    challenge: [u8; 33],
+    max_attempts: u64,
+    cancelled: impl Fn() -> bool,
+) -> Result<u128> {
     let difficulty = usize::from(challenge[0]);
     ensure!(difficulty <= 32, "Piñata difficulty exceeds SHA-256 size");
+    ensure!(
+        difficulty <= usize::from(MAX_SAFE_PINATA_DIFFICULTY),
+        "Piñata difficulty {difficulty} exceeds supported safe maximum {MAX_SAFE_PINATA_DIFFICULTY}"
+    );
+    ensure!(
+        max_attempts > 0,
+        "Piñata solve attempt budget must be positive"
+    );
     let seed = &challenge[1..];
-    for solution in 0..=u128::MAX {
+    for attempt in 0..max_attempts {
+        if attempt % 4_096 == 0 && cancelled() {
+            bail!("Piñata solve cancelled");
+        }
+        let solution = u128::from(attempt);
         if valid_solution(difficulty, seed, solution) {
             return Ok(solution);
         }
     }
-    bail!("Piñata solution space exhausted")
+    bail!("Piñata solve attempt budget exhausted after {max_attempts} attempts")
+}
+
+async fn solve_challenge_with_limits(
+    challenge: [u8; 33],
+    max_attempts: u64,
+    deadline: Duration,
+    cancellation_generation: Arc<AtomicU64>,
+    expected_generation: u64,
+    worker_active: Option<Arc<AtomicBool>>,
+) -> Result<u128> {
+    // Reject impossible or unsupported work before occupying the blocking pool.
+    validate_challenge_difficulty(challenge[0])?;
+    ensure!(
+        max_attempts > 0,
+        "Piñata solve attempt budget must be positive"
+    );
+
+    let timeout_cancelled = Arc::new(AtomicBool::new(false));
+    let worker_timeout_cancelled = Arc::clone(&timeout_cancelled);
+    let worker_cancellation_generation = Arc::clone(&cancellation_generation);
+    let worker_activity = worker_active.clone();
+    let mut task = tokio::task::spawn_blocking(move || {
+        struct ActivityGuard(Option<Arc<AtomicBool>>);
+        impl Drop for ActivityGuard {
+            fn drop(&mut self) {
+                if let Some(active) = &self.0 {
+                    active.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+
+        if let Some(active) = &worker_activity {
+            active.store(true, Ordering::SeqCst);
+        }
+        let _activity_guard = ActivityGuard(worker_activity);
+        solve_challenge_bounded(challenge, max_attempts, || {
+            worker_timeout_cancelled.load(Ordering::Relaxed)
+                || worker_cancellation_generation.load(Ordering::SeqCst) != expected_generation
+        })
+    });
+
+    tokio::select! {
+        result = &mut task => result.context("Piñata solver task failed")?,
+        () = tokio::time::sleep(deadline) => {
+            timeout_cancelled.store(true, Ordering::SeqCst);
+            // A blocking task cannot be aborted after it starts. Cooperatively cancel it
+            // and await its exit so a timed-out solver never continues in the background.
+            let _ = task.await.context("Piñata solver task failed while stopping")?;
+            bail!("Piñata solve timed out after {} ms", deadline.as_millis())
+        }
+    }
+}
+
+fn validate_challenge_difficulty(difficulty: u8) -> Result<()> {
+    ensure!(difficulty <= 32, "Piñata difficulty exceeds SHA-256 size");
+    ensure!(
+        difficulty <= MAX_SAFE_PINATA_DIFFICULTY,
+        "Piñata difficulty {difficulty} exceeds supported safe maximum {MAX_SAFE_PINATA_DIFFICULTY}"
+    );
+    Ok(())
 }
 
 fn valid_solution(difficulty: usize, seed: &[u8], solution: u128) -> bool {
@@ -669,6 +1005,30 @@ where
     })
 }
 
+fn ensure_create_paths_absent(
+    config_path: &Path,
+    storage_path: &Path,
+    state_path: &Path,
+) -> Result<()> {
+    for (kind, path) in [
+        ("wallet config", config_path),
+        ("wallet storage", storage_path),
+        ("faucet state", state_path),
+    ] {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => bail!(
+                "refusing to create a wallet because {kind} already exists at {}",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn prepare_private_path(path: &Path) -> Result<()> {
     let parent = path
         .parent()
@@ -688,8 +1048,13 @@ fn load_state(path: &Path) -> Result<FaucetState> {
     }
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read faucet state from {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse faucet state from {}", path.display()))
+    let state: FaucetState = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse faucet state from {}", path.display()))?;
+    ensure!(
+        state.active_public_account.is_none() || state.pending_public_account.is_none(),
+        "faucet state cannot contain both active and pending public accounts"
+    );
+    Ok(state)
 }
 
 #[cfg(unix)]
@@ -736,11 +1101,19 @@ pub struct FfiCreateOutput {
 
 pub struct FaucetHandle {
     client: Mutex<FaucetClient>,
+    cancel_generation: Arc<AtomicU64>,
 }
 
 /// Called synchronously after each successful claim. The JSON pointer is valid
 /// only for the duration of the callback; copy it before returning.
 pub type FfiProgressCallback = Option<unsafe extern "C" fn(*const c_char, *mut c_void)>;
+
+#[derive(Serialize)]
+struct CreateSuccess<'a> {
+    ok: bool,
+    mnemonic: &'a str,
+    security_warning: &'a str,
+}
 
 fn runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -755,7 +1128,18 @@ fn c_string(value: &str) -> *mut c_char {
 fn json_result<T: Serialize>(result: Result<T>) -> *mut c_char {
     let value = match result {
         Ok(value) => serde_json::json!({ "ok": true, "result": value }),
-        Err(error) => serde_json::json!({ "ok": false, "error": format!("{error:#}") }),
+        Err(error) => {
+            if let Some(unknown) = error.downcast_ref::<OutcomeUnknown>() {
+                serde_json::json!({
+                    "ok": false,
+                    "outcome": "unknown",
+                    "tx_hash": unknown.tx_hash,
+                    "error": format!("{error:#}"),
+                })
+            } else {
+                serde_json::json!({ "ok": false, "error": format!("{error:#}") })
+            }
+        }
     };
     c_string(&value.to_string())
 }
@@ -811,16 +1195,19 @@ pub unsafe extern "C" fn lez_faucet_create(
 
     match result {
         Ok(created) => {
-            let result_json = c_string(
-                &serde_json::json!({
-                    "ok": true,
-                    "mnemonic": created.mnemonic,
-                    "security_warning": created.security_warning,
+            let serialized = Zeroizing::new(
+                serde_json::to_string(&CreateSuccess {
+                    ok: true,
+                    mnemonic: created.mnemonic.as_str(),
+                    security_warning: created.security_warning,
                 })
-                .to_string(),
+                .expect("serializing static wallet creation fields cannot fail"),
             );
+            let result_json = c_string(&serialized);
+            let cancel_generation = created.client.cancellation_token();
             let handle = Box::into_raw(Box::new(FaucetHandle {
                 client: Mutex::new(created.client),
+                cancel_generation,
             }));
             FfiCreateOutput {
                 handle,
@@ -851,18 +1238,22 @@ pub unsafe extern "C" fn lez_faucet_open(
         FaucetClient::open(config_path, storage_path, sequencer_url)
     })();
     match result {
-        Ok(client) => FfiCreateOutput {
-            handle: Box::into_raw(Box::new(FaucetHandle {
-                client: Mutex::new(client),
-            })),
-            result_json: c_string(
-                &serde_json::json!({
-                    "ok": true,
-                    "security_warning": STORAGE_SECURITY_WARNING,
-                })
-                .to_string(),
-            ),
-        },
+        Ok(client) => {
+            let cancel_generation = client.cancellation_token();
+            FfiCreateOutput {
+                handle: Box::into_raw(Box::new(FaucetHandle {
+                    client: Mutex::new(client),
+                    cancel_generation,
+                })),
+                result_json: c_string(
+                    &serde_json::json!({
+                        "ok": true,
+                        "security_warning": STORAGE_SECURITY_WARNING,
+                    })
+                    .to_string(),
+                ),
+            }
+        }
         Err(error) => FfiCreateOutput {
             handle: ptr::null_mut(),
             result_json: json_result::<()>(Err(error)),
@@ -892,7 +1283,26 @@ pub unsafe extern "C" fn lez_faucet_destroy(handle: *mut FaucetHandle) {
 pub unsafe extern "C" fn lez_faucet_string_free(value: *mut c_char) {
     if !value.is_null() {
         // SAFETY: The pointer must have been allocated by `c_string`.
-        unsafe { drop(CString::from_raw(value)) };
+        let mut bytes = unsafe { CString::from_raw(value) }.into_bytes_with_nul();
+        bytes.zeroize();
+    }
+}
+
+/// Request cooperative cancellation before the next transaction submission.
+///
+/// An active solver stops promptly. If submission may already have occurred,
+/// the blocked call first completes bounded reconciliation and returns a
+/// receipt or explicit unknown outcome. This function does not acquire the
+/// wallet lock and is safe to call from a different thread.
+///
+/// # Safety
+/// `handle` must be a live handle returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lez_faucet_cancel(handle: *mut FaucetHandle) {
+    if !handle.is_null() {
+        // SAFETY: The caller contract requires a live handle.
+        let handle = unsafe { &*handle };
+        handle.cancel_generation.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -1008,6 +1418,232 @@ mod tests {
     }
 
     #[test]
+    fn solver_enforces_protocol_safety_budget_and_cancellation() {
+        let zero_difficulty = [0_u8; 33];
+        assert_eq!(solve_challenge(zero_difficulty).unwrap(), 0);
+
+        let mut unsupported = [0_u8; 33];
+        unsupported[0] = MAX_SAFE_PINATA_DIFFICULTY + 1;
+        assert!(solve_challenge(unsupported)
+            .unwrap_err()
+            .to_string()
+            .contains("safe maximum"));
+
+        let mut invalid_protocol = [0_u8; 33];
+        invalid_protocol[0] = 33;
+        assert!(solve_challenge(invalid_protocol)
+            .unwrap_err()
+            .to_string()
+            .contains("SHA-256 size"));
+
+        let mut challenge = [0_u8; 33];
+        challenge[0] = 1;
+        challenge[1..].fill(0x42);
+        assert!(!valid_solution(1, &challenge[1..], 0));
+        assert!(solve_challenge_bounded(challenge, 1, || false)
+            .unwrap_err()
+            .to_string()
+            .contains("attempt budget exhausted"));
+        assert!(solve_challenge_bounded(challenge, 10_000, || true)
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_solver_worker_has_stopped_before_return() {
+        let mut challenge = [0_u8; 33];
+        challenge[0] = MAX_SAFE_PINATA_DIFFICULTY;
+        challenge[1..].fill(0x42);
+        let generation = Arc::new(AtomicU64::new(1));
+        let worker_active = Arc::new(AtomicBool::new(false));
+        let error = solve_challenge_with_limits(
+            challenge,
+            u64::MAX,
+            Duration::from_secs(1),
+            generation,
+            0,
+            Some(Arc::clone(&worker_active)),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cancelled"));
+        assert!(!worker_active.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn timed_out_solver_worker_has_stopped_before_return() {
+        let mut challenge = [0_u8; 33];
+        challenge[0] = MAX_SAFE_PINATA_DIFFICULTY;
+        challenge[1..].fill(0x42);
+        let generation = Arc::new(AtomicU64::new(0));
+        let worker_active = Arc::new(AtomicBool::new(false));
+        let error = solve_challenge_with_limits(
+            challenge,
+            u64::MAX,
+            Duration::ZERO,
+            generation,
+            0,
+            Some(Arc::clone(&worker_active)),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("timed out"));
+        assert!(!worker_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn claim_reconciliation_distinguishes_definite_and_ambiguous_outcomes() {
+        let submitted = [7_u8; 33];
+        let changed = [8_u8; 33];
+        let observation = |included, balance, challenge| ClaimObservation {
+            included,
+            balance,
+            challenge,
+        };
+
+        assert_eq!(
+            classify_claim_observation(
+                true,
+                0,
+                PINATA_PRIZE,
+                submitted,
+                observation(Some(false), Some(0), Some(changed)),
+            )
+            .unwrap(),
+            ClaimDecision::Stale
+        );
+        assert_eq!(
+            classify_claim_observation(
+                true,
+                0,
+                PINATA_PRIZE,
+                submitted,
+                observation(Some(true), Some(PINATA_PRIZE), Some(changed)),
+            )
+            .unwrap(),
+            ClaimDecision::Credited(PINATA_PRIZE)
+        );
+        assert_eq!(
+            classify_claim_observation(
+                true,
+                0,
+                PINATA_PRIZE,
+                submitted,
+                observation(Some(true), Some(0), Some(changed)),
+            )
+            .unwrap(),
+            ClaimDecision::IncludedWithoutCredit
+        );
+        assert_eq!(
+            classify_claim_observation(
+                true,
+                0,
+                PINATA_PRIZE,
+                submitted,
+                observation(None, None, None),
+            )
+            .unwrap(),
+            ClaimDecision::Continue
+        );
+        assert_eq!(
+            classify_claim_observation(
+                true,
+                0,
+                PINATA_PRIZE,
+                submitted,
+                observation(Some(true), Some(PINATA_PRIZE), Some(changed)),
+            )
+            .unwrap(),
+            ClaimDecision::Credited(PINATA_PRIZE)
+        );
+
+        // A transport error after submission has no hash and is never treated as
+        // stale/resubmittable. Challenge movement plus exact credit is sufficient
+        // evidence of success; no credit remains ambiguous until timeout.
+        assert_eq!(
+            classify_claim_observation(
+                false,
+                0,
+                PINATA_PRIZE,
+                submitted,
+                observation(None, Some(PINATA_PRIZE), Some(changed)),
+            )
+            .unwrap(),
+            ClaimDecision::Credited(PINATA_PRIZE)
+        );
+        assert_eq!(
+            classify_claim_observation(
+                false,
+                0,
+                PINATA_PRIZE,
+                submitted,
+                observation(None, Some(0), Some(changed)),
+            )
+            .unwrap(),
+            ClaimDecision::Continue
+        );
+
+        let timeout = reconciliation_timeout_error(Some("known-hash".to_owned()), Some("rpc"));
+        let unknown = timeout.downcast_ref::<OutcomeUnknown>().unwrap();
+        assert_eq!(unknown.tx_hash.as_deref(), Some("known-hash"));
+        assert!(unknown.detail.contains("last observation error: rpc"));
+    }
+
+    #[test]
+    fn active_account_reuse_preserves_identity_and_rejects_wrong_owner() {
+        let active = ActivePublicAccount {
+            account_id: "original-account".to_owned(),
+            init_tx_hash: Some("original-init".to_owned()),
+        };
+        let account = Account {
+            program_owner: programs::authenticated_transfer().id(),
+            balance: 300,
+            ..Account::default()
+        };
+        let first = initialized_active_account(&active, &account).unwrap();
+        let repeated = initialized_active_account(&active, &account).unwrap();
+        assert_eq!(first, repeated);
+        assert_eq!(repeated.account_id, "original-account");
+        assert_eq!(repeated.init_tx_hash.as_deref(), Some("original-init"));
+
+        let original_state = FaucetState {
+            active_public_account: Some(active.clone()),
+            pending_public_account: None,
+        };
+        let wrong_owner = Account::default();
+        assert!(initialized_active_account(&active, &wrong_owner)
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected program"));
+        assert_eq!(
+            original_state.active_public_account.as_ref(),
+            Some(&active),
+            "validating a wrong owner must not clear or replace durable state"
+        );
+    }
+
+    #[test]
+    fn failed_state_write_does_not_mutate_live_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("missing-parent/faucet_state.json");
+        let active = ActivePublicAccount {
+            account_id: "original-account".to_owned(),
+            init_tx_hash: Some("original-init".to_owned()),
+        };
+        let mut current = FaucetState {
+            active_public_account: Some(active),
+            pending_public_account: None,
+        };
+        let original = current.clone();
+        let next = FaucetState::default();
+        assert!(replace_persisted_state(&state_path, &mut current, next).is_err());
+        assert_eq!(current, original);
+    }
+
+    #[test]
     fn fingerprint_includes_pinata_and_rejects_skew() {
         let mut ids = BTreeMap::from([
             (
@@ -1055,7 +1691,7 @@ mod tests {
                 let after = before + PINATA_PRIZE;
                 next_balance.set(after);
                 std::future::ready(Ok(ClaimReceipt {
-                    tx_hash: format!("tx-{after}"),
+                    tx_hash: Some(format!("tx-{after}")),
                     balance_before: before,
                     balance_after: after,
                     stale_challenge_retries: 0,
@@ -1087,6 +1723,48 @@ mod tests {
         assert!(error.contains("requires 7 claims"));
     }
 
+    #[tokio::test]
+    async fn cancel_after_submit_reconciles_current_claim_then_blocks_the_next() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let expected_generation = 0;
+        let attempted_submissions = std::cell::Cell::new(0_usize);
+        let settled_progress = std::cell::RefCell::new(Vec::new());
+
+        let error = run_claim_loop(
+            0,
+            PINATA_PRIZE * 2,
+            2,
+            || {
+                let result = ensure_not_cancelled(&generation, expected_generation).map(|()| {
+                    let before = (attempted_submissions.get() as u128) * PINATA_PRIZE;
+                    attempted_submissions.set(attempted_submissions.get() + 1);
+                    // Model cancellation racing the first submit. Post-submit
+                    // reconciliation still returns its settled receipt.
+                    generation.fetch_add(1, Ordering::SeqCst);
+                    ClaimReceipt {
+                        tx_hash: Some("settled-first-claim".to_owned()),
+                        balance_before: before,
+                        balance_after: before + PINATA_PRIZE,
+                        stale_challenge_retries: 0,
+                    }
+                });
+                std::future::ready(result)
+            },
+            |progress| settled_progress.borrow_mut().push(progress.clone()),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("cancelled before submission"));
+        assert_eq!(attempted_submissions.get(), 1);
+        assert_eq!(settled_progress.borrow().len(), 1);
+        assert_eq!(
+            settled_progress.borrow()[0].receipt.tx_hash.as_deref(),
+            Some("settled-first-claim")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn wallet_paths_are_private() {
@@ -1115,6 +1793,7 @@ mod tests {
         let state_path = temp.path().join("wallet/faucet_state.json");
         prepare_private_path(&state_path).unwrap();
         let state = FaucetState {
+            active_public_account: None,
             pending_public_account: Some(PendingPublicAccount {
                 account_id: "public-account".to_owned(),
                 init_tx_hash: Some("init-hash".to_owned()),
@@ -1162,5 +1841,45 @@ mod tests {
             0o700
         );
         assert_eq!(load_state(&state).unwrap(), FaucetState::default());
+    }
+
+    #[tokio::test]
+    async fn create_refuses_each_existing_artifact_without_modifying_any_path() {
+        for existing_index in 0..3 {
+            let temp = tempfile::tempdir().unwrap();
+            let wallet_dir = temp.path().join("wallet");
+            std::fs::create_dir(&wallet_dir).unwrap();
+            let config = wallet_dir.join("config.json");
+            let storage = wallet_dir.join("storage.json");
+            let state = wallet_dir.join("faucet_state.json");
+            let paths = [&config, &storage, &state];
+            std::fs::write(paths[existing_index], b"do-not-touch").unwrap();
+
+            let error = match FaucetClient::create(
+                &config,
+                &storage,
+                "http://127.0.0.1:3040",
+                "ignored-by-upstream-v0.2.0",
+            )
+            .await
+            {
+                Ok(_) => panic!("creation unexpectedly replaced an existing artifact"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("already exists"));
+            assert_eq!(
+                std::fs::read(paths[existing_index]).unwrap(),
+                b"do-not-touch"
+            );
+            for (index, path) in paths.iter().enumerate() {
+                assert_eq!(
+                    path.exists(),
+                    index == existing_index,
+                    "creation changed {} after refusing existing artifact {}",
+                    path.display(),
+                    paths[existing_index].display()
+                );
+            }
+        }
     }
 }

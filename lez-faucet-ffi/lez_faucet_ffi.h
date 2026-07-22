@@ -71,6 +71,19 @@ void lez_faucet_destroy(struct FaucetHandle *handle);
 void lez_faucet_string_free(char *value);
 
 /**
+ * Request cooperative cancellation before the next transaction submission.
+ *
+ * An active solver stops promptly. If submission may already have occurred,
+ * the blocked call first completes bounded reconciliation and returns a
+ * receipt or explicit unknown outcome. This function does not acquire the
+ * wallet lock and is safe to call from a different thread.
+ *
+ * # Safety
+ * `handle` must be a live handle returned by this library.
+ */
+void lez_faucet_cancel(struct FaucetHandle *handle);
+
+/**
  * Verify that the sequencer's builtin program IDs match the pinned client.
  *
  * # Safety

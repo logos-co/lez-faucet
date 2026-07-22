@@ -52,7 +52,7 @@ async fn create_initialize_and_claim_once_on_public_testnet() {
             .init_tx_hash
             .as_deref()
             .unwrap_or("already-initialized"),
-        receipt.tx_hash,
+        receipt.tx_hash.as_deref().unwrap_or("unknown"),
         receipt.balance_after
     );
 }

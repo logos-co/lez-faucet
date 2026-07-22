@@ -16,6 +16,7 @@ include = [
   "lez_faucet_open",
   "lez_faucet_destroy",
   "lez_faucet_string_free",
+  "lez_faucet_cancel",
   "lez_faucet_verify_fingerprint",
   "lez_faucet_create_and_initialize_account",
   "lez_faucet_get_balance",

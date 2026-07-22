@@ -3373,6 +3373,7 @@ dependencies = [
  "tokio",
  "url",
  "wallet",
+ "zeroize",
 ]
 
 [[package]]
