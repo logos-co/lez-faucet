@@ -3,20 +3,17 @@
 
 #include <QDir>
 #include <QFileInfo>
-#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
-#include <QSettings>
 #include <QStandardPaths>
+#include <QtGlobal>
 
 #include "logos_api.h"
 #include "logos_api_client.h"
 
 namespace {
 constexpr auto CORE_MODULE = "lez_faucet";
-constexpr auto SETTINGS_ORG = "Logos";
-constexpr auto SETTINGS_APP = "LEZFaucetUI";
-constexpr auto ACCOUNT_ID_KEY = "publicAccountId";
+constexpr auto DEFAULT_SEQUENCER_URL = "https://testnet.lez.logos.co";
 const Timeout NO_TIMEOUT{-1};
 }
 
@@ -31,16 +28,24 @@ FaucetBackend::FaucetBackend(LogosAPI* logosAPI, QObject* parent)
 
     setWalletExists(QFileInfo::exists(m_storagePath));
     setBusy(false);
-    setAccountId(QSettings(SETTINGS_ORG, SETTINGS_APP).value(ACCOUNT_ID_KEY).toString());
+    setAccountId(QString());
     setBalance(QString());
     setLastTxHash(QString());
-    setSequencerUrl(QStringLiteral("https://testnet.lez.logos.co"));
+    QString configuredSequencer = qEnvironmentVariable("LEZ_FAUCET_SEQUENCER_URL").trimmed();
+    if (configuredSequencer.isEmpty())
+        configuredSequencer = QString::fromLatin1(DEFAULT_SEQUENCER_URL);
+    setSequencerUrl(configuredSequencer);
     // The pinned Rust surface has no mnemonic-restoration function in v0.1.
     setRecoverySupported(false);
+    setActiveJobId(QString());
+    setActiveJobKind(QString());
 }
 
 FaucetBackend::~FaucetBackend()
 {
+    const auto terminalJobIds = m_terminalResponses.keys();
+    for (const QString& jobId : terminalJobIds)
+        clearTerminalResponse(jobId);
     if (m_logosAPI)
         invokeCore(QStringLiteral("destroy"));
 }
@@ -53,6 +58,13 @@ QString FaucetBackend::localError(const QString& message)
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
+QString FaucetBackend::localSuccess(const QJsonObject& fields)
+{
+    QJsonObject object = fields;
+    object.insert(QStringLiteral("ok"), true);
+    return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+}
+
 QString FaucetBackend::bootstrap()
 {
     QJsonObject object;
@@ -61,6 +73,8 @@ QString FaucetBackend::bootstrap()
     object.insert(QStringLiteral("account_id"), accountId());
     object.insert(QStringLiteral("recovery_supported"), recoverySupported());
     object.insert(QStringLiteral("sequencer_url"), sequencerUrl());
+    object.insert(QStringLiteral("active_job_id"), activeJobId());
+    object.insert(QStringLiteral("active_job_kind"), activeJobKind());
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
@@ -84,6 +98,11 @@ QString FaucetBackend::startCoreJob(
     const QString& method,
     const QVariantList& arguments)
 {
+    if (!activeJobId().isEmpty()) {
+        return localError(QStringLiteral("Another faucet operation is still active: %1")
+                              .arg(activeJobId()));
+    }
+
     const QString response = invokeCore(method, arguments);
     const QJsonObject envelope = parseObject(response);
     if (!succeeded(envelope))
@@ -97,6 +116,8 @@ QString FaucetBackend::startCoreJob(
         return localError(QStringLiteral("Core operation did not return a job ID"));
 
     m_jobKinds.insert(jobId, kind);
+    setActiveJobId(jobId);
+    setActiveJobKind(kind);
     setBusy(true);
     return response;
 }
@@ -154,16 +175,13 @@ void FaucetBackend::applyTerminalResult(const QString& kind, const QJsonObject& 
         setWalletExists(true);
         setAccountId(QString());
         setBalance(QString());
-        QSettings(SETTINGS_ORG, SETTINGS_APP).remove(ACCOUNT_ID_KEY);
         return;
     }
 
     if (kind == QStringLiteral("initialize")) {
         const QString nextAccountId = result.value(QStringLiteral("account_id")).toString();
-        if (!nextAccountId.isEmpty()) {
+        if (!nextAccountId.isEmpty())
             setAccountId(nextAccountId);
-            QSettings(SETTINGS_ORG, SETTINGS_APP).setValue(ACCOUNT_ID_KEY, nextAccountId);
-        }
         const QString nextBalance = scalarString(result.value(QStringLiteral("balance")));
         if (!nextBalance.isEmpty())
             setBalance(nextBalance);
@@ -194,13 +212,31 @@ void FaucetBackend::applyTerminalResult(const QString& kind, const QJsonObject& 
         const QString nextBalance = scalarString(result.value(QStringLiteral("final_balance")));
         if (!nextBalance.isEmpty())
             setBalance(nextBalance);
-        const QJsonArray claims = result.value(QStringLiteral("claims")).toArray();
-        if (!claims.isEmpty()) {
-            const QString txHash = claims.last().toObject().value(QStringLiteral("tx_hash")).toString();
-            if (!txHash.isEmpty())
-                setLastTxHash(txHash);
-        }
     }
+}
+
+void FaucetBackend::applyProgress(const QString& kind, const QJsonObject& status)
+{
+    if (kind != QStringLiteral("claim_target"))
+        return;
+
+    const QJsonObject progress = status.value(QStringLiteral("progress")).toObject();
+    const QString nextBalance = scalarString(progress.value(QStringLiteral("balance")));
+    if (!nextBalance.isEmpty())
+        setBalance(nextBalance);
+    const QString txHash = progress.value(QStringLiteral("receipt")).toObject()
+                               .value(QStringLiteral("tx_hash")).toString();
+    if (!txHash.isEmpty())
+        setLastTxHash(txHash);
+}
+
+void FaucetBackend::clearTerminalResponse(const QString& jobId)
+{
+    auto terminal = m_terminalResponses.find(jobId);
+    if (terminal == m_terminalResponses.end())
+        return;
+    terminal.value().fill(QChar(u'\0'));
+    m_terminalResponses.erase(terminal);
 }
 
 QString FaucetBackend::startCreate(QString password)
@@ -289,6 +325,10 @@ QString FaucetBackend::jobStatus(QString jobId)
     if (jobId.isEmpty())
         return localError(QStringLiteral("Job ID cannot be empty"));
 
+    const auto cached = m_terminalResponses.constFind(jobId);
+    if (cached != m_terminalResponses.constEnd())
+        return cached.value();
+
     const QString response = invokeCore(QStringLiteral("jobStatus"), {jobId});
     const QJsonObject envelope = parseObject(response);
     if (!succeeded(envelope))
@@ -296,20 +336,43 @@ QString FaucetBackend::jobStatus(QString jobId)
 
     const QJsonObject payload = statusPayload(envelope);
     const QString state = payload.value(QStringLiteral("status")).toString().toLower();
+    const QString kind = m_jobKinds.value(jobId);
+    applyProgress(kind, envelope);
     const bool terminal = state == QStringLiteral("completed")
         || state == QStringLiteral("failed")
         || state == QStringLiteral("cancelled");
     if (terminal) {
-        const QString kind = m_jobKinds.take(jobId);
         if (state == QStringLiteral("completed"))
             applyTerminalResult(kind, envelope);
-        setBusy(!m_jobKinds.isEmpty());
-    } else if (m_jobKinds.value(jobId) == QStringLiteral("claim_target")) {
-        const QJsonObject progress = payload.value(QStringLiteral("progress")).toObject();
-        const QString nextBalance = scalarString(progress.value(QStringLiteral("balance")));
-        if (!nextBalance.isEmpty())
-            setBalance(nextBalance);
+        m_terminalResponses.insert(jobId, response);
     }
 
     return response;
+}
+
+QString FaucetBackend::acknowledgeJob(QString jobId)
+{
+    if (jobId.isEmpty())
+        return localError(QStringLiteral("Job ID cannot be empty"));
+
+    // The core owns the authoritative sensitive result. It must acknowledge
+    // and clear that result before this UI-side replay cache can be discarded.
+    const QString coreResponse = invokeCore(QStringLiteral("jobResultAck"), {jobId});
+    const QJsonObject coreEnvelope = parseObject(coreResponse);
+    if (!succeeded(coreEnvelope))
+        return coreResponse;
+
+    const bool known = m_jobKinds.contains(jobId) || m_terminalResponses.contains(jobId);
+    clearTerminalResponse(jobId);
+    m_jobKinds.remove(jobId);
+    if (activeJobId() == jobId) {
+        setActiveJobId(QString());
+        setActiveJobKind(QString());
+    }
+    setBusy(!activeJobId().isEmpty());
+
+    QJsonObject fields;
+    fields.insert(QStringLiteral("job_id"), jobId);
+    fields.insert(QStringLiteral("acknowledged"), known);
+    return localSuccess(fields);
 }

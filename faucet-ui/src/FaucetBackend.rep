@@ -7,6 +7,8 @@ class FaucetBackend
     PROP(QString lastTxHash READONLY)
     PROP(QString sequencerUrl READONLY)
     PROP(bool recoverySupported READONLY)
+    PROP(QString activeJobId READONLY)
+    PROP(QString activeJobKind READONLY)
 
     // Operations start native jobs and return {"ok":true,"job_id":"..."}
     // immediately. jobStatus() returns queued/running/progress/terminal JSON.
@@ -22,4 +24,7 @@ class FaucetBackend
     SLOT(QString startClaimUntilTarget(QString target, int maxClaims))
     SLOT(QString cancelJob(QString jobId))
     SLOT(QString jobStatus(QString jobId))
+    // Terminal envelopes, including the create mnemonic, remain replayable in
+    // this backend until the view confirms it has safely handled them.
+    SLOT(QString acknowledgeJob(QString jobId))
 }

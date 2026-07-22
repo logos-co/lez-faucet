@@ -19,10 +19,12 @@ Rectangle {
     property string errorText: ""
     property string technicalDetails: ""
     property string mnemonicText: ""
+    property string mnemonicJobId: ""
     property string targetText: "1000"
     property int completedClaims: 0
     property int requiredClaims: 0
     property bool stopRequested: false
+    property bool cancelRequestPending: false
     property string activeJobId: ""
     property string activeJobKind: ""
     property string activeJobResumeState: "welcome"
@@ -69,11 +71,14 @@ Rectangle {
     }
 
     function routeError(message, safeResumeState) {
-        var category = FaucetFlow.classifyError(message)
-        errorText = String(message || "Operation failed")
-        technicalDetails = errorText
+        var category = FaucetFlow.classifyJobError(message)
+        errorText = errorMessage(message)
+        technicalDetails = typeof message === "object" ? JSON.stringify(message) : errorText
         if (category === "version_mismatch") {
             screenState = "version_mismatch"
+        } else if (category === "outcome_unknown") {
+            resumeState = "ready"
+            screenState = "outcome_unknown"
         } else if (category === "stale") {
             resumeState = safeResumeState || "ready"
             screenState = "stale"
@@ -96,11 +101,33 @@ Rectangle {
                 routeError(envelope.error, "welcome")
                 return
             }
+            var pendingJobId = String(envelope.active_job_id || backend.activeJobId || "")
+            var pendingJobKind = String(envelope.active_job_kind || backend.activeJobKind || "")
+            if (pendingJobId !== "" && pendingJobKind !== "") {
+                resumeJob(pendingJobId, pendingJobKind)
+                return
+            }
             if (envelope.wallet_exists)
                 openExistingWallet()
             else
                 screenState = "welcome"
         }, function(error) { routeError(error, "welcome") })
+    }
+
+    function resumeJob(jobId, kind) {
+        var screens = {
+            "create": "creating", "open": "opening", "verify": "compatibility",
+            "initialize": "initializing", "balance": "booting",
+            "claim_once": "claiming_once", "claim_target": "claiming_target"
+        }
+        activeJobId = jobId
+        activeJobKind = kind
+        activeJobResumeState = kind === "create" ? "welcome"
+            : (kind === "initialize" ? "initialization_required" : "ready")
+        screenState = screens[kind] || "booting"
+        statusText = "Reconnecting to the in-progress faucet operation…"
+        jobPollTimer.start()
+        pollActiveJob()
     }
 
     function openExistingWallet() {
@@ -131,15 +158,27 @@ Rectangle {
     }
 
     function acknowledgeMnemonic() {
-        mnemonicText = ""
-        verifyCompatibility("initialization_required")
+        if (mnemonicJobId === "")
+            return
+        var acknowledgedJobId = mnemonicJobId
+        watch(backend.acknowledgeJob(acknowledgedJobId), function(raw) {
+            var envelope = parseEnvelope(raw)
+            if (!envelope.ok) {
+                errorText = envelope.error
+                return
+            }
+            mnemonicText = ""
+            mnemonicJobId = ""
+            mnemonicAcknowledged.checked = false
+            verifyCompatibility("initialization_required")
+        }, function(error) { errorText = error })
     }
 
-    function initializeAccount() {
+    function initializeAccount(successState) {
         screenState = "initializing"
         statusText = "Initializing account on testnet…"
         watch(backend.startInitializeAccount(), function(raw) {
-            startJob(raw, "initialize", "initialization_required")
+            startJob(raw, "initialize", successState || "initialization_required")
         }, function(error) { routeError(error, "initialization_required") })
     }
 
@@ -212,6 +251,27 @@ Rectangle {
         jobPollInFlight = false
     }
 
+    function pauseActiveJob() {
+        jobPollTimer.stop()
+        jobPollInFlight = false
+    }
+
+    function acknowledgeTerminalJob(jobId, onAcknowledged) {
+        watch(backend.acknowledgeJob(jobId), function(raw) {
+            var envelope = parseEnvelope(raw)
+            if (FaucetFlow.ackDisposition(envelope) !== "clear") {
+                statusText = "Could not acknowledge the result; reconnecting…"
+                jobPollTimer.start()
+                return
+            }
+            clearActiveJob()
+            onAcknowledged()
+        }, function(error) {
+            statusText = "Connection interrupted while acknowledging the result; reconnecting…"
+            jobPollTimer.start()
+        })
+    }
+
     function pollActiveJob() {
         if (activeJobId === "" || jobPollInFlight)
             return
@@ -223,57 +283,67 @@ Rectangle {
                 return
             var envelope = parseEnvelope(raw)
             if (!envelope.ok) {
-                var failedResume = activeJobResumeState
-                clearActiveJob()
-                routeError(envelope.error, failedResume)
+                statusText = "Connection interrupted; retrying this operation…"
+                errorText = envelope.error
                 return
             }
             var payload = envelope
-            var state = String(payload.status || "running").toLowerCase()
-            var progress = payload.progress || {}
-            if (progress.completed_claims !== undefined)
-                completedClaims = Number(progress.completed_claims)
-            if (progress.required_claims !== undefined)
-                requiredClaims = Number(progress.required_claims)
+            var update = FaucetFlow.reduceJobEnvelope(
+                payload, completedClaims, requiredClaims, balanceText)
+            var state = update.state
+            completedClaims = update.completedClaims
+            requiredClaims = update.requiredClaims
             if (payload.phase)
                 statusText = String(payload.phase)
             else if (activeJobKind === "claim_once" || activeJobKind === "claim_target")
                 statusText = "Computing a solution and waiting for confirmation…"
 
-            if (state === "queued" || state === "running" || state === "cancelling")
+            if (!update.terminal)
                 return
 
             var finishedKind = activeJobKind
             var finishedResume = activeJobResumeState
             var operationResult = normalizeOperationResult(payload.result)
-            clearActiveJob()
+            pauseActiveJob()
 
-            if (state === "cancelled") {
-                screenState = "ready"
-                statusText = "Stopped after the submitted claim"
+            if (state === "completed" && finishedKind === "create") {
+                mnemonicJobId = polledJobId
+                clearActiveJob()
+                handleJobSuccess(finishedKind, operationResult || {}, finishedResume)
                 return
             }
-            if (state !== "completed") {
-                routeError(errorMessage(payload.error || (operationResult && operationResult.error)), finishedResume)
-                return
-            }
-            if (operationResult && operationResult.ok === false) {
-                routeError(operationResult.error, finishedResume)
-                return
-            }
-            handleJobSuccess(finishedKind, operationResult || {}, finishedResume)
+
+            acknowledgeTerminalJob(polledJobId, function() {
+                cancelRequestPending = false
+                if (state === "cancelled") {
+                    screenState = "ready"
+                    statusText = completedClaims > 0
+                        ? qsTr("Stopped after %1 confirmed claim(s)").arg(completedClaims)
+                        : qsTr("Stopped before another claim was submitted")
+                    refreshBalance()
+                    return
+                }
+                if (state !== "completed") {
+                    routeError(payload.error || (operationResult && operationResult.error), finishedResume)
+                    return
+                }
+                if (operationResult && operationResult.ok === false) {
+                    routeError(operationResult.error, finishedResume)
+                    return
+                }
+                handleJobSuccess(finishedKind, operationResult || {}, finishedResume)
+            })
         }, function(error) {
             jobPollInFlight = false
-            var failedResume = activeJobResumeState
-            clearActiveJob()
-            routeError(error, failedResume)
+            errorText = String(error || "Connection interrupted")
+            statusText = "Connection interrupted; retrying this operation…"
         })
     }
 
     function handleJobSuccess(kind, result, successState) {
         if (kind === "create") {
-            // This is the only retained UI copy. jobStatus must consume the
-            // native create result, and the backend exposes no mnemonic property.
+            // The backend/core replay this terminal result until the user
+            // explicitly acknowledges it; no mnemonic is exposed as a property.
             mnemonicText = String(result.mnemonic || "")
             if (mnemonicText === "") {
                 routeError("Wallet created without a recovery phrase", "initialization_required")
@@ -281,10 +351,12 @@ Rectangle {
             }
             screenState = "mnemonic"
         } else if (kind === "open") {
-            verifyCompatibility(hasAccount ? "ready" : "initialization_required")
+            verifyCompatibility("resume_account")
         } else if (kind === "verify") {
             technicalDetails = JSON.stringify(result)
-            if (successState === "ready")
+            if (successState === "resume_account")
+                initializeAccount("ready")
+            else if (successState === "ready")
                 refreshBalance()
             else
                 screenState = successState
@@ -300,20 +372,37 @@ Rectangle {
                 ? "150 LEZ claimed after refreshing a stale challenge" : "150 LEZ claimed"
         } else if (kind === "claim_target") {
             screenState = "ready"
-            statusText = stopRequested ? "Stopped after the submitted claim" : "Target reached"
+            statusText = "Target reached"
         }
     }
 
     function requestStop() {
-        stopRequested = true
         if (activeJobId !== "") {
+            cancelRequestPending = true
             screenState = "cancelling"
             statusText = "Stopping… A submitted claim cannot be cancelled."
             watch(backend.cancelJob(activeJobId), function(raw) {
                 var envelope = parseEnvelope(raw)
-                if (!envelope.ok)
+                cancelRequestPending = false
+                if (!envelope.ok) {
                     errorText = envelope.error
-            }, function(error) { errorText = error })
+                    screenState = "claiming_target"
+                    statusText = "Could not request stop; claim-to-target continues."
+                    return
+                }
+                if (FaucetFlow.cancelAcknowledged(envelope)) {
+                    stopRequested = true
+                    statusText = "Stop requested. Waiting for any submitted claim to settle…"
+                } else {
+                    screenState = "claiming_target"
+                    statusText = "The faucet did not acknowledge the stop request; claim-to-target continues."
+                }
+            }, function(error) {
+                cancelRequestPending = false
+                errorText = error
+                screenState = "claiming_target"
+                statusText = "Could not request stop; claim-to-target continues."
+            })
         } else {
             screenState = "ready"
             statusText = "Stopped"
@@ -482,7 +571,7 @@ Rectangle {
                     color: Theme.palette.text
                 }
                 LogosText {
-                    text: qsTr("This is the only time LEZ Faucet will show this phrase. Save it somewhere private. If you close this screen, it cannot be shown again.")
+                    text: qsTr("Save it somewhere private before continuing. LEZ Faucet will forget the phrase as soon as you confirm that it is saved.")
                     color: Theme.palette.textSecondary
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
@@ -496,7 +585,7 @@ Rectangle {
                     color: Theme.palette.text
                     background: Rectangle {
                         color: Theme.palette.backgroundSecondary
-                        radius: Theme.spacing.radiusMedium
+                        radius: Theme.spacing.radiusLarge
                         border.color: Theme.palette.backgroundElevated
                     }
                 }
@@ -580,7 +669,7 @@ Rectangle {
                         Layout.fillWidth: true
                         placeholderText: qsTr("Target balance")
                         text: root.targetText
-                        validator: IntValidator { bottom: 1; top: 1000000 }
+                        textInput.validator: IntValidator { bottom: 1; top: 1000000 }
                         onTextChanged: root.targetText = text
                     }
                     LogosButton {
@@ -673,6 +762,28 @@ Rectangle {
             }
 
             ColumnLayout {
+                visible: root.screenState === "outcome_unknown"
+                Layout.fillWidth: true
+                spacing: Theme.spacing.medium
+                LogosText {
+                    text: qsTr("Claim outcome needs reconciliation")
+                    font.pixelSize: Theme.typography.titleText
+                    font.weight: Theme.typography.weightBold
+                    color: Theme.palette.warning
+                }
+                LogosText {
+                    text: qsTr("The claim was submitted, but the faucet could not prove whether it was included. Do not submit another claim yet: reconcile the balance first to avoid a duplicate attempt.")
+                    color: Theme.palette.textSecondary
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                LogosButton {
+                    text: qsTr("Reconcile balance")
+                    onClicked: root.verifyCompatibility("ready")
+                }
+            }
+
+            ColumnLayout {
                 visible: root.screenState === "offline"
                 Layout.fillWidth: true
                 spacing: Theme.spacing.medium
@@ -683,7 +794,7 @@ Rectangle {
                     color: Theme.palette.text
                 }
                 LogosText {
-                    text: qsTr("Your wallet is unchanged. The displayed balance may be out of date.")
+                    text: qsTr("The operation could not be confirmed. The displayed balance may be out of date; reconnect and refresh it before submitting another claim.")
                     color: Theme.palette.textSecondary
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true

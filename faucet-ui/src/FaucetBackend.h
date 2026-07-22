@@ -32,6 +32,7 @@ public slots:
     QString startClaimUntilTarget(QString target, int maxClaims) override;
     QString cancelJob(QString jobId) override;
     QString jobStatus(QString jobId) override;
+    QString acknowledgeJob(QString jobId) override;
 
 private:
     QString invokeCore(const QString& method, const QVariantList& arguments = {});
@@ -44,12 +45,16 @@ private:
     static QJsonValue completedResult(const QJsonObject& object);
     static QString scalarString(const QJsonValue& value);
     static QString localError(const QString& message);
+    static QString localSuccess(const QJsonObject& fields = {});
+    void applyProgress(const QString& kind, const QJsonObject& status);
     void applyTerminalResult(const QString& kind, const QJsonObject& status);
+    void clearTerminalResponse(const QString& jobId);
 
     LogosAPI* m_logosAPI = nullptr;
     QString m_configPath;
     QString m_storagePath;
     QHash<QString, QString> m_jobKinds;
+    QHash<QString, QString> m_terminalResponses;
 };
 
 #endif
