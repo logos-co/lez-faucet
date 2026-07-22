@@ -81,7 +81,12 @@ these operations in order:
 5. Confirm the account is no longer the default uninitialized state.
 6. Fetch the current pinata challenge and compute its solution.
 7. Submit one unsigned public pinata claim.
-8. Poll inclusion and assert that the account balance increased by exactly 150.
+8. Reconcile the transaction, current challenge, and account balance. Normal
+   success proves inclusion and an exact balance increase of 150. If the
+   submission response was lost and no transaction hash is available, that
+   exact balance increase together with challenge rotation proves success with
+   a null `tx_hash`. If the evidence remains ambiguous, return an explicit
+   unknown outcome and do not resubmit.
 
 For “claim until target,” repeat steps 6–8 sequentially. The pinata program
 hashes its seed after each successful claim, so an old solution cannot safely be
@@ -102,7 +107,8 @@ Success evidence must include:
 
 - the new public account ID;
 - initialization transaction ID;
-- claim transaction ID;
+- claim transaction ID when available, otherwise an explicit unknown-hash
+  marker backed by the exact balance/challenge reconciliation;
 - balance before and after the claim;
 - an assertion that `after == before + 150`.
 

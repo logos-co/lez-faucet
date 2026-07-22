@@ -41,7 +41,9 @@ app entry point. Restart Basecamp if a newly installed view does not appear.
 1. Leave the sequencer set to `https://testnet.lez.logos.co` unless you are
    deliberately using a compatible localnet.
 2. Read and accept the plaintext-wallet warning.
-3. Choose local config and storage paths, and create the wallet.
+3. Create the wallet. LEZ Faucet stores its config, plaintext wallet, and faucet
+   state under Basecamp's application-data directory; v0.1 does not expose a
+   custom path chooser.
 4. Save the recovery mnemonic from the one-time recovery screen. It cannot be
    shown again by the app.
 5. Create and initialize the public account. Wait for the initialization
@@ -50,9 +52,13 @@ app entry point. Restart Basecamp if a newly installed view does not appear.
    target**. The app confirms each claim before starting the next one.
 
 The public testnet can take tens of seconds to include a transaction. Do not
-close Basecamp while an initialization or claim is pending. A submission is not
-reported as successful until inclusion and the expected balance change are
-observed.
+close Basecamp while an initialization or claim is pending. Normal claim
+success proves transaction inclusion and the exact `+150` balance change. If a
+submission response is lost, the faucet may instead prove success from that
+exact balance change plus pinata challenge rotation; the receipt then has no
+transaction hash. If it cannot prove success or a safe retry, it reports an
+unknown outcome and does not submit another claim. Reconcile the balance before
+trying again.
 
 ## Security warning
 
@@ -77,5 +83,8 @@ Testnet LEZ has no monetary value. This app must not be used for mainnet funds.
   retry only after the account state is visible from the sequencer.
 - **Claim solution rejected:** refresh the pinata challenge. Another successful
   claim changes the challenge seed.
+- **Claim outcome unknown:** do not immediately claim again. Reconnect and
+  refresh the balance first; the prior submission may have been accepted even
+  though its transaction hash or final polling response was lost.
 - **Catalog is empty:** verify that the `index` release contains `index.json`
   and that both module releases carry an `.lgx` and `sidecar.json`.

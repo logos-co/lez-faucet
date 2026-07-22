@@ -3,7 +3,7 @@ version = "0.2.0"
 cache_root = ".scaffold/lez-cache"
 
 [repos.lez]
-source = "git@github.com:logos-blockchain/logos-execution-zone.git"
+source = "https://github.com/logos-blockchain/logos-execution-zone.git"
 pin = "a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 path = ".scaffold/lez-cache/repos/lez/a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 

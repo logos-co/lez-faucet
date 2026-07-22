@@ -54,11 +54,16 @@ faucet-module/   Universal C++ Basecamp core module (`lez_faucet`)
 faucet-ui/       QML view module (`lez_faucet_ui`)
 ```
 
-The Rust layer owns the full transaction lifecycle. In particular, each pinata
-claim fetches the current challenge, solves it, submits one transaction, waits
-for inclusion, and verifies the 150 LEZ balance increase before another claim
-starts. Claims cannot be precomputed or submitted concurrently because every
-successful claim rotates the challenge.
+The Rust layer owns the full transaction lifecycle. Each pinata claim fetches
+the current challenge, solves it, submits at most one transaction, and then
+reconciles the transaction, challenge, and account balance before another claim
+starts. Normal success proves both inclusion and an exact 150 LEZ balance
+increase. If the submission response is lost and no transaction hash is
+available, the same exact `+150` balance change together with challenge rotation
+can prove success; that receipt has a null `tx_hash`. If neither success nor a
+safe retry can be proven, the operation returns an explicit unknown outcome and
+does not resubmit. Claims cannot be precomputed or submitted concurrently
+because every successful claim rotates the challenge.
 
 ## Development
 
@@ -82,6 +87,10 @@ module paths during pure Nix evaluation; treat the filtered builds and direct
 `nix build ...#lgx-portable` commands as the reliable fallback while that
 upstream issue remains.
 
+Scaffold localnet uses the fixed port `3040`. Run at most one localnet at a time
+across Conductor workspaces or other checkouts of this repository to avoid a
+port collision.
+
 The opt-in public-testnet integration test creates and initializes a fresh
 account and consumes one 150 LEZ claim:
 
@@ -91,8 +100,9 @@ LEZ_FAUCET_LIVE_TEST=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
   -- --ignored --nocapture
 ```
 
-It must report transaction IDs and balances but never the mnemonic, password,
-or key material.
+It must report the initialization transaction ID, the claim transaction ID when
+available (otherwise an explicit unknown-hash marker), and balances, but never
+the mnemonic, password, or key material.
 
 ## Install and release
 
