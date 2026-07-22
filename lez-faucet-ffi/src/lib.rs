@@ -44,6 +44,7 @@ const DEFAULT_STALE_RETRIES: usize = 3;
 const DEFAULT_SOLVE_DEADLINE: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_SOLVE_ATTEMPTS: u64 = 1 << 28;
 const MAX_SAFE_PINATA_DIFFICULTY: u8 = 3;
+static CREATE_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct FaucetPolicy {
@@ -143,6 +144,14 @@ struct PendingPublicAccount {
     init_tx_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateStep {
+    PersistWallet,
+    PersistState,
+    StoreConfigChanges,
+    RestrictWalletFiles,
+}
+
 impl FaucetClient {
     pub async fn create(
         config_path: impl Into<PathBuf>,
@@ -150,22 +159,75 @@ impl FaucetClient {
         sequencer_url: &str,
         password: &str,
     ) -> Result<CreatedWallet> {
-        let config_path = config_path.into();
-        let storage_path = storage_path.into();
+        Self::create_with_hook(
+            config_path.into(),
+            storage_path.into(),
+            sequencer_url,
+            password,
+            |_| Ok(()),
+        )
+        .await
+    }
+
+    async fn create_with_hook(
+        config_path: PathBuf,
+        storage_path: PathBuf,
+        sequencer_url: &str,
+        password: &str,
+        after_step: impl Fn(CreateStep) -> Result<()>,
+    ) -> Result<CreatedWallet> {
         let state_path = state_path_for(&storage_path);
         ensure_create_paths_absent(&config_path, &storage_path, &state_path)?;
         prepare_private_path(&config_path)?;
         prepare_private_path(&storage_path)?;
 
+        let mut creation = WalletCreation::new(&config_path, &storage_path, &state_path)?;
+        let staged_config_path = creation.staged_path(CreateArtifact::Config).to_owned();
+        let staged_storage_path = creation.staged_path(CreateArtifact::Storage).to_owned();
+        let staged_state_path = creation.staged_path(CreateArtifact::State).to_owned();
+
         let overrides = wallet_overrides(sequencer_url)?;
         let (wallet, mnemonic) = WalletCore::new_init_storage(
-            config_path.clone(),
-            storage_path.clone(),
+            staged_config_path.clone(),
+            staged_storage_path.clone(),
             Some(overrides),
             password,
         )
         .context("failed to create LEZ wallet")?;
 
+        let staged_client = Self {
+            wallet,
+            config_path: staged_config_path,
+            storage_path: staged_storage_path,
+            state_path: staged_state_path,
+            state: FaucetState::default(),
+            policy: FaucetPolicy::default(),
+            cancel_generation: Arc::new(AtomicU64::new(0)),
+        };
+        staged_client
+            .wallet
+            .store_persistent_data()
+            .context("failed to persist wallet storage")?;
+        after_step(CreateStep::PersistWallet)?;
+        staged_client.persist_state()?;
+        after_step(CreateStep::PersistState)?;
+        staged_client
+            .wallet
+            .store_config_changes()
+            .await
+            .context("failed to persist wallet config")?;
+        after_step(CreateStep::StoreConfigChanges)?;
+        staged_client.restrict_wallet_files()?;
+        after_step(CreateStep::RestrictWalletFiles)?;
+        drop(staged_client);
+
+        creation.publish()?;
+        let wallet = WalletCore::new_update_chain(
+            config_path.clone(),
+            storage_path.clone(),
+            Some(wallet_overrides(sequencer_url)?),
+        )
+        .context("failed to reopen newly created LEZ wallet")?;
         let client = Self {
             wallet,
             config_path,
@@ -175,14 +237,8 @@ impl FaucetClient {
             policy: FaucetPolicy::default(),
             cancel_generation: Arc::new(AtomicU64::new(0)),
         };
-        client.persist_wallet()?;
-        client.persist_state()?;
-        client
-            .wallet
-            .store_config_changes()
-            .await
-            .context("failed to persist wallet config")?;
         client.restrict_wallet_files()?;
+        creation.commit()?;
 
         Ok(CreatedWallet {
             client,
@@ -1005,6 +1061,163 @@ where
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CreateArtifact {
+    Config = 0,
+    Storage = 1,
+    State = 2,
+}
+
+#[derive(Debug)]
+struct StagedArtifact {
+    staged: PathBuf,
+    final_path: PathBuf,
+    published: bool,
+    #[cfg(unix)]
+    published_identity: Option<FileIdentity>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+/// Owns only uniquely named staging files and final hard links published by
+/// this creation attempt. A failed attempt can therefore clean up without
+/// deleting a path another process created after the initial absence check.
+struct WalletCreation {
+    artifacts: [StagedArtifact; 3],
+    committed: bool,
+}
+
+impl WalletCreation {
+    fn new(config_path: &Path, storage_path: &Path, state_path: &Path) -> Result<Self> {
+        let sequence = CREATE_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let process_id = std::process::id();
+        let staged = |final_path: &Path, kind: &str| -> Result<PathBuf> {
+            let parent = final_path
+                .parent()
+                .with_context(|| format!("{} has no parent directory", final_path.display()))?;
+            Ok(parent.join(format!(".lez-faucet-create-{process_id}-{sequence}-{kind}")))
+        };
+        let artifacts = [
+            StagedArtifact {
+                staged: staged(config_path, "config")?,
+                final_path: config_path.to_owned(),
+                published: false,
+                #[cfg(unix)]
+                published_identity: None,
+            },
+            StagedArtifact {
+                staged: staged(storage_path, "storage")?,
+                final_path: storage_path.to_owned(),
+                published: false,
+                #[cfg(unix)]
+                published_identity: None,
+            },
+            StagedArtifact {
+                staged: staged(state_path, "state")?,
+                final_path: state_path.to_owned(),
+                published: false,
+                #[cfg(unix)]
+                published_identity: None,
+            },
+        ];
+        for artifact in &artifacts {
+            ensure_path_absent(&artifact.staged, "wallet creation staging file")?;
+        }
+        ensure_path_absent(
+            &artifacts[CreateArtifact::State as usize]
+                .staged
+                .with_extension("json.tmp"),
+            "wallet creation temporary state file",
+        )?;
+        Ok(Self {
+            artifacts,
+            committed: false,
+        })
+    }
+
+    fn staged_path(&self, artifact: CreateArtifact) -> &Path {
+        &self.artifacts[artifact as usize].staged
+    }
+
+    fn publish(&mut self) -> Result<()> {
+        for artifact in &mut self.artifacts {
+            std::fs::hard_link(&artifact.staged, &artifact.final_path).with_context(|| {
+                format!(
+                    "failed to publish newly created wallet artifact {}",
+                    artifact.final_path.display()
+                )
+            })?;
+            artifact.published = true;
+            #[cfg(unix)]
+            {
+                artifact.published_identity = Some(file_identity(&artifact.staged)?);
+            }
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        for artifact in &self.artifacts {
+            std::fs::remove_file(&artifact.staged).with_context(|| {
+                format!(
+                    "failed to remove wallet creation staging file {}",
+                    artifact.staged.display()
+                )
+            })?;
+        }
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for WalletCreation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for artifact in self.artifacts.iter().rev() {
+            if artifact.published && published_path_is_owned(artifact) {
+                let _ = std::fs::remove_file(&artifact.final_path);
+            }
+            let _ = std::fs::remove_file(&artifact.staged);
+        }
+        let state_temporary = self.artifacts[CreateArtifact::State as usize]
+            .staged
+            .with_extension("json.tmp");
+        let _ = std::fs::remove_file(state_temporary);
+    }
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to inspect created artifact {}", path.display()))?;
+    Ok(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(unix)]
+fn published_path_is_owned(artifact: &StagedArtifact) -> bool {
+    artifact.published_identity.is_some_and(|identity| {
+        file_identity(&artifact.final_path)
+            .is_ok_and(|current_identity| current_identity == identity)
+    })
+}
+
+#[cfg(not(unix))]
+fn published_path_is_owned(artifact: &StagedArtifact) -> bool {
+    artifact.published
+}
+
 fn ensure_create_paths_absent(
     config_path: &Path,
     storage_path: &Path,
@@ -1015,18 +1228,20 @@ fn ensure_create_paths_absent(
         ("wallet storage", storage_path),
         ("faucet state", state_path),
     ] {
-        match std::fs::symlink_metadata(path) {
-            Ok(_) => bail!(
-                "refusing to create a wallet because {kind} already exists at {}",
-                path.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
-            }
-        }
+        ensure_path_absent(path, kind)?;
     }
     Ok(())
+}
+
+fn ensure_path_absent(path: &Path, kind: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => bail!(
+            "refusing to create a wallet because {kind} already exists at {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
 }
 
 fn prepare_private_path(path: &Path) -> Result<()> {
@@ -1841,6 +2056,97 @@ mod tests {
             0o700
         );
         assert_eq!(load_state(&state).unwrap(), FaucetState::default());
+    }
+
+    #[tokio::test]
+    async fn create_rolls_back_every_fallible_persistence_step() {
+        for failure_point in [
+            CreateStep::PersistWallet,
+            CreateStep::PersistState,
+            CreateStep::StoreConfigChanges,
+            CreateStep::RestrictWalletFiles,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let wallet_dir = temp.path().join("wallet");
+            let config = wallet_dir.join("config.json");
+            let storage = wallet_dir.join("storage.json");
+            let state = wallet_dir.join("faucet_state.json");
+            let error = match FaucetClient::create_with_hook(
+                config.clone(),
+                storage.clone(),
+                "http://127.0.0.1:3040",
+                "ignored-by-upstream-v0.2.0",
+                |completed_step| {
+                    ensure!(
+                        completed_step != failure_point,
+                        "injected failure after {failure_point:?}"
+                    );
+                    Ok(())
+                },
+            )
+            .await
+            {
+                Ok(_) => panic!("injected wallet creation failure should propagate"),
+                Err(error) => error,
+            };
+            assert!(error
+                .to_string()
+                .contains(&format!("injected failure after {failure_point:?}")));
+            for path in [&config, &storage, &state] {
+                assert!(
+                    !path.exists(),
+                    "failed creation left artifact {}",
+                    path.display()
+                );
+            }
+            assert_eq!(
+                std::fs::read_dir(&wallet_dir).unwrap().count(),
+                0,
+                "failed creation left a staging artifact after {failure_point:?}"
+            );
+
+            let retry = FaucetClient::create(
+                &config,
+                &storage,
+                "http://127.0.0.1:3040",
+                "ignored-by-upstream-v0.2.0",
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("retry after {failure_point:?} rollback failed: {error:#}")
+            });
+            drop(retry);
+        }
+    }
+
+    #[test]
+    fn creation_publish_never_removes_a_competing_final_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let wallet_dir = temp.path().join("wallet");
+        std::fs::create_dir(&wallet_dir).unwrap();
+        let config = wallet_dir.join("config.json");
+        let storage = wallet_dir.join("storage.json");
+        let state = wallet_dir.join("faucet_state.json");
+        let mut creation = WalletCreation::new(&config, &storage, &state).unwrap();
+        for artifact in [
+            CreateArtifact::Config,
+            CreateArtifact::Storage,
+            CreateArtifact::State,
+        ] {
+            std::fs::write(creation.staged_path(artifact), b"created-by-wallet").unwrap();
+        }
+
+        // Simulate another creator winning the race after the absence check,
+        // and after this transaction has published its first two hard links.
+        std::fs::write(&state, b"created-by-someone-else").unwrap();
+        let error = creation.publish().unwrap_err();
+        assert!(error.to_string().contains("failed to publish"));
+        drop(creation);
+
+        assert!(!config.exists());
+        assert!(!storage.exists());
+        assert_eq!(std::fs::read(&state).unwrap(), b"created-by-someone-else");
+        assert_eq!(std::fs::read_dir(&wallet_dir).unwrap().count(), 1);
     }
 
     #[tokio::test]
