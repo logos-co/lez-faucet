@@ -289,11 +289,24 @@ LezFaucetModule::LezFaucetModule() = default;
 LezFaucetModule::~LezFaucetModule()
 {
     m_stopping.store(true);
+    bool interruptActiveClaim = false;
     {
         std::lock_guard<std::mutex> jobsLock(m_jobsMutex);
         for (const auto& entry : m_jobs) {
             std::lock_guard<std::mutex> jobLock(entry.second->mutex);
+            interruptActiveClaim = interruptActiveClaim
+                || (entry.second->status == "running"
+                    && (entry.second->operation == "claim_once"
+                        || entry.second->operation == "claim_until_target"));
             entry.second->cancelRequested = true;
+        }
+    }
+    // A running claim holds m_operationMutex, so no queued destroy job can
+    // free this handle while Rust observes the cooperative cancellation.
+    // Queued claims see m_stopping and never enter the FFI.
+    if (interruptActiveClaim) {
+        if (FaucetHandle* handle = m_handle.load(); handle != nullptr) {
+            lez_faucet_cancel(handle);
         }
     }
     std::vector<JobPtr> jobs;

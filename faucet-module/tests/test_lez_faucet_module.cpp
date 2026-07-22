@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -179,6 +180,58 @@ void cancellationCanStopBeforeSubmission()
     CHECK(MockLezFaucetFfi::balance() == 0);
 }
 
+void shutdownCancelsActiveSolveBeforeJoining()
+{
+    MockLezFaucetFfi::reset();
+    MockLezFaucetFfi::setCancelStopsClaim(true);
+    MockLezFaucetFfi::setClaimWaitsForCancel(true);
+    auto module = std::make_unique<LezFaucetModule>();
+    startAndWait(*module, module->open("config.json", "wallet.json", "https://testnet"));
+    const std::string started = module->claimOnce("MockAccount");
+    CHECK(started.find("\"ok\":true") != std::string::npos);
+    CHECK(MockLezFaucetFfi::waitForClaimStart(500));
+
+    const auto before = std::chrono::steady_clock::now();
+    module.reset();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - before);
+
+    CHECK(elapsed.count() < 500);
+    CHECK(MockLezFaucetFfi::cancelCalls() == 1);
+    CHECK(MockLezFaucetFfi::balance() == 0);
+    CHECK(MockLezFaucetFfi::destroyCalls() == 1);
+    CHECK(!MockLezFaucetFfi::destroyWhileClaimActive());
+}
+
+void shutdownWaitsForSubmittedClaimReconciliation()
+{
+    MockLezFaucetFfi::reset();
+    MockLezFaucetFfi::setClaimWaitsForReconciliationRelease(true);
+    auto module = std::make_unique<LezFaucetModule>();
+    startAndWait(*module, module->open("config.json", "wallet.json", "https://testnet"));
+    const std::string started = module->claimOnce("MockAccount");
+    CHECK(started.find("\"ok\":true") != std::string::npos);
+    CHECK(MockLezFaucetFfi::waitForClaimStart(500));
+
+    std::atomic<bool> shutdownFinished{false};
+    std::thread shutdown([&]() {
+        module.reset();
+        shutdownFinished = true;
+    });
+    CHECK(MockLezFaucetFfi::waitForCancelCall(500));
+    CHECK(!shutdownFinished.load());
+    CHECK(MockLezFaucetFfi::destroyCalls() == 0);
+    CHECK(!MockLezFaucetFfi::destroyWhileClaimActive());
+
+    MockLezFaucetFfi::releaseClaimReconciliation();
+    shutdown.join();
+    CHECK(shutdownFinished.load());
+    CHECK(MockLezFaucetFfi::cancelCalls() == 1);
+    CHECK(MockLezFaucetFfi::balance() == 150);
+    CHECK(MockLezFaucetFfi::destroyCalls() == 1);
+    CHECK(!MockLezFaucetFfi::destroyWhileClaimActive());
+}
+
 void errorsAreStructured()
 {
     MockLezFaucetFfi::reset();
@@ -346,6 +399,8 @@ int main()
     claimLoopReportsProgressAndUsesAtomicClaims();
     cancellationWaitsForInflightClaimThenStops();
     cancellationCanStopBeforeSubmission();
+    shutdownCancelsActiveSolveBeforeJoining();
+    shutdownWaitsForSubmittedClaimReconciliation();
     errorsAreStructured();
     unknownClaimOutcomeRemainsStructured();
     exactDecimalsSurviveAboveJavaScriptSafeInteger();
