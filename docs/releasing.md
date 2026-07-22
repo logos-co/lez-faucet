@@ -85,7 +85,19 @@ Check that:
 - the UI manifest name is `lez_faucet_ui`;
 - the UI dependency list includes `lez_faucet`;
 - the only built variant is `darwin-arm64`;
-- neither package contains `/nix/store` runtime paths.
+- every bundled Mach-O library has no `/nix/store` load command; bundled
+  dylibs use `@loader_path`, while Qt frameworks use `@rpath`;
+- a read-only sequencer RPC succeeds with Nix and SSL-related environment
+  overrides cleared.
+
+Do not treat an archive-wide string scan as a portability check. The current
+packages retain some build/debug source paths, and bundled `libcrypto` contains
+OpenSSL's compiled `OPENSSLDIR`, `ENGINESDIR`, and `MODULESDIR` strings. Those
+strings are not Mach-O load commands. The sequencer RPC path uses Rust with
+rustls, so its clean-environment smoke proves that path does not depend on the
+OpenSSL defaults. The C++ transport still carries OpenSSL symbols; this smoke
+does not prove that every C++ TLS path ignores those compiled default
+directories.
 
 ## Generate a sidecar
 
