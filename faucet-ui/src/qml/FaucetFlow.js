@@ -1,13 +1,38 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-function claimsRequired(balance, target) {
-    var current = Number(balance)
-    var desired = Number(target)
-    if (!isFinite(current) || !isFinite(desired) || current < 0 || desired < 0)
-        return -1
-    if (current >= desired)
+var maxU128 = "340282366920938463463374607431768211455"
+
+function normalizedDecimal(value) {
+    var text = String(value === undefined || value === null ? "" : value)
+    if (!/^[0-9]+$/.test(text))
+        return ""
+    var normalized = text.replace(/^0+/, "")
+    return normalized === "" ? "0" : normalized
+}
+
+function isU128Decimal(value, allowZero) {
+    var normalized = normalizedDecimal(value)
+    if (normalized === "" || (!allowZero && normalized === "0"))
+        return false
+    return normalized.length < maxU128.length ||
+        (normalized.length === maxU128.length && normalized <= maxU128)
+}
+
+function compareDecimals(left, right) {
+    var a = normalizedDecimal(left)
+    var b = normalizedDecimal(right)
+    if (a === "" || b === "")
+        return undefined
+    if (a.length !== b.length)
+        return a.length < b.length ? -1 : 1
+    if (a === b)
         return 0
-    return Math.ceil((desired - current) / 150)
+    return a < b ? -1 : 1
+}
+
+function targetPending(balance, target) {
+    return isU128Decimal(balance, true) && isU128Decimal(target, false)
+        && compareDecimals(balance, target) < 0
 }
 
 function classifyError(message) {
@@ -41,7 +66,7 @@ function classifyJobError(error) {
 function nextTargetState(balance, target, stopRequested) {
     if (stopRequested)
         return "stopped"
-    return Number(balance) >= Number(target) ? "complete" : "continue"
+    return compareDecimals(balance, target) >= 0 ? "complete" : "continue"
 }
 
 function reduceJobEnvelope(payload, completedClaims, requiredClaims, balance) {

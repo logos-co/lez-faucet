@@ -8,7 +8,6 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <vector>
 
 extern "C" {
 #include <lez_faucet_ffi.h>
@@ -18,8 +17,9 @@ extern "C" {
 // job and returns immediately. Call jobStatus(job_id) until the status is one
 // of completed, failed, or cancelled.
 //
-// A terminal create result is replayed by jobStatus until jobResultAck(job_id)
-// explicitly acknowledges it, at which point the stored mnemonic is wiped.
+// Every terminal result is replayed by jobStatus until jobResultAck(job_id)
+// explicitly acknowledges it, at which point the retained job is reaped. A
+// create result's stored mnemonic is wiped as part of that acknowledgement.
 //
 // claimUntilTarget cancellation is cooperative: it is checked before the
 // first claim and between confirmed claims. An in-flight claim is never
@@ -56,6 +56,7 @@ private:
     using JobPtr = std::shared_ptr<Job>;
 
     std::string startJob(const std::string& operation, std::function<std::string(const JobPtr&)> work);
+    void reapFinishedWorkers();
     std::string runCreate(const std::string& configPath, const std::string& storagePath, const std::string& sequencerUrl, const std::string& password);
     std::string runOpen(const std::string& configPath, const std::string& storagePath, const std::string& sequencerUrl);
     std::string runHandleCall(const std::string& operation, const std::function<char*(FaucetHandle*)>& call);
@@ -72,8 +73,6 @@ private:
     std::atomic<bool> m_stopping{false};
     mutable std::mutex m_jobsMutex;
     std::unordered_map<std::string, JobPtr> m_jobs;
-    mutable std::mutex m_workersMutex;
-    std::vector<std::thread> m_workers;
     std::mutex m_operationMutex;
     std::atomic<FaucetHandle*> m_handle{nullptr};
 };

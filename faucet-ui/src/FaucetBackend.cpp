@@ -12,6 +12,7 @@
 
 namespace {
 constexpr auto DEFAULT_SEQUENCER_URL = "https://testnet.lez.logos.co";
+constexpr int MAX_CLAIMS_PER_RUN = 100;
 }
 
 FaucetBackend::FaucetBackend(QObject* parent)
@@ -186,9 +187,7 @@ QString FaucetBackend::scalarString(const QJsonValue& value)
 {
     if (value.isString())
         return value.toString();
-    if (value.isDouble())
-        return QString::number(value.toDouble(), 'f', 0);
-    return value.toVariant().toString();
+    return QString();
 }
 
 void FaucetBackend::applyTerminalResult(const QString& kind, const QJsonObject& status)
@@ -325,17 +324,15 @@ QString FaucetBackend::startClaimOnce()
         {accountId()});
 }
 
-QString FaucetBackend::startClaimUntilTarget(QString target, int maxClaims)
+QString FaucetBackend::startClaimUntilTarget(QString target)
 {
     if (accountId().isEmpty())
         return localError(QStringLiteral("No initialized public account is selected"));
-    if (maxClaims <= 0)
-        return localError(QStringLiteral("Claim limit must be positive"));
 
     return startCoreJob(
         QStringLiteral("claim_target"),
         QStringLiteral("claimUntilTarget"),
-        {accountId(), target, maxClaims});
+        {accountId(), target, MAX_CLAIMS_PER_RUN});
 }
 
 QString FaucetBackend::cancelJob(QString jobId)
@@ -384,7 +381,11 @@ QString FaucetBackend::acknowledgeJob(QString jobId)
     // and clear that result before this UI-side replay cache can be discarded.
     const QString coreResponse = invokeCore(QStringLiteral("jobResultAck"), {jobId});
     const QJsonObject coreEnvelope = parseObject(coreResponse);
-    if (!succeeded(coreEnvelope))
+    const bool locallyTerminal = m_terminalResponses.contains(jobId);
+    const QString coreErrorCode = coreEnvelope.value(QStringLiteral("error")).toObject()
+                                      .value(QStringLiteral("code")).toString();
+    const bool alreadyReaped = locallyTerminal && coreErrorCode == QStringLiteral("unknown_job");
+    if (!succeeded(coreEnvelope) && !alreadyReaped)
         return coreResponse;
 
     const bool known = m_jobKinds.contains(jobId) || m_terminalResponses.contains(jobId);

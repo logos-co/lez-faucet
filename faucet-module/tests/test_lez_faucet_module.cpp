@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -65,8 +67,8 @@ void lifecycleAndAcknowledgedMnemonic()
     CHECK(module.jobStatus(jobId).find("alpha beta gamma") != std::string::npos);
     const std::string acknowledged = module.jobResultAck(jobId);
     CHECK(acknowledged.find("\"acknowledged\":true") != std::string::npos);
-    CHECK(module.jobStatus(jobId).find("alpha beta gamma") == std::string::npos);
-    CHECK(module.jobStatus(jobId).find("\"result\":null") != std::string::npos);
+    CHECK(acknowledged.find("\"reaped\":true") != std::string::npos);
+    CHECK(module.jobStatus(jobId).find("\"code\":\"unknown_job\"") != std::string::npos);
     CHECK(MockLezFaucetFfi::stringFreeCalls() == 1);
 
     const std::string destroyed = startAndWait(module, module.destroy());
@@ -117,10 +119,10 @@ void directOperationsReturnNormalizedResultsAndFreeFfiStrings()
     CHECK(initialized.find("\"account_id\":\"MockAccount\"") != std::string::npos);
 
     const std::string balance = startAndWait(module, module.balance("MockAccount"));
-    CHECK(balance.find("\"result\":0") != std::string::npos);
+    CHECK(balance.find("\"result\":\"0\"") != std::string::npos);
 
     const std::string claimed = startAndWait(module, module.claimOnce("MockAccount"));
-    CHECK(claimed.find("\"balance_after\":150") != std::string::npos);
+    CHECK(claimed.find("\"balance_after\":\"150\"") != std::string::npos);
     CHECK(MockLezFaucetFfi::stringFreeCalls() == 4);
 }
 
@@ -200,6 +202,139 @@ void unknownClaimOutcomeRemainsStructured()
     CHECK(failed.find("\"tx_hash\":null") != std::string::npos);
 }
 
+void exactDecimalsSurviveAboveJavaScriptSafeInteger()
+{
+    MockLezFaucetFfi::reset();
+    constexpr uint64_t initial = 9'007'199'254'740'993ULL;
+    MockLezFaucetFfi::setBalance(initial);
+    LezFaucetModule module;
+    const std::string openStarted = module.open("config.json", "wallet.json", "https://testnet");
+    const std::string openId = stringField(openStarted, "job_id");
+    CHECK(hasStatus(waitForTerminal(module, openId), "completed"));
+    CHECK(module.jobResultAck(openId).find("\"reaped\":true") != std::string::npos);
+
+    const std::string balanceStarted = module.balance("MockAccount");
+    const std::string balanceId = stringField(balanceStarted, "job_id");
+    const std::string balance = waitForTerminal(module, balanceId);
+    CHECK(balance.find("\"result\":\"9007199254740993\"") != std::string::npos);
+    CHECK(module.jobResultAck(balanceId).find("\"reaped\":true") != std::string::npos);
+
+    const std::string target = "9007199254741293";
+    const std::string started = module.claimUntilTarget("MockAccount", target, 2);
+    const std::string jobId = stringField(started, "job_id");
+    const std::string completed = waitForTerminal(module, jobId);
+    CHECK(hasStatus(completed, "completed"));
+    CHECK(completed.find("\"initial_balance\":\"9007199254740993\"") != std::string::npos);
+    CHECK(completed.find("\"final_balance\":\"9007199254741293\"") != std::string::npos);
+    CHECK(completed.find("\"required_claims\":2") != std::string::npos);
+    CHECK(MockLezFaucetFfi::claimCalls() == 2);
+}
+
+void claimRunsHaveAHardBound()
+{
+    MockLezFaucetFfi::reset();
+    LezFaucetModule module;
+    startAndWait(module, module.open("config.json", "wallet.json", "https://testnet"));
+
+    const std::string excessiveMax = startAndWait(
+        module, module.claimUntilTarget("MockAccount", "150", 101));
+    CHECK(hasStatus(excessiveMax, "failed"));
+    CHECK(excessiveMax.find("\"code\":\"invalid_max_claims\"") != std::string::npos);
+
+    const std::string excessiveTarget = startAndWait(
+        module, module.claimUntilTarget("MockAccount", "15150", 100));
+    CHECK(hasStatus(excessiveTarget, "failed"));
+    CHECK(excessiveTarget.find("\"code\":\"claim_limit_exceeded\"") != std::string::npos);
+    CHECK(MockLezFaucetFfi::claimCalls() == 0);
+}
+
+void acknowledgedJobsAreReapedUnderStress()
+{
+    MockLezFaucetFfi::reset();
+    LezFaucetModule module;
+    const std::string openStarted = module.open("config.json", "wallet.json", "https://testnet");
+    const std::string openId = stringField(openStarted, "job_id");
+    waitForTerminal(module, openId);
+    module.jobResultAck(openId);
+
+    for (int iteration = 0; iteration < 512; ++iteration) {
+        const std::string started = module.balance("MockAccount");
+        const std::string jobId = stringField(started, "job_id");
+        CHECK(hasStatus(waitForTerminal(module, jobId), "completed"));
+        CHECK(module.jobStatus(jobId).find("\"result\":\"0\"") != std::string::npos);
+        CHECK(module.jobResultAck(jobId).find("\"reaped\":true") != std::string::npos);
+        CHECK(module.jobStatus(jobId).find("\"code\":\"unknown_job\"") != std::string::npos);
+    }
+}
+
+void retainedJobsAreBoundedUntilAcknowledged()
+{
+    MockLezFaucetFfi::reset();
+    LezFaucetModule module;
+    const std::string openStarted = module.open("config.json", "wallet.json", "https://testnet");
+    const std::string openId = stringField(openStarted, "job_id");
+    waitForTerminal(module, openId);
+    module.jobResultAck(openId);
+
+    std::vector<std::string> retained;
+    retained.reserve(128);
+    for (int iteration = 0; iteration < 128; ++iteration) {
+        const std::string started = module.balance("MockAccount");
+        const std::string jobId = stringField(started, "job_id");
+        CHECK(hasStatus(waitForTerminal(module, jobId), "completed"));
+        retained.push_back(jobId);
+    }
+    CHECK(module.balance("MockAccount").find("\"code\":\"job_limit_reached\"")
+        != std::string::npos);
+    for (const std::string& jobId : retained) {
+        CHECK(module.jobResultAck(jobId).find("\"reaped\":true") != std::string::npos);
+    }
+    CHECK(module.balance("MockAccount").find("\"ok\":true") != std::string::npos);
+}
+
+void statusAndAcknowledgementAreConcurrencySafe()
+{
+    MockLezFaucetFfi::reset();
+    LezFaucetModule module;
+    const std::string started = module.create(
+        "config.json", "wallet.json", "https://testnet", "secret");
+    const std::string jobId = stringField(started, "job_id");
+    waitForTerminal(module, jobId);
+
+    std::atomic<bool> go{false};
+    std::mutex resultsMutex;
+    std::vector<std::string> results;
+    std::vector<std::thread> callers;
+    for (int index = 0; index < 16; ++index) {
+        callers.emplace_back([&]() {
+            while (!go.load()) {
+                std::this_thread::yield();
+            }
+            const std::string result = module.jobStatus(jobId);
+            std::lock_guard<std::mutex> lock(resultsMutex);
+            results.push_back(result);
+        });
+    }
+    callers.emplace_back([&]() {
+        while (!go.load()) {
+            std::this_thread::yield();
+        }
+        const std::string result = module.jobResultAck(jobId);
+        std::lock_guard<std::mutex> lock(resultsMutex);
+        results.push_back(result);
+    });
+    go.store(true);
+    for (std::thread& caller : callers) {
+        caller.join();
+    }
+    CHECK(results.size() == 17);
+    for (const std::string& result : results) {
+        CHECK(result.find("\"ok\":true") != std::string::npos
+            || result.find("\"code\":\"unknown_job\"") != std::string::npos);
+    }
+    CHECK(module.jobStatus(jobId).find("\"code\":\"unknown_job\"") != std::string::npos);
+}
+
 } // namespace
 
 int main()
@@ -213,6 +348,11 @@ int main()
     cancellationCanStopBeforeSubmission();
     errorsAreStructured();
     unknownClaimOutcomeRemainsStructured();
+    exactDecimalsSurviveAboveJavaScriptSafeInteger();
+    claimRunsHaveAHardBound();
+    acknowledgedJobsAreReapedUnderStress();
+    retainedJobsAreBoundedUntilAcknowledged();
+    statusAndAcknowledgementAreConcurrencySafe();
     std::cout << "lez_faucet module tests passed\n";
     return 0;
 }

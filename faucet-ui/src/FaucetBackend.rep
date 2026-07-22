@@ -21,7 +21,7 @@ class FaucetBackend
     SLOT(QString startInitializeAccount())
     SLOT(QString startBalance())
     SLOT(QString startClaimOnce())
-    SLOT(QString startClaimUntilTarget(QString target, int maxClaims))
+    SLOT(QString startClaimUntilTarget(QString target))
     SLOT(QString cancelJob(QString jobId))
     SLOT(QString jobStatus(QString jobId))
     // Terminal envelopes, including the create mnemonic, remain replayable in

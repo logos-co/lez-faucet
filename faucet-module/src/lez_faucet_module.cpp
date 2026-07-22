@@ -6,11 +6,14 @@
 #include <limits>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace {
 
 using U128 = unsigned __int128;
 constexpr U128 kPrize = 150;
+constexpr int64_t kMaxClaimsPerJob = 100;
+constexpr std::size_t kMaxRetainedJobs = 128;
 
 std::string jsonEscape(const std::string& value)
 {
@@ -186,6 +189,75 @@ std::string errorObject(const std::string& code, const std::string& message)
     return "{\"code\":" + jsonString(code) + ",\"message\":" + jsonString(message) + "}";
 }
 
+std::string normalizationError(const std::string& code, const std::string& message)
+{
+    return "{\"ok\":false,\"error\":" + errorObject(code, message) + "}";
+}
+
+std::string normalizeBalanceResponse(const std::string& response)
+{
+    if (jsonValue(response, "ok") != "true") {
+        return response;
+    }
+    U128 balance = 0;
+    if (!parseU128(jsonValue(response, "result"), balance)) {
+        return normalizationError("invalid_balance", "balance result is not an unsigned decimal integer");
+    }
+    return "{\"ok\":true,\"result\":" + jsonString(u128String(balance)) + "}";
+}
+
+std::string normalizeInitializedAccountResponse(const std::string& response)
+{
+    if (jsonValue(response, "ok") != "true") {
+        return response;
+    }
+    const std::string result = jsonValue(response, "result");
+    const std::string accountId = jsonValue(result, "account_id");
+    const std::string initTxHash = jsonValue(result, "init_tx_hash");
+    U128 balance = 0;
+    if (accountId.size() < 2 || accountId.front() != '"'
+        || !parseU128(jsonValue(result, "balance"), balance)) {
+        return normalizationError("invalid_initialized_account",
+            "initialized account result is missing an account ID or decimal balance");
+    }
+    return "{\"ok\":true,\"result\":{\"account_id\":" + accountId
+        + ",\"init_tx_hash\":" + (initTxHash.empty() ? "null" : initTxHash)
+        + ",\"balance\":" + jsonString(u128String(balance)) + "}}";
+}
+
+std::string normalizedClaimReceipt(const std::string& response)
+{
+    if (jsonValue(response, "ok") != "true") {
+        return {};
+    }
+    const std::string result = jsonValue(response, "result");
+    const std::string txHash = jsonValue(result, "tx_hash");
+    const std::string staleRetries = jsonValue(result, "stale_challenge_retries");
+    U128 before = 0;
+    U128 after = 0;
+    if (!parseU128(jsonValue(result, "balance_before"), before)
+        || !parseU128(jsonValue(result, "balance_after"), after)) {
+        return {};
+    }
+    return "{\"tx_hash\":" + (txHash.empty() ? "null" : txHash)
+        + ",\"balance_before\":" + jsonString(u128String(before))
+        + ",\"balance_after\":" + jsonString(u128String(after))
+        + ",\"stale_challenge_retries\":" + (staleRetries.empty() ? "0" : staleRetries) + "}";
+}
+
+std::string normalizeClaimResponse(const std::string& response)
+{
+    if (jsonValue(response, "ok") != "true") {
+        return response;
+    }
+    const std::string receipt = normalizedClaimReceipt(response);
+    if (receipt.empty()) {
+        return normalizationError("invalid_claim_receipt",
+            "claim receipt is missing unsigned decimal balances");
+    }
+    return "{\"ok\":true,\"result\":" + receipt + "}";
+}
+
 void secureClear(std::string& value)
 {
     volatile char* bytes = value.empty() ? nullptr : value.data();
@@ -208,6 +280,8 @@ struct LezFaucetModule::Job {
     std::string errorJson;
     bool cancelRequested = false;
     bool sensitiveResult = false;
+    bool workerFinished = false;
+    std::thread worker;
 };
 
 LezFaucetModule::LezFaucetModule() = default;
@@ -222,12 +296,23 @@ LezFaucetModule::~LezFaucetModule()
             entry.second->cancelRequested = true;
         }
     }
-    std::vector<std::thread> workers;
+    std::vector<JobPtr> jobs;
     {
-        std::lock_guard<std::mutex> workersLock(m_workersMutex);
-        workers.swap(m_workers);
+        std::lock_guard<std::mutex> jobsLock(m_jobsMutex);
+        jobs.reserve(m_jobs.size());
+        for (const auto& entry : m_jobs) {
+            jobs.push_back(entry.second);
+        }
     }
-    for (auto& worker : workers) {
+    std::vector<std::thread> workers;
+    workers.reserve(jobs.size());
+    for (const JobPtr& job : jobs) {
+        std::lock_guard<std::mutex> jobLock(job->mutex);
+        if (job->worker.joinable()) {
+            workers.emplace_back(std::move(job->worker));
+        }
+    }
+    for (std::thread& worker : workers) {
         if (worker.joinable()) {
             worker.join();
         }
@@ -296,27 +381,30 @@ std::string LezFaucetModule::verifyFingerprint()
 std::string LezFaucetModule::createAndInitializeAccount()
 {
     return startJob("create_and_initialize_account", [this](const JobPtr&) {
-        return runHandleCall("create_and_initialize_account", [](FaucetHandle* handle) {
+        return normalizeInitializedAccountResponse(runHandleCall(
+            "create_and_initialize_account", [](FaucetHandle* handle) {
             return lez_faucet_create_and_initialize_account(handle);
-        });
+        }));
     });
 }
 
 std::string LezFaucetModule::balance(const std::string& accountId)
 {
     return startJob("balance", [this, accountId](const JobPtr&) {
-        return runHandleCall("balance", [&accountId](FaucetHandle* handle) {
+        return normalizeBalanceResponse(runHandleCall(
+            "balance", [&accountId](FaucetHandle* handle) {
             return lez_faucet_get_balance(handle, accountId.c_str());
-        });
+        }));
     });
 }
 
 std::string LezFaucetModule::claimOnce(const std::string& accountId)
 {
     return startJob("claim_once", [this, accountId](const JobPtr&) {
-        return runHandleCall("claim_once", [&accountId](FaucetHandle* handle) {
+        return normalizeClaimResponse(runHandleCall(
+            "claim_once", [&accountId](FaucetHandle* handle) {
             return lez_faucet_claim_once(handle, accountId.c_str());
-        });
+        }));
     });
 }
 
@@ -330,6 +418,7 @@ std::string LezFaucetModule::claimUntilTarget(const std::string& accountId, cons
 
 std::string LezFaucetModule::cancel(const std::string& jobId)
 {
+    reapFinishedWorkers();
     JobPtr job;
     {
         std::lock_guard<std::mutex> lock(m_jobsMutex);
@@ -359,6 +448,7 @@ std::string LezFaucetModule::cancel(const std::string& jobId)
 
 std::string LezFaucetModule::jobStatus(const std::string& jobId)
 {
+    reapFinishedWorkers();
     JobPtr job;
     {
         std::lock_guard<std::mutex> lock(m_jobsMutex);
@@ -373,7 +463,9 @@ std::string LezFaucetModule::jobStatus(const std::string& jobId)
 
 std::string LezFaucetModule::jobResultAck(const std::string& jobId)
 {
+    reapFinishedWorkers();
     JobPtr job;
+    std::thread worker;
     {
         std::lock_guard<std::mutex> lock(m_jobsMutex);
         const auto found = m_jobs.find(jobId);
@@ -381,20 +473,28 @@ std::string LezFaucetModule::jobResultAck(const std::string& jobId)
             return structuredError("unknown_job", "unknown job_id");
         }
         job = found->second;
+        std::lock_guard<std::mutex> jobLock(job->mutex);
+        if (!isTerminal(job->status)) {
+            return structuredError("job_not_terminal", "job result cannot be acknowledged before completion");
+        }
+        secureClear(job->resultJson);
+        job->sensitiveResult = false;
+        if (job->worker.joinable()) {
+            worker = std::move(job->worker);
+        }
+        m_jobs.erase(found);
     }
-
-    std::lock_guard<std::mutex> lock(job->mutex);
-    if (!isTerminal(job->status)) {
-        return structuredError("job_not_terminal", "job result cannot be acknowledged before completion");
+    if (worker.joinable()) {
+        worker.join();
     }
-    secureClear(job->resultJson);
-    job->sensitiveResult = false;
-    return "{\"ok\":true,\"job_id\":" + jsonString(jobId) + ",\"acknowledged\":true}";
+    return "{\"ok\":true,\"job_id\":" + jsonString(jobId)
+        + ",\"acknowledged\":true,\"reaped\":true}";
 }
 
 std::string LezFaucetModule::startJob(const std::string& operation,
                                       std::function<std::string(const JobPtr&)> work)
 {
+    reapFinishedWorkers();
     if (m_stopping.load()) {
         return structuredError("module_stopping", "module is shutting down");
     }
@@ -404,6 +504,10 @@ std::string LezFaucetModule::startJob(const std::string& operation,
     job->operation = operation;
     {
         std::lock_guard<std::mutex> lock(m_jobsMutex);
+        if (m_jobs.size() >= kMaxRetainedJobs) {
+            return structuredError("job_limit_reached",
+                "too many unacknowledged jobs; acknowledge terminal results before starting more work");
+        }
         m_jobs.emplace(job->id, job);
     }
 
@@ -414,6 +518,7 @@ std::string LezFaucetModule::startJob(const std::string& operation,
             if (job->cancelRequested || m_stopping.load()) {
                 job->status = "cancelled";
                 job->errorJson = errorObject("cancelled", "job cancelled before it started");
+                job->workerFinished = true;
                 return;
             }
             job->status = "running";
@@ -421,31 +526,54 @@ std::string LezFaucetModule::startJob(const std::string& operation,
 
         const std::string result = work(job);
         std::lock_guard<std::mutex> lock(job->mutex);
-        if (job->status == "cancelled") {
-            return;
-        }
-        if (ffiSucceeded(result)) {
-            job->status = "completed";
-            job->resultJson = ffiResultPayload(result);
-            job->errorJson.clear();
-        } else {
-            job->status = "failed";
-            const std::string error = jsonValue(result, "error");
-            const std::string errorMessage = unquoteJsonString(error);
-            if (job->cancelRequested && errorMessage.find("cancel") != std::string::npos) {
-                job->status = "cancelled";
-                job->errorJson = errorObject("cancelled", errorMessage);
+        if (job->status != "cancelled") {
+            if (ffiSucceeded(result)) {
+                job->status = "completed";
+                job->resultJson = ffiResultPayload(result);
+                job->errorJson.clear();
             } else {
-                job->errorJson = ffiErrorPayload(result);
+                job->status = "failed";
+                const std::string error = jsonValue(result, "error");
+                const std::string errorMessage = unquoteJsonString(error);
+                if (job->cancelRequested && errorMessage.find("cancel") != std::string::npos) {
+                    job->status = "cancelled";
+                    job->errorJson = errorObject("cancelled", errorMessage);
+                } else {
+                    job->errorJson = ffiErrorPayload(result);
+                }
             }
         }
+        job->workerFinished = true;
     });
 
     {
-        std::lock_guard<std::mutex> lock(m_workersMutex);
-        m_workers.emplace_back(std::move(worker));
+        std::lock_guard<std::mutex> lock(job->mutex);
+        job->worker = std::move(worker);
     }
     return jobJson(job);
+}
+
+void LezFaucetModule::reapFinishedWorkers()
+{
+    std::vector<JobPtr> jobs;
+    {
+        std::lock_guard<std::mutex> lock(m_jobsMutex);
+        jobs.reserve(m_jobs.size());
+        for (const auto& entry : m_jobs) {
+            jobs.push_back(entry.second);
+        }
+    }
+
+    std::vector<std::thread> finished;
+    for (const JobPtr& job : jobs) {
+        std::lock_guard<std::mutex> lock(job->mutex);
+        if (job->workerFinished && job->worker.joinable()) {
+            finished.emplace_back(std::move(job->worker));
+        }
+    }
+    for (std::thread& worker : finished) {
+        worker.join();
+    }
 }
 
 std::string LezFaucetModule::runCreate(const std::string& configPath, const std::string& storagePath,
@@ -516,8 +644,8 @@ std::string LezFaucetModule::runClaimUntil(const JobPtr& job, const std::string&
     if (handle == nullptr) {
         return structuredError("wallet_not_open", "claim_until_target requires an open wallet");
     }
-    if (maxClaims < 0) {
-        return structuredError("invalid_max_claims", "maxClaims must be non-negative");
+    if (maxClaims < 0 || maxClaims > kMaxClaimsPerJob) {
+        return structuredError("invalid_max_claims", "maxClaims must be between 0 and 100");
     }
 
     U128 targetValue = 0;
@@ -547,6 +675,16 @@ std::string LezFaucetModule::runClaimUntil(const JobPtr& job, const std::string&
 
     U128 balance = initialBalance;
     int64_t completedClaims = 0;
+    {
+        std::ostringstream progress;
+        progress << "{\"completed_claims\":0"
+                 << ",\"required_claims\":" << requiredClaims
+                 << ",\"target\":" << jsonString(u128String(targetValue))
+                 << ",\"balance\":" << jsonString(u128String(balance))
+                 << ",\"receipt\":null}";
+        std::lock_guard<std::mutex> lock(job->mutex);
+        job->progressJson = progress.str();
+    }
     while (balance < targetValue) {
         {
             std::lock_guard<std::mutex> lock(job->mutex);
@@ -571,13 +709,18 @@ std::string LezFaucetModule::runClaimUntil(const JobPtr& job, const std::string&
             || !parseU128(jsonValue(claimResponse, "balance_after"), after)) {
             return structuredError("invalid_claim_receipt", "claim receipt is missing decimal balances");
         }
-        if (before != balance || after != before + kPrize) {
+        constexpr U128 maxBalance = ~static_cast<U128>(0);
+        if (before != balance || before > maxBalance - kPrize || after != before + kPrize) {
             return structuredError("invalid_claim_delta", "claim receipt did not prove an exact +150 credit");
         }
 
         balance = after;
         ++completedClaims;
-        const std::string receipt = jsonValue(claimResponse, "result");
+        const std::string receipt = normalizedClaimReceipt(claimResponse);
+        if (receipt.empty()) {
+            return structuredError("invalid_claim_receipt",
+                "claim receipt could not be normalized to exact decimal strings");
+        }
         std::ostringstream progress;
         progress << "{\"completed_claims\":" << completedClaims
                  << ",\"required_claims\":" << requiredClaims

@@ -8,16 +8,18 @@ const flow = {};
 vm.createContext(flow);
 vm.runInContext(source, flow);
 
-test("claim count rounds up to the 150 LEZ prize", () => {
-  assert.equal(flow.claimsRequired(0, 1000), 7);
-  assert.equal(flow.claimsRequired(900, 1000), 1);
-  assert.equal(flow.claimsRequired(1050, 1000), 0);
+test("decimal target comparisons stay exact above 2^53", () => {
+  assert.equal(flow.targetPending("9007199254740992", "9007199254740993"), true);
+  assert.equal(flow.targetPending("9007199254740993", "9007199254740993"), false);
+  assert.equal(flow.compareDecimals("9007199254740993", "9007199254740992"), 1);
+  assert.equal(flow.isU128Decimal("340282366920938463463374607431768211455", false), true);
+  assert.equal(flow.isU128Decimal("340282366920938463463374607431768211456", false), false);
 });
 
-test("stop-after-current wins before another target claim", () => {
-  assert.equal(flow.nextTargetState(150, 1000, true), "stopped");
-  assert.equal(flow.nextTargetState(1050, 1000, false), "complete");
-  assert.equal(flow.nextTargetState(150, 1000, false), "continue");
+test("stop-after-current wins before another exact target claim", () => {
+  assert.equal(flow.nextTargetState("150", "1000", true), "stopped");
+  assert.equal(flow.nextTargetState("9007199254740993", "9007199254740992", false), "complete");
+  assert.equal(flow.nextTargetState("9007199254740992", "9007199254740993", false), "continue");
 });
 
 test("version skew and network failures route to distinct blocking states", () => {
@@ -73,13 +75,14 @@ test("the remote interface never exposes mnemonic or password properties", () =>
 
 test("QML reconnects jobs, explicitly acknowledges secrets, and uses valid design tokens", () => {
   const qml = readFileSync(new URL("../../src/qml/FaucetView.qml", import.meta.url), "utf8");
-  assert.match(qml, /backend\.startClaimUntilTarget\(targetText, requiredClaims\)/);
+  assert.match(qml, /backend\.startClaimUntilTarget\(targetText\)/);
   assert.match(qml, /backend\.jobStatus\(polledJobId\)/);
   assert.match(qml, /backend\.cancelJob\(activeJobId\)/);
   assert.match(qml, /backend\.acknowledgeJob\(acknowledgedJobId\)/);
   assert.match(qml, /resumeJob\(pendingJobId, pendingJobKind\)/);
   assert.match(qml, /Connection interrupted; retrying this operation/);
-  assert.match(qml, /textInput\.validator: IntValidator/);
+  assert.match(qml, /textInput\.maximumLength: 39/);
+  assert.doesNotMatch(qml, /Number\(balanceText\)|claimsRequired/);
   assert.doesNotMatch(qml, /radiusMedium/);
   assert.match(qml, /Component\.onDestruction: mnemonicText = ""/);
   assert.doesNotMatch(qml, /console\.(log|warn|error)/);
@@ -92,5 +95,5 @@ test("account identity comes from core results and sequencer override is support
   assert.match(backend, /qEnvironmentVariable\("LEZ_FAUCET_SEQUENCER_URL"\)/);
   assert.match(backend, /m_terminalResponses\.insert\(jobId, response\)/);
   assert.match(backend, /applyProgress\(kind, envelope\);[\s\S]*if \(terminal\)/);
-  assert.match(backend, /invokeCore\(QStringLiteral\("jobResultAck"\), \{jobId\}\)[\s\S]*if \(!succeeded\(coreEnvelope\)\)[\s\S]*clearTerminalResponse\(jobId\)/);
+  assert.match(backend, /invokeCore\(QStringLiteral\("jobResultAck"\), \{jobId\}\)[\s\S]*alreadyReaped[\s\S]*if \(!succeeded\(coreEnvelope\) && !alreadyReaped\)[\s\S]*clearTerminalResponse\(jobId\)/);
 });

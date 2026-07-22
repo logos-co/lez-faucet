@@ -33,7 +33,6 @@ Rectangle {
     readonly property string accountId: backend ? backend.accountId : ""
     readonly property string balanceText: backend && backend.balance !== "" ? backend.balance : "0"
     readonly property bool hasAccount: accountId !== ""
-    readonly property int targetValue: Number(targetText)
 
     function watch(reply, onSuccess, onError) {
         if (typeof logos === "undefined" || !logos.watch) {
@@ -201,14 +200,14 @@ Rectangle {
     }
 
     function startClaimToTarget() {
-        requiredClaims = FaucetFlow.claimsRequired(balanceText, targetText)
-        if (requiredClaims <= 0)
+        if (!FaucetFlow.targetPending(balanceText, targetText))
             return
+        requiredClaims = 0
         completedClaims = 0
         stopRequested = false
         screenState = "claiming_target"
         statusText = "Fetching the current faucet challenge…"
-        watch(backend.startClaimUntilTarget(targetText, requiredClaims), function(raw) {
+        watch(backend.startClaimUntilTarget(targetText), function(raw) {
             startJob(raw, "claim_target", "ready")
         }, function(error) { routeError(error, "ready") })
     }
@@ -669,21 +668,24 @@ Rectangle {
                         Layout.fillWidth: true
                         placeholderText: qsTr("Target balance")
                         text: root.targetText
-                        textInput.validator: IntValidator { bottom: 1; top: 1000000 }
+                        textInput.inputMethodHints: Qt.ImhDigitsOnly
+                        textInput.maximumLength: 39
                         onTextChanged: root.targetText = text
                     }
                     LogosButton {
                         text: {
-                            var count = FaucetFlow.claimsRequired(root.balanceText, root.targetText)
-                            return count <= 0 ? qsTr("Target reached")
-                                : qsTr("Claim to at least %1 LEZ (%2 claims)").arg(root.targetText).arg(count)
+                            if (!FaucetFlow.isU128Decimal(root.targetText, false))
+                                return qsTr("Enter a valid target")
+                            return FaucetFlow.targetPending(root.balanceText, root.targetText)
+                                ? qsTr("Claim to at least %1 LEZ (max 100 claims)").arg(root.targetText)
+                                : qsTr("Target reached")
                         }
-                        enabled: FaucetFlow.claimsRequired(root.balanceText, root.targetText) > 0
+                        enabled: FaucetFlow.targetPending(root.balanceText, root.targetText)
                         onClicked: root.startClaimToTarget()
                     }
                 }
                 LogosText {
-                    text: qsTr("Each claim adds 150 LEZ. Your final balance may be up to 149 LEZ above the target.")
+                    text: qsTr("Each claim adds 150 LEZ. Your final balance may be up to 149 LEZ above the target. One run is limited to 100 claims.")
                     color: Theme.palette.textSecondary
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true

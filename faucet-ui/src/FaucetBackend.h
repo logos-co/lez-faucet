@@ -29,7 +29,7 @@ public slots:
     QString startInitializeAccount() override;
     QString startBalance() override;
     QString startClaimOnce() override;
-    QString startClaimUntilTarget(QString target, int maxClaims) override;
+    QString startClaimUntilTarget(QString target) override;
     QString cancelJob(QString jobId) override;
     QString jobStatus(QString jobId) override;
     QString acknowledgeJob(QString jobId) override;
