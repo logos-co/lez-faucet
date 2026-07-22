@@ -87,4 +87,7 @@ Testnet LEZ has no monetary value. This app must not be used for mainnet funds.
   refresh the balance first; the prior submission may have been accepted even
   though its transaction hash or final polling response was lost.
 - **Catalog is empty:** verify that the `index` release contains `index.json`
-  and that both module releases carry an `.lgx` and `sidecar.json`.
+  and that both non-draft module releases carry the expected `.lgx` asset. The
+  index is built from those `.lgx` download URLs, not from `sidecar.json`.
+  Each module release should still carry `sidecar.json` as its artifact
+  metadata and to satisfy the release workflow's already-published check.

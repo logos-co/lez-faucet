@@ -115,6 +115,9 @@ pipeline is currently affected by
 the pinned cargo-vendor fetch receives HTTP 403 responses from crates.io. Until
 that upstream fix lands, produce the first artifacts locally and publish the
 `.lgx` plus generated `sidecar.json` as described in [Releasing](docs/releasing.md).
+The catalog index reads the published `.lgx` directly. The sidecar remains the
+release's artifact metadata and is required by the release workflow's
+already-published check.
 
 ## License and provenance
 

@@ -16,6 +16,13 @@ only `darwin-arm64`. The reusable release workflow builds `.#lgx-portable`,
 verifies the package, creates a sidecar from the embedded manifest, publishes a
 `<module>-v<version>` GitHub release, and asks the index workflow to run.
 
+The current v1 index workflow enumerates `.lgx` download URLs from every
+non-draft module release, verifies each package, and builds `index.json` from
+the package manifest and bytes. It does not read `sidecar.json`. The sidecar is
+still a required release asset: it records publication metadata, and the
+release workflow requires both an `.lgx` and `sidecar.json` before treating a
+module version as already published and skipping a rebuild.
+
 Dispatch in this order:
 
 ```sh
@@ -83,7 +90,9 @@ Check that:
 ## Generate a sidecar
 
 Generate a fresh sidecar for each artifact. Never reuse hashes, sizes, manifests,
-or timestamps from another build.
+or timestamps from another build. This file accompanies the release as
+artifact metadata and satisfies the release workflow's already-published gate;
+the catalog index independently reads and verifies the `.lgx` asset.
 
 ```sh
 module=lez_faucet
