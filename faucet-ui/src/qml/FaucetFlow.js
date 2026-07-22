@@ -92,3 +92,9 @@ function cancelAcknowledged(envelope) {
 function ackDisposition(envelope) {
     return envelope && envelope.ok === true ? "clear" : "retry"
 }
+
+function genericRetryDecision(failedOperationKind, resumeState, hasAccount) {
+    if (String(failedOperationKind || "") === "initialize")
+        return { action: "initialize", resumeState: String(resumeState || "initialization_required") }
+    return { action: hasAccount ? "balance" : "bootstrap", resumeState: String(resumeState || "") }
+}

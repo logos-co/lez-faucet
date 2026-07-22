@@ -28,6 +28,7 @@ Rectangle {
     property string activeJobId: ""
     property string activeJobKind: ""
     property string activeJobResumeState: "welcome"
+    property string failedOperationKind: ""
     property bool jobPollInFlight: false
 
     readonly property string accountId: backend ? backend.accountId : ""
@@ -69,10 +70,12 @@ Rectangle {
         return "Operation failed"
     }
 
-    function routeError(message, safeResumeState) {
+    function routeError(message, safeResumeState, failedKind) {
         var category = FaucetFlow.classifyJobError(message)
         errorText = errorMessage(message)
         technicalDetails = typeof message === "object" ? JSON.stringify(message) : errorText
+        resumeState = safeResumeState || (hasAccount ? "ready" : "welcome")
+        failedOperationKind = failedKind || ""
         if (category === "version_mismatch") {
             screenState = "version_mismatch"
         } else if (category === "outcome_unknown") {
@@ -174,11 +177,12 @@ Rectangle {
     }
 
     function initializeAccount(successState) {
+        var initializationResumeState = successState || "initialization_required"
         screenState = "initializing"
         statusText = "Initializing account on testnet…"
         watch(backend.startInitializeAccount(), function(raw) {
-            startJob(raw, "initialize", successState || "initialization_required")
-        }, function(error) { routeError(error, "initialization_required") })
+            startJob(raw, "initialize", initializationResumeState)
+        }, function(error) { routeError(error, initializationResumeState, "initialize") })
     }
 
     function refreshBalance() {
@@ -215,13 +219,13 @@ Rectangle {
     function startJob(raw, kind, safeResumeState) {
         var envelope = parseEnvelope(raw)
         if (!envelope.ok) {
-            routeError(envelope.error, safeResumeState)
+            routeError(envelope.error, safeResumeState, kind)
             return
         }
         var started = resultObject(envelope)
         var jobId = String(envelope.job_id || (started && started.job_id) || "")
         if (jobId === "") {
-            routeError("The faucet did not return a job ID", safeResumeState)
+            routeError("The faucet did not return a job ID", safeResumeState, kind)
             return
         }
         activeJobId = jobId
@@ -323,11 +327,11 @@ Rectangle {
                     return
                 }
                 if (state !== "completed") {
-                    routeError(payload.error || (operationResult && operationResult.error), finishedResume)
+                    routeError(payload.error || (operationResult && operationResult.error), finishedResume, finishedKind)
                     return
                 }
                 if (operationResult && operationResult.ok === false) {
-                    routeError(operationResult.error, finishedResume)
+                    routeError(operationResult.error, finishedResume, finishedKind)
                     return
                 }
                 handleJobSuccess(finishedKind, operationResult || {}, finishedResume)
@@ -413,6 +417,16 @@ Rectangle {
             verifyCompatibility("ready")
         else if (resumeState === "initialization_required")
             verifyCompatibility("initialization_required")
+        else
+            beginBootstrap()
+    }
+
+    function retryFromError() {
+        var retry = FaucetFlow.genericRetryDecision(failedOperationKind, resumeState, hasAccount)
+        if (retry.action === "initialize")
+            initializeAccount(retry.resumeState)
+        else if (retry.action === "balance")
+            refreshBalance()
         else
             beginBootstrap()
     }
@@ -847,7 +861,7 @@ Rectangle {
                     }
                     LogosButton {
                         text: qsTr("Retry")
-                        onClicked: root.hasAccount ? root.refreshBalance() : root.beginBootstrap()
+                        onClicked: root.retryFromError()
                     }
                 }
             }

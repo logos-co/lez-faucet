@@ -53,6 +53,22 @@ test("failed result acknowledgement is retried before local state is cleared", (
   assert.equal(flow.ackDisposition({ ok: true, acknowledged: true }), "clear");
 });
 
+test("generic initialization failure retries initialize without reopening the live wallet", () => {
+  const firstInitialization = flow.genericRetryDecision("initialize", "initialization_required", false);
+  assert.equal(firstInitialization.action, "initialize");
+  assert.equal(firstInitialization.resumeState, "initialization_required");
+
+  const resumedInitialization = flow.genericRetryDecision("initialize", "ready", false);
+  assert.equal(resumedInitialization.action, "initialize");
+  assert.equal(resumedInitialization.resumeState, "ready");
+  assert.equal(flow.genericRetryDecision("", "welcome", false).action, "bootstrap");
+
+  const qml = readFileSync(new URL("../../src/qml/FaucetView.qml", import.meta.url), "utf8");
+  assert.match(qml, /function retryFromError\(\)[\s\S]*retry\.action === "initialize"[\s\S]*initializeAccount\(retry\.resumeState\)/);
+  assert.match(qml, /onClicked: root\.retryFromError\(\)/);
+  assert.doesNotMatch(qml, /onClicked: root\.hasAccount \? root\.refreshBalance\(\) : root\.beginBootstrap\(\)/);
+});
+
 test("unknown claim outcome is routed from structured native error metadata", () => {
   assert.equal(flow.classifyJobError({
     code: "ffi_error",
