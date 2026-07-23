@@ -101,18 +101,32 @@ Scaffold localnet uses the fixed port `3040`. Run at most one localnet at a time
 across Conductor workspaces or other checkouts of this repository to avoid a
 port collision.
 
-The opt-in public-testnet integration test creates and initializes a fresh
-account and consumes one 150 LEZ claim:
+The first opt-in public-testnet integration test creates and initializes a fresh
+account, then consumes one 150 LEZ claim:
 
 ```sh
 LEZ_FAUCET_LIVE_TEST=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
   cargo test -p lez-faucet-ffi --test live_public_testnet \
-  -- --ignored --nocapture
+  create_initialize_and_claim_once_on_public_testnet \
+  -- --ignored --exact --nocapture
 ```
 
 It must report the initialization transaction ID, the claim transaction ID when
 available (otherwise an explicit unknown-hash marker), and balances, but never
 the mnemonic, password, or key material.
+
+The separate external-recipient proof creates two isolated wallets and proves
+that wallet A can fund wallet B's initialized public account without importing
+wallet B's key:
+
+```sh
+LEZ_FAUCET_RUN_LIVE=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
+  cargo test --release -p lez-faucet-ffi --test live_public_testnet \
+  client_wallet_funds_distinct_external_public_account_on_public_testnet \
+  -- --ignored --exact --nocapture
+```
+
+Both tests mutate the public testnet. Run only one at a time.
 
 ### Verify a public balance from the terminal
 
