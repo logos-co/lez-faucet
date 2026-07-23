@@ -9,6 +9,7 @@ class FaucetBackend
     PROP(bool recoverySupported READONLY)
     PROP(QString activeJobId READONLY)
     PROP(QString activeJobKind READONLY)
+    PROP(QString activeRecipientId READONLY)
 
     // Operations start native jobs and return {"ok":true,"job_id":"..."}
     // immediately. jobStatus() returns queued/running/progress/terminal JSON.
@@ -22,6 +23,12 @@ class FaucetBackend
     SLOT(QString startBalance())
     SLOT(QString startClaimOnce())
     SLOT(QString startClaimUntilTarget(QString target))
+    // Existing-account operations never import recipient key material. A
+    // successful balance preflight for the exact public account is required
+    // before either claim operation can start.
+    SLOT(QString startExternalBalance(QString accountId))
+    SLOT(QString startExternalClaimOnce(QString accountId))
+    SLOT(QString startExternalClaimUntilTarget(QString accountId, QString target))
     SLOT(QString cancelJob(QString jobId))
     SLOT(QString jobStatus(QString jobId))
     // Terminal envelopes, including the create mnemonic, remain replayable in

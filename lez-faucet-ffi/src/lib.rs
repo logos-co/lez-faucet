@@ -420,10 +420,18 @@ impl FaucetClient {
     }
 
     pub async fn balance(&self, account_id: AccountId) -> Result<u128> {
-        self.wallet
-            .get_account_balance(account_id)
+        let account = self.faucet_recipient(account_id).await?;
+        Ok(account.balance)
+    }
+
+    async fn faucet_recipient(&self, account_id: AccountId) -> Result<Account> {
+        let account = self
+            .wallet
+            .get_account_public(account_id)
             .await
-            .context("failed to fetch account balance")
+            .context("failed to fetch faucet recipient")?;
+        validate_faucet_recipient(account_id, &account)?;
+        Ok(account)
     }
 
     pub async fn claim_once(&self, winner_id: AccountId) -> Result<ClaimReceipt> {
@@ -440,19 +448,7 @@ impl FaucetClient {
         ensure_not_cancelled(&self.cancel_generation, operation_generation)?;
         self.verify_program_fingerprint().await?;
         ensure_not_cancelled(&self.cancel_generation, operation_generation)?;
-        let winner = self
-            .wallet
-            .get_account_public(winner_id)
-            .await
-            .context("failed to fetch claim recipient")?;
-        ensure!(
-            winner != Account::default(),
-            "claim recipient is uninitialized"
-        );
-        ensure!(
-            winner.program_owner == programs::authenticated_transfer().id(),
-            "claim recipient is not owned by authenticated-transfer"
-        );
+        let winner = self.faucet_recipient(winner_id).await?;
 
         let balance_before = winner.balance;
         let pinata_id = system_accounts::pinata_account_id();
@@ -1304,6 +1300,18 @@ fn parse_account_id(raw: &str) -> Result<AccountId> {
     AccountId::from_str(raw).context("invalid public account ID")
 }
 
+fn validate_faucet_recipient(account_id: AccountId, account: &Account) -> Result<()> {
+    ensure!(
+        account != &Account::default(),
+        "faucet recipient Public/{account_id} is uninitialized"
+    );
+    ensure!(
+        account.program_owner == programs::authenticated_transfer().id(),
+        "faucet recipient Public/{account_id} is not owned by authenticated-transfer"
+    );
+    Ok(())
+}
+
 // ---- C ABI -----------------------------------------------------------------
 
 #[repr(C)]
@@ -1838,6 +1846,34 @@ mod tests {
             Some(&active),
             "validating a wrong owner must not clear or replace durable state"
         );
+    }
+
+    #[test]
+    fn faucet_recipient_requires_initialized_authenticated_transfer_account() {
+        let account_id = AccountId::new([7; 32]);
+        let uninitialized = Account::default();
+        let error = validate_faucet_recipient(account_id, &uninitialized)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("uninitialized"));
+        assert!(error.contains(&account_id.to_string()));
+
+        let wrong_owner = Account {
+            program_owner: programs::token().id(),
+            balance: 900,
+            ..Account::default()
+        };
+        let error = validate_faucet_recipient(account_id, &wrong_owner)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not owned by authenticated-transfer"));
+
+        let valid = Account {
+            program_owner: programs::authenticated_transfer().id(),
+            balance: 900,
+            ..Account::default()
+        };
+        validate_faucet_recipient(account_id, &valid).unwrap();
     }
 
     #[test]

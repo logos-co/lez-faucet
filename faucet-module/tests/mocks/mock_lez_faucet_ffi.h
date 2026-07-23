@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace MockLezFaucetFfi {
 
@@ -22,5 +23,7 @@ int destroyCalls();
 int rustClaimUntilCalls();
 int cancelCalls();
 bool destroyWhileClaimActive();
+std::string lastBalanceAccountId();
+std::string lastClaimAccountId();
 
 } // namespace MockLezFaucetFfi

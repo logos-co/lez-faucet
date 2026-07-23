@@ -35,6 +35,29 @@ function targetPending(balance, target) {
         && compareDecimals(balance, target) < 0
 }
 
+function normalizePublicAccountId(value) {
+    var normalized = String(value === undefined || value === null ? "" : value).trim()
+    if (normalized.indexOf("Public/") === 0)
+        normalized = normalized.slice(7).trim()
+    else if (normalized.indexOf("/") >= 0)
+        return ""
+    return normalized
+}
+
+function externalRecipientVerified(input, verifiedAccountId) {
+    var normalized = normalizePublicAccountId(input)
+    return normalized !== "" && normalized === String(verifiedAccountId || "")
+}
+
+function canClaimForRecipient(externalMode, input, verifiedAccountId, confirmed) {
+    return !externalMode ||
+        (externalRecipientVerified(input, verifiedAccountId) && Boolean(confirmed))
+}
+
+function recipientModeScreen(externalMode, hasLocalAccount) {
+    return externalMode || hasLocalAccount ? "ready" : "initialization_required"
+}
+
 function classifyError(message) {
     var text = String(message || "").toLowerCase()
     if (text.indexOf("outcome_unknown") >= 0 ||
@@ -94,7 +117,10 @@ function ackDisposition(envelope) {
 }
 
 function genericRetryDecision(failedOperationKind, resumeState, hasAccount) {
-    if (String(failedOperationKind || "") === "initialize")
+    var kind = String(failedOperationKind || "")
+    if (kind === "initialize")
         return { action: "initialize", resumeState: String(resumeState || "initialization_required") }
+    if (kind.indexOf("external_") === 0)
+        return { action: "external_balance", resumeState: "ready" }
     return { action: hasAccount ? "balance" : "bootstrap", resumeState: String(resumeState || "") }
 }

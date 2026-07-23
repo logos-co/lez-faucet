@@ -119,11 +119,14 @@ void directOperationsReturnNormalizedResultsAndFreeFfiStrings()
     const std::string initialized = startAndWait(module, module.createAndInitializeAccount());
     CHECK(initialized.find("\"account_id\":\"MockAccount\"") != std::string::npos);
 
-    const std::string balance = startAndWait(module, module.balance("MockAccount"));
+    const std::string externalAccount = "ExternalNodeWalletAccount";
+    const std::string balance = startAndWait(module, module.balance(externalAccount));
     CHECK(balance.find("\"result\":\"0\"") != std::string::npos);
+    CHECK(MockLezFaucetFfi::lastBalanceAccountId() == externalAccount);
 
-    const std::string claimed = startAndWait(module, module.claimOnce("MockAccount"));
+    const std::string claimed = startAndWait(module, module.claimOnce(externalAccount));
     CHECK(claimed.find("\"balance_after\":\"150\"") != std::string::npos);
+    CHECK(MockLezFaucetFfi::lastClaimAccountId() == externalAccount);
     CHECK(MockLezFaucetFfi::stringFreeCalls() == 4);
 }
 
@@ -132,11 +135,15 @@ void claimLoopReportsProgressAndUsesAtomicClaims()
     MockLezFaucetFfi::reset();
     LezFaucetModule module;
     startAndWait(module, module.open("config.json", "wallet.json", "https://testnet"));
-    const std::string completed = startAndWait(module, module.claimUntilTarget("MockAccount", "1000", 7));
+    const std::string externalAccount = "ExternalNodeWalletAccount";
+    const std::string completed = startAndWait(
+        module, module.claimUntilTarget(externalAccount, "1000", 7));
     CHECK(hasStatus(completed, "completed"));
     CHECK(completed.find("\"completed_claims\":7") != std::string::npos);
     CHECK(completed.find("\"final_balance\":\"1050\"") != std::string::npos);
     CHECK(MockLezFaucetFfi::claimCalls() == 7);
+    CHECK(MockLezFaucetFfi::lastBalanceAccountId() == externalAccount);
+    CHECK(MockLezFaucetFfi::lastClaimAccountId() == externalAccount);
     CHECK(MockLezFaucetFfi::rustClaimUntilCalls() == 0);
 }
 

@@ -36,6 +36,7 @@ FaucetBackend::FaucetBackend(QObject* parent)
     setRecoverySupported(false);
     setActiveJobId(QString());
     setActiveJobKind(QString());
+    setActiveRecipientId(QString());
 }
 
 FaucetBackend::~FaucetBackend()
@@ -72,6 +73,7 @@ QString FaucetBackend::bootstrap()
     object.insert(QStringLiteral("sequencer_url"), sequencerUrl());
     object.insert(QStringLiteral("active_job_id"), activeJobId());
     object.insert(QStringLiteral("active_job_kind"), activeJobKind());
+    object.insert(QStringLiteral("active_recipient_id"), activeRecipientId());
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
@@ -190,15 +192,69 @@ QString FaucetBackend::scalarString(const QJsonValue& value)
     return QString();
 }
 
+QString FaucetBackend::normalizedPublicAccountId(const QString& accountId)
+{
+    QString normalized = accountId.trimmed();
+    if (normalized.startsWith(QStringLiteral("Public/")))
+        normalized.remove(0, 7);
+    else if (normalized.contains(QChar(u'/')))
+        return {};
+    return normalized.trimmed();
+}
+
+QString FaucetBackend::startedJobId(const QString& response)
+{
+    const QJsonObject envelope = parseObject(response);
+    if (!succeeded(envelope))
+        return {};
+    QString jobId = envelope.value(QStringLiteral("job_id")).toString();
+    if (jobId.isEmpty())
+        jobId = resultObject(envelope).value(QStringLiteral("job_id")).toString();
+    return jobId;
+}
+
+QString FaucetBackend::startExternalJob(
+    const QString& kind,
+    const QString& method,
+    const QString& accountId,
+    const QVariantList& remainingArguments)
+{
+    if (!m_clientOpen) {
+        return localError(QStringLiteral(
+            "Open or create the local faucet wallet before funding an existing account"));
+    }
+    const QString normalized = normalizedPublicAccountId(accountId);
+    if (normalized.isEmpty()) {
+        return localError(QStringLiteral(
+            "Enter a public account ID as Public/<account-id> or a bare account ID"));
+    }
+
+    QVariantList arguments{normalized};
+    arguments.append(remainingArguments);
+    const QString response = startCoreJob(kind, method, arguments);
+    const QString jobId = startedJobId(response);
+    if (!jobId.isEmpty()) {
+        m_jobRecipients.insert(jobId, normalized);
+        setActiveRecipientId(normalized);
+    }
+    return response;
+}
+
 void FaucetBackend::applyTerminalResult(const QString& kind, const QJsonObject& status)
 {
     const QJsonValue resultValue = completedResult(status);
     const QJsonObject result = resultValue.isObject() ? resultValue.toObject() : QJsonObject();
 
     if (kind == QStringLiteral("create")) {
+        m_clientOpen = true;
         setWalletExists(true);
         setAccountId(QString());
         setBalance(QString());
+        return;
+    }
+
+    if (kind == QStringLiteral("open")) {
+        m_clientOpen = true;
         return;
     }
 
@@ -335,6 +391,46 @@ QString FaucetBackend::startClaimUntilTarget(QString target)
         {accountId(), target, MAX_CLAIMS_PER_RUN});
 }
 
+QString FaucetBackend::startExternalBalance(QString accountId)
+{
+    if (!activeJobId().isEmpty()) {
+        return localError(QStringLiteral("Another faucet operation is still active: %1")
+                              .arg(activeJobId()));
+    }
+    m_verifiedExternalRecipient.clear();
+    return startExternalJob(
+        QStringLiteral("external_balance"),
+        QStringLiteral("balance"),
+        accountId);
+}
+
+QString FaucetBackend::startExternalClaimOnce(QString accountId)
+{
+    const QString normalized = normalizedPublicAccountId(accountId);
+    if (normalized.isEmpty() || normalized != m_verifiedExternalRecipient) {
+        return localError(QStringLiteral(
+            "Check this public account and its balance before claiming"));
+    }
+    return startExternalJob(
+        QStringLiteral("external_claim_once"),
+        QStringLiteral("claimOnce"),
+        normalized);
+}
+
+QString FaucetBackend::startExternalClaimUntilTarget(QString accountId, QString target)
+{
+    const QString normalized = normalizedPublicAccountId(accountId);
+    if (normalized.isEmpty() || normalized != m_verifiedExternalRecipient) {
+        return localError(QStringLiteral(
+            "Check this public account and its balance before claiming"));
+    }
+    return startExternalJob(
+        QStringLiteral("external_claim_target"),
+        QStringLiteral("claimUntilTarget"),
+        normalized,
+        {target, MAX_CLAIMS_PER_RUN});
+}
+
 QString FaucetBackend::cancelJob(QString jobId)
 {
     if (jobId.isEmpty())
@@ -364,8 +460,11 @@ QString FaucetBackend::jobStatus(QString jobId)
         || state == QStringLiteral("failed")
         || state == QStringLiteral("cancelled");
     if (terminal) {
-        if (state == QStringLiteral("completed"))
+        if (state == QStringLiteral("completed")) {
             applyTerminalResult(kind, envelope);
+            if (kind == QStringLiteral("external_balance"))
+                m_verifiedExternalRecipient = m_jobRecipients.value(jobId);
+        }
         m_terminalResponses.insert(jobId, response);
     }
 
@@ -391,9 +490,11 @@ QString FaucetBackend::acknowledgeJob(QString jobId)
     const bool known = m_jobKinds.contains(jobId) || m_terminalResponses.contains(jobId);
     clearTerminalResponse(jobId);
     m_jobKinds.remove(jobId);
+    m_jobRecipients.remove(jobId);
     if (activeJobId() == jobId) {
         setActiveJobId(QString());
         setActiveJobKind(QString());
+        setActiveRecipientId(QString());
     }
     setBusy(!activeJobId().isEmpty());
 

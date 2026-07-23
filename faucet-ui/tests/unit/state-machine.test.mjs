@@ -16,6 +16,38 @@ test("decimal target comparisons stay exact above 2^53", () => {
   assert.equal(flow.isU128Decimal("340282366920938463463374607431768211456", false), false);
 });
 
+test("existing public recipients normalize without accepting private prefixes", () => {
+  const account = "BrrhddVoucvgkLx3Cpe4uyf4HTv8PWJ72JtvJ39ieSCf";
+  assert.equal(flow.normalizePublicAccountId(account), account);
+  assert.equal(flow.normalizePublicAccountId(`  Public/${account}  `), account);
+  assert.equal(flow.normalizePublicAccountId(`Private/${account}`), "");
+  assert.equal(flow.normalizePublicAccountId("Public/"), "");
+});
+
+test("external claims require an exact verified target and explicit confirmation", () => {
+  const account = "BrrhddVoucvgkLx3Cpe4uyf4HTv8PWJ72JtvJ39ieSCf";
+  assert.equal(flow.externalRecipientVerified(`Public/${account}`, account), true);
+  assert.equal(flow.externalRecipientVerified(`${account}x`, account), false);
+  assert.equal(flow.canClaimForRecipient(true, account, account, false), false);
+  assert.equal(flow.canClaimForRecipient(true, account, account, true), true);
+  assert.equal(flow.canClaimForRecipient(true, `${account}x`, account, true), false);
+  assert.equal(flow.canClaimForRecipient(false, "", "", false), true);
+});
+
+test("switching recipient modes returns to local initialization when needed", () => {
+  assert.equal(flow.recipientModeScreen(true, false), "ready");
+  assert.equal(flow.recipientModeScreen(false, false), "initialization_required");
+  assert.equal(flow.recipientModeScreen(false, true), "ready");
+});
+
+test("existing-account mode declares its local client prerequisite without importing keys", () => {
+  const qml = readFileSync(new URL("../../src/qml/FaucetView.qml", import.meta.url), "utf8");
+  const backend = readFileSync(new URL("../../src/FaucetBackend.cpp", import.meta.url), "utf8");
+  assert.match(qml, /local faucet wallet is used only as the LEZ network client/);
+  assert.match(qml, /does not import or own the recipient key/);
+  assert.match(backend, /if \(!m_clientOpen\)[\s\S]*Open or create the local faucet wallet/);
+});
+
 test("stop-after-current wins before another exact target claim", () => {
   assert.equal(flow.nextTargetState("150", "1000", true), "stopped");
   assert.equal(flow.nextTargetState("9007199254740993", "9007199254740992", false), "complete");
@@ -62,6 +94,7 @@ test("generic initialization failure retries initialize without reopening the li
   assert.equal(resumedInitialization.action, "initialize");
   assert.equal(resumedInitialization.resumeState, "ready");
   assert.equal(flow.genericRetryDecision("", "welcome", false).action, "bootstrap");
+  assert.equal(flow.genericRetryDecision("external_balance", "ready", false).action, "external_balance");
 
   const qml = readFileSync(new URL("../../src/qml/FaucetView.qml", import.meta.url), "utf8");
   assert.match(qml, /function retryFromError\(\)[\s\S]*retry\.action === "initialize"[\s\S]*initializeAccount\(retry\.resumeState\)/);
@@ -87,11 +120,21 @@ test("the remote interface never exposes mnemonic or password properties", () =>
   assert.match(rep, /SLOT\(QString cancelJob\(QString jobId\)\)/);
   assert.match(rep, /SLOT\(QString acknowledgeJob\(QString jobId\)\)/);
   assert.match(rep, /PROP\(QString activeJobId READONLY\)/);
+  assert.match(rep, /PROP\(QString activeRecipientId READONLY\)/);
+  assert.match(rep, /SLOT\(QString startExternalBalance\(QString accountId\)\)/);
+  assert.match(rep, /SLOT\(QString startExternalClaimOnce\(QString accountId\)\)/);
+  assert.match(rep, /SLOT\(QString startExternalClaimUntilTarget\(QString accountId, QString target\)\)/);
 });
 
 test("QML reconnects jobs, explicitly acknowledges secrets, and uses valid design tokens", () => {
   const qml = readFileSync(new URL("../../src/qml/FaucetView.qml", import.meta.url), "utf8");
   assert.match(qml, /backend\.startClaimUntilTarget\(targetText\)/);
+  assert.match(qml, /backend\.startExternalBalance\(normalizedRecipient\)/);
+  assert.match(qml, /backend\.startExternalClaimOnce\(activeJobRecipient\)/);
+  assert.match(qml, /backend\.startExternalClaimUntilTarget\(activeJobRecipient, targetText\)/);
+  assert.match(qml, /enabled: root\.recipientCanClaim/);
+  assert.match(qml, /I confirm this is the initialized public account I intend to fund/);
+  assert.match(qml, /Fund an existing public account instead/);
   assert.match(qml, /backend\.jobStatus\(polledJobId\)/);
   assert.match(qml, /backend\.cancelJob\(activeJobId\)/);
   assert.match(qml, /backend\.acknowledgeJob\(acknowledgedJobId\)/);
@@ -112,4 +155,7 @@ test("account identity comes from core results and sequencer override is support
   assert.match(backend, /m_terminalResponses\.insert\(jobId, response\)/);
   assert.match(backend, /applyProgress\(kind, envelope\);[\s\S]*if \(terminal\)/);
   assert.match(backend, /invokeCore\(QStringLiteral\("jobResultAck"\), \{jobId\}\)[\s\S]*alreadyReaped[\s\S]*if \(!succeeded\(coreEnvelope\) && !alreadyReaped\)[\s\S]*clearTerminalResponse\(jobId\)/);
+  assert.match(backend, /normalized != m_verifiedExternalRecipient/);
+  assert.match(backend, /kind == QStringLiteral\("external_balance"\)[\s\S]*m_verifiedExternalRecipient = m_jobRecipients\.value\(jobId\)/);
+  assert.match(backend, /Open or create the local faucet wallet before funding an existing account/);
 });

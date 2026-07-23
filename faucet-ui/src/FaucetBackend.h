@@ -30,6 +30,9 @@ public slots:
     QString startBalance() override;
     QString startClaimOnce() override;
     QString startClaimUntilTarget(QString target) override;
+    QString startExternalBalance(QString accountId) override;
+    QString startExternalClaimOnce(QString accountId) override;
+    QString startExternalClaimUntilTarget(QString accountId, QString target) override;
     QString cancelJob(QString jobId) override;
     QString jobStatus(QString jobId) override;
     QString acknowledgeJob(QString jobId) override;
@@ -44,15 +47,23 @@ private:
     static QJsonObject statusPayload(const QJsonObject& object);
     static QJsonValue completedResult(const QJsonObject& object);
     static QString scalarString(const QJsonValue& value);
+    static QString normalizedPublicAccountId(const QString& accountId);
+    static QString startedJobId(const QString& response);
     static QString localError(const QString& message);
     static QString localSuccess(const QJsonObject& fields = {});
+    QString startExternalJob(const QString& kind, const QString& method,
+                             const QString& accountId,
+                             const QVariantList& remainingArguments = {});
     void applyProgress(const QString& kind, const QJsonObject& status);
     void applyTerminalResult(const QString& kind, const QJsonObject& status);
     void clearTerminalResponse(const QString& jobId);
 
     QString m_configPath;
     QString m_storagePath;
+    QString m_verifiedExternalRecipient;
+    bool m_clientOpen = false;
     QHash<QString, QString> m_jobKinds;
+    QHash<QString, QString> m_jobRecipients;
     QHash<QString, QString> m_terminalResponses;
 };
 

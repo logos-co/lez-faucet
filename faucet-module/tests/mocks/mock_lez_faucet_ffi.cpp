@@ -36,6 +36,8 @@ std::atomic<int> g_stringFreeCalls{0};
 std::atomic<int> g_destroyCalls{0};
 std::atomic<int> g_rustClaimUntilCalls{0};
 std::atomic<int> g_cancelCalls{0};
+std::string g_lastBalanceAccountId;
+std::string g_lastClaimAccountId;
 std::mutex g_eventMutex;
 std::condition_variable g_eventCondition;
 
@@ -68,6 +70,8 @@ void reset()
     g_destroyCalls = 0;
     g_rustClaimUntilCalls = 0;
     g_cancelCalls = 0;
+    g_lastBalanceAccountId.clear();
+    g_lastClaimAccountId.clear();
 }
 
 void setBalance(uint64_t value) { g_balance = value; }
@@ -106,6 +110,16 @@ int destroyCalls() { return g_destroyCalls.load(); }
 int rustClaimUntilCalls() { return g_rustClaimUntilCalls.load(); }
 int cancelCalls() { return g_cancelCalls.load(); }
 bool destroyWhileClaimActive() { return g_destroyWhileClaimActive.load(); }
+std::string lastBalanceAccountId()
+{
+    std::lock_guard<std::mutex> lock(g_eventMutex);
+    return g_lastBalanceAccountId;
+}
+std::string lastClaimAccountId()
+{
+    std::lock_guard<std::mutex> lock(g_eventMutex);
+    return g_lastClaimAccountId;
+}
 
 } // namespace MockLezFaucetFfi
 
@@ -159,13 +173,21 @@ char* lez_faucet_create_and_initialize_account(FaucetHandle*)
     return copyString("{\"ok\":true,\"result\":{\"account_id\":\"MockAccount\",\"balance\":0}}");
 }
 
-char* lez_faucet_get_balance(FaucetHandle*, const char*)
+char* lez_faucet_get_balance(FaucetHandle*, const char* accountId)
 {
+    {
+        std::lock_guard<std::mutex> lock(g_eventMutex);
+        g_lastBalanceAccountId = accountId == nullptr ? "" : accountId;
+    }
     return copyString("{\"ok\":true,\"result\":" + std::to_string(g_balance.load()) + "}");
 }
 
-char* lez_faucet_claim_once(FaucetHandle*, const char*)
+char* lez_faucet_claim_once(FaucetHandle*, const char* accountId)
 {
+    {
+        std::lock_guard<std::mutex> lock(g_eventMutex);
+        g_lastClaimAccountId = accountId == nullptr ? "" : accountId;
+    }
     g_claimActive = true;
     ++g_claimCalls;
     g_eventCondition.notify_all();
