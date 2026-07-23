@@ -1,16 +1,19 @@
 # LEZ Faucet
 
-LEZ Faucet is a small Basecamp app for creating and funding a public account on
-the Logos Execution Zone public testnet. It turns the current wallet-CLI flow
-into one guided path:
+LEZ Faucet is a small Basecamp app for funding public accounts on the Logos
+Execution Zone public testnet. It supports two guided recipient flows:
 
-1. Create a keychain wallet and show its recovery mnemonic once.
-2. Derive one public account and initialize it on-chain.
-3. Display its balance.
+1. Create a local faucet wallet, show its recovery mnemonic once, derive a
+   public account, and initialize that account on-chain; or
+2. Enter an existing, already-initialized public account ID without importing
+   its keys.
+3. Check the selected recipient and its current balance.
 4. Claim 150 testnet LEZ, once or repeatedly until a target is reached.
 
-The project is intentionally not a general wallet. Transfers, private accounts,
-imports, multiple-account management, and mainnet are outside the v0.1 scope.
+The project is intentionally not a general wallet. Existing-account funding is
+address-only: the faucet neither imports the recipient's keys nor proves or
+takes ownership of that account. Transfers, private accounts, key import,
+multiple-account management, and mainnet are outside the v0.1 scope.
 
 ## Security: testnet only
 
@@ -65,6 +68,13 @@ safe retry can be proven, the operation returns an explicit unknown outcome and
 does not resubmit. Claims cannot be precomputed or submitted concurrently
 because every successful claim rotates the challenge.
 
+For an existing recipient, the app first opens its local faucet wallet solely
+as the LEZ `WalletCore` client context. That local wallet does not need to own
+the recipient and does not sign on its behalf. The recipient must already be a
+public, initialized account owned by the authenticated-transfer program. Before
+enabling a claim, the app fetches and displays that account's balance and
+requires the user to confirm the checked account ID explicitly.
+
 ## Development
 
 Prerequisites are Nix with flakes, Rust, and logos-scaffold 0.1.1. Apple Silicon
@@ -103,6 +113,39 @@ LEZ_FAUCET_LIVE_TEST=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
 It must report the initialization transaction ID, the claim transaction ID when
 available (otherwise an explicit unknown-hash marker), and balances, but never
 the mnemonic, password, or key material.
+
+### Verify a public balance from the terminal
+
+The repository includes an independent, read-only balance query. Pass the public
+account shown by the app with or without its `Public/` prefix:
+
+```sh
+./scripts/lez-balance.sh Public/<account-id>
+# prints one exact decimal integer, for example: 150
+```
+
+It calls the public sequencer's `getAccountBalance` JSON-RPC method directly and
+does not open a wallet or read key material. To query a compatible localnet or a
+different sequencer:
+
+```sh
+LEZ_FAUCET_SEQUENCER_URL=https://sequencer.example.test \
+  ./scripts/lez-balance.sh Public/<account-id>
+```
+
+If you already have the pinned LEZ wallet CLI and a configured wallet home, the
+equivalent read-only command is:
+
+```sh
+LEE_WALLET_HOME_DIR=/path/to/wallet \
+  wallet account get --raw --account-id Public/<account-id> |
+  jq -er '.balance'
+```
+
+The CLI wallet is only the network-client context for this query and need not
+own the account being checked. Its `wallet_config.json` must point at the same
+sequencer. LEZ v0.2.0 uses `LEE_WALLET_HOME_DIR`; the older
+`NSSA_WALLET_HOME_DIR` name is not read by this pinned wallet.
 
 ## Install and release
 
