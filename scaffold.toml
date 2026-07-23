@@ -1,0 +1,50 @@
+[scaffold]
+version = "0.2.0"
+cache_root = ".scaffold/lez-cache"
+
+[repos.lez]
+source = "https://github.com/logos-blockchain/logos-execution-zone.git"
+pin = "a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
+path = ".scaffold/lez-cache/repos/lez/a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
+
+[repos.spel]
+source = "https://github.com/logos-co/spel.git"
+pin = "3d639076ec0946a6a6db799dd5a4648007f362ee"
+
+[repos.basecamp]
+source = "https://github.com/logos-co/logos-basecamp.git"
+pin = "a746cdbc521f72ee22c5a4856fd17a9802bb9d69"
+build = "nix-flake"
+attr = { aarch64-darwin = "bin-macos-app", aarch64-linux = "bin-appimage", x86_64-darwin = "bin-macos-app", x86_64-linux = "bin-appimage" }
+
+[repos.lgpm]
+source = "github:logos-co/logos-package-manager"
+pin = "e5c25989861f4487c3dc8c7b3bc0062bcbc3221f"
+build = "nix-flake"
+attr = "cli-portable"
+
+[modules.lez_faucet]
+flake = "git+file:.?dir=faucet-module#lgx"
+role = "project"
+
+[modules.lez_faucet_ui]
+flake = "git+file:.?dir=faucet-ui#lgx"
+role = "project"
+
+[wallet]
+home_dir = ".scaffold/wallet"
+
+[framework]
+kind = "default"
+version = "0.1.0"
+
+[framework.idl]
+spec = "lssa-idl/0.1.0"
+path = "idl"
+
+[localnet]
+port = 3040
+risc0_dev_mode = true
+
+[circuits]
+version = "0.4.2"

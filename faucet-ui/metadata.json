@@ -1,0 +1,32 @@
+{
+  "name": "lez_faucet_ui",
+  "display_name": "LEZ Faucet",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "interface": "universal",
+  "category": "blockchain",
+  "description": "Create and fund one public LEZ testnet account from Basecamp",
+  "author": "Logos",
+  "main": "lez_faucet_ui_plugin",
+  "icon": null,
+  "view": "qml/FaucetView.qml",
+  "dependencies": ["lez_faucet"],
+  "codegen": {
+    "rep": "src/FaucetBackend.rep",
+    "backend_class": "FaucetBackend",
+    "backend_header": "FaucetBackend.h"
+  },
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": ["qt6.qtdeclarative"]
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

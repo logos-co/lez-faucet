@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "lez-faucet",
+  "displayName": "LEZ Testnet Faucet",
+  "description": "Create, initialize, and fund a public LEZ testnet account from Basecamp.",
+  "homepage": "https://github.com/logos-co/lez-faucet",
+  "indexUrl": "https://github.com/logos-co/lez-faucet/releases/download/index/index.json",
+  "trustedSigners": []
+}

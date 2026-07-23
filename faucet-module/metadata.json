@@ -1,0 +1,35 @@
+{
+  "name": "lez_faucet",
+  "display_name": "LEZ Faucet",
+  "version": "0.1.0",
+  "description": "Create, initialize, and fund a public LEZ testnet account.",
+  "author": "Logos",
+  "type": "core",
+  "category": "blockchain",
+  "interface": "universal",
+  "codegen": {
+    "impl_header": "src/lez_faucet_module.h",
+    "impl_class": "LezFaucetModule"
+  },
+  "main": "lez_faucet_plugin",
+  "dependencies": [],
+  "capabilities": [],
+  "include": [],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [
+      {
+        "name": "lez_faucet_ffi"
+      }
+    ],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}
