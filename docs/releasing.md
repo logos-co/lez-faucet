@@ -3,6 +3,11 @@
 Release the core package before the UI package. The version source of truth is
 each module's `metadata.json`.
 
+Both packages must be released at 0.2.0. Existing v0.1.0 users must upgrade or
+install `lez_faucet` 0.2.0 before `lez_faucet_ui` 0.2.0 because the UI's core
+dependency is currently unversioned; upgrading the UI alone can leave the 0.1.0
+core installed. New installations should resolve the newest core automatically.
+
 ## Standard workflow
 
 The repository contains three manually dispatchable workflows:
@@ -33,11 +38,13 @@ gh workflow run release-lez-faucet-ui.yml
 gh run watch
 ```
 
-Then verify that the rolling `index` release contains both packages.
+Then verify that the rolling `index` release contains both packages at 0.2.0.
+The rebuild scans every non-draft module release, so the v0.1.0 entries remain
+available for rollback.
 
 ## Current CI blocker
 
-As verified during the initial v0.1 bootstrap on 2026-07-23, the shared Nix
+As verified during the initial v0.1.0 bootstrap on 2026-07-23, the shared Nix
 release path can fail while staging Cargo dependencies:
 
 ```text
@@ -66,8 +73,8 @@ Locate the `.lgx` files in the returned store paths, copy them to a temporary
 release directory, and name them from the embedded module versions, for example:
 
 ```text
-lez_faucet-0.1.0.lgx
-lez_faucet_ui-0.1.0.lgx
+lez_faucet-0.2.0.lgx
+lez_faucet_ui-0.2.0.lgx
 ```
 
 For each artifact:
@@ -108,7 +115,7 @@ the catalog index independently reads and verifies the `.lgx` asset.
 
 ```sh
 module=lez_faucet
-version=0.1.0
+version=0.2.0
 release_dir="release/core"
 artifact="${release_dir}/${module}-${version}.lgx"
 
@@ -156,16 +163,16 @@ keep the independently generated files separate.
 ## Publish the manual releases
 
 ```sh
-gh release create lez_faucet-v0.1.0 \
+gh release create lez_faucet-v0.2.0 \
   --target main \
-  --title "lez_faucet v0.1.0" \
-  release/core/lez_faucet-0.1.0.lgx \
+  --title "lez_faucet v0.2.0" \
+  release/core/lez_faucet-0.2.0.lgx \
   release/core/sidecar.json
 
-gh release create lez_faucet_ui-v0.1.0 \
+gh release create lez_faucet_ui-v0.2.0 \
   --target main \
-  --title "lez_faucet_ui v0.1.0" \
-  release/ui/lez_faucet_ui-0.1.0.lgx \
+  --title "lez_faucet_ui v0.2.0" \
+  release/ui/lez_faucet_ui-0.2.0.lgx \
   release/ui/sidecar.json
 
 gh workflow run rebuild-index.yml
@@ -185,7 +192,7 @@ curl -fsSL \
 Finally, test the user journey in a fresh Basecamp profile:
 
 1. Add the raw `logos-repo.json` URL.
-2. Install `lez_faucet_ui` and confirm `lez_faucet` resolves with it.
+2. Install `lez_faucet_ui` 0.2.0 and confirm `lez_faucet` 0.2.0 resolves with it.
 3. Create a disposable wallet and save the one-time mnemonic.
 4. Initialize a fresh account.
 5. Claim until its balance reaches at least 1,000 testnet LEZ.

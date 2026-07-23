@@ -13,7 +13,7 @@ Execution Zone public testnet. It supports two guided recipient flows:
 The project is intentionally not a general wallet. Existing-account funding is
 address-only: the faucet neither imports the recipient's keys nor proves or
 takes ownership of that account. Transfers, private accounts, key import,
-multiple-account management, and mainnet are outside the v0.1 scope.
+multiple-account management, and mainnet are outside the v0.2.0 scope.
 
 ## Security: testnet only
 
@@ -151,14 +151,19 @@ sequencer. LEZ v0.2.0 uses `LEE_WALLET_HOME_DIR`; the older
 
 ## Install and release
 
-End users install `lez_faucet_ui`; Basecamp then resolves its `lez_faucet` core
-dependency from the same catalog. See [Community installation](docs/community-install.md).
+For a new installation, install `lez_faucet_ui`; Basecamp should resolve its
+`lez_faucet` core dependency from the same catalog. When upgrading an existing
+v0.1.0 installation, upgrade or install `lez_faucet` 0.2.0 first, then
+`lez_faucet_ui` 0.2.0. The UI dependency is currently unversioned, so installing
+the new UI alone may leave an already-installed 0.1.0 core in place. The rolling
+catalog retains v0.1.0 for rollback. See
+[Community installation](docs/community-install.md).
 
 Release workflows are present for both modules, but the shared Nix release
 pipeline is currently affected by
 [`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159):
 the pinned cargo-vendor fetch receives HTTP 403 responses from crates.io. Until
-that upstream fix lands, produce the first artifacts locally and publish the
+that upstream fix lands, produce the release artifacts locally and publish the
 `.lgx` plus generated `sidecar.json` as described in [Releasing](docs/releasing.md).
 The catalog index reads the published `.lgx` directly. The sidecar remains the
 release's artifact metadata and is required by the release workflow's

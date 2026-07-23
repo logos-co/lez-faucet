@@ -22,16 +22,20 @@ https://raw.githubusercontent.com/logos-co/lez-faucet/main/logos-repo.json
 ```
 
 The repository descriptor points Basecamp at the rolling catalog index hosted
-in this repository's `index` GitHub release. Before the first module releases
-and index rebuild exist, the repository can be added but will contain no
-installable packages.
+in this repository's `index` GitHub release. The index retains both v0.2.0 and
+v0.1.0 packages so users can roll back when necessary.
 
 ## Install the app
 
-Install **`lez_faucet_ui`** from the package browser. It declares
-**`lez_faucet`** as a dependency, so Basecamp should install the core module
-automatically from the same catalog. If the package manager does not offer
-dependency resolution, install `lez_faucet` first and then `lez_faucet_ui`.
+For a new installation, install **`lez_faucet_ui`** from the package browser. It
+declares **`lez_faucet`** as a dependency, so Basecamp should install the newest
+core module automatically from the same catalog.
+
+For an existing v0.1.0 installation, upgrade or install **`lez_faucet` 0.2.0
+first**, then upgrade **`lez_faucet_ui` to 0.2.0**. The UI dependency is
+currently unversioned, so upgrading the UI alone may treat an installed 0.1.0
+core as sufficient and leave it in place. If automatic dependency resolution
+is unavailable, use this same core-then-UI order for a new installation.
 
 Installing only `lez_faucet` does not add a visible panel; the UI package is the
 app entry point. Restart Basecamp if a newly installed view does not appear.
@@ -42,7 +46,7 @@ app entry point. Restart Basecamp if a newly installed view does not appear.
    deliberately using a compatible localnet.
 2. Read and accept the plaintext-wallet warning.
 3. Create the wallet. LEZ Faucet stores its config, plaintext wallet, and faucet
-   state under Basecamp's application-data directory; v0.1 does not expose a
+   state under Basecamp's application-data directory; v0.2.0 does not expose a
    custom path chooser.
 4. Save the recovery mnemonic from the one-time recovery screen. It cannot be
    shown again by the app.
@@ -165,7 +169,7 @@ Testnet LEZ has no monetary value. This app must not be used for mainnet funds.
   existing recipient, initialize it from the wallet that owns its signing key;
   the faucet does not import or initialize that account.
 - **Existing recipient has the wrong owner:** only a public account owned by the
-  authenticated-transfer program can receive a v0.1 faucet claim.
+  authenticated-transfer program can receive a v0.2.0 faucet claim.
 - **Claim solution rejected:** refresh the pinata challenge. Another successful
   claim changes the challenge seed.
 - **Claim outcome unknown:** do not immediately claim again. Reconnect and

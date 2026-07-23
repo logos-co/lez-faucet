@@ -32,7 +32,7 @@ FaucetBackend::FaucetBackend(QObject* parent)
     if (configuredSequencer.isEmpty())
         configuredSequencer = QString::fromLatin1(DEFAULT_SEQUENCER_URL);
     setSequencerUrl(configuredSequencer);
-    // The pinned Rust surface has no mnemonic-restoration function in v0.1.
+    // The current pinned Rust surface has no mnemonic-restoration function.
     setRecoverySupported(false);
     setActiveJobId(QString());
     setActiveJobKind(QString());

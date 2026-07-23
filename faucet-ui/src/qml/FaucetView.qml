@@ -1036,7 +1036,7 @@ Rectangle {
                     color: Theme.palette.text
                 }
                 LogosText {
-                    text: qsTr("The v0.1 faucet core cannot restore from a recovery phrase. Use the LEZ v0.2.0 wallet CLI to recover, then return to this faucet after recovery support is added.")
+                    text: qsTr("The current faucet core cannot restore from a recovery phrase. Use the LEZ v0.2.0 wallet CLI to recover, then return to this faucet after recovery support is added.")
                     color: Theme.palette.textSecondary
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
