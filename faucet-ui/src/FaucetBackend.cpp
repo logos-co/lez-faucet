@@ -219,7 +219,7 @@ QString FaucetBackend::startExternalJob(
     const QString& accountId,
     const QVariantList& remainingArguments)
 {
-    if (!m_clientOpen) {
+    if (!m_externalRecipients.canStartExternalOperation()) {
         return localError(QStringLiteral(
             "Open or create the local faucet wallet before funding an existing account"));
     }
@@ -234,7 +234,7 @@ QString FaucetBackend::startExternalJob(
     const QString response = startCoreJob(kind, method, arguments);
     const QString jobId = startedJobId(response);
     if (!jobId.isEmpty()) {
-        m_jobRecipients.insert(jobId, normalized);
+        m_externalRecipients.recordJob(jobId.toStdString(), normalized.toStdString());
         setActiveRecipientId(normalized);
     }
     return response;
@@ -246,7 +246,7 @@ void FaucetBackend::applyTerminalResult(const QString& kind, const QJsonObject& 
     const QJsonObject result = resultValue.isObject() ? resultValue.toObject() : QJsonObject();
 
     if (kind == QStringLiteral("create")) {
-        m_clientOpen = true;
+        m_externalRecipients.markClientOpen();
         setWalletExists(true);
         setAccountId(QString());
         setBalance(QString());
@@ -254,7 +254,7 @@ void FaucetBackend::applyTerminalResult(const QString& kind, const QJsonObject& 
     }
 
     if (kind == QStringLiteral("open")) {
-        m_clientOpen = true;
+        m_externalRecipients.markClientOpen();
         return;
     }
 
@@ -393,11 +393,11 @@ QString FaucetBackend::startClaimUntilTarget(QString target)
 
 QString FaucetBackend::startExternalBalance(QString accountId)
 {
+    m_externalRecipients.beginPreflight();
     if (!activeJobId().isEmpty()) {
         return localError(QStringLiteral("Another faucet operation is still active: %1")
                               .arg(activeJobId()));
     }
-    m_verifiedExternalRecipient.clear();
     return startExternalJob(
         QStringLiteral("external_balance"),
         QStringLiteral("balance"),
@@ -407,7 +407,8 @@ QString FaucetBackend::startExternalBalance(QString accountId)
 QString FaucetBackend::startExternalClaimOnce(QString accountId)
 {
     const QString normalized = normalizedPublicAccountId(accountId);
-    if (normalized.isEmpty() || normalized != m_verifiedExternalRecipient) {
+    if (normalized.isEmpty()
+        || !m_externalRecipients.consumePreflightForClaim(normalized.toStdString())) {
         return localError(QStringLiteral(
             "Check this public account and its balance before claiming"));
     }
@@ -420,7 +421,8 @@ QString FaucetBackend::startExternalClaimOnce(QString accountId)
 QString FaucetBackend::startExternalClaimUntilTarget(QString accountId, QString target)
 {
     const QString normalized = normalizedPublicAccountId(accountId);
-    if (normalized.isEmpty() || normalized != m_verifiedExternalRecipient) {
+    if (normalized.isEmpty()
+        || !m_externalRecipients.consumePreflightForClaim(normalized.toStdString())) {
         return localError(QStringLiteral(
             "Check this public account and its balance before claiming"));
     }
@@ -463,7 +465,7 @@ QString FaucetBackend::jobStatus(QString jobId)
         if (state == QStringLiteral("completed")) {
             applyTerminalResult(kind, envelope);
             if (kind == QStringLiteral("external_balance"))
-                m_verifiedExternalRecipient = m_jobRecipients.value(jobId);
+                m_externalRecipients.completePreflight(jobId.toStdString());
         }
         m_terminalResponses.insert(jobId, response);
     }
@@ -490,7 +492,7 @@ QString FaucetBackend::acknowledgeJob(QString jobId)
     const bool known = m_jobKinds.contains(jobId) || m_terminalResponses.contains(jobId);
     clearTerminalResponse(jobId);
     m_jobKinds.remove(jobId);
-    m_jobRecipients.remove(jobId);
+    m_externalRecipients.acknowledge(jobId.toStdString());
     if (activeJobId() == jobId) {
         setActiveJobId(QString());
         setActiveJobKind(QString());

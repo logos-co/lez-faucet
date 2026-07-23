@@ -36,6 +36,7 @@ Rectangle {
     property string verifiedExternalRecipient: ""
     property string externalBalanceText: ""
     property bool externalRecipientConfirmed: false
+    property string externalRecipientError: ""
 
     readonly property string accountId: backend ? backend.accountId : ""
     readonly property string localBalanceText: backend && backend.balance !== "" ? backend.balance : "0"
@@ -85,6 +86,22 @@ Rectangle {
     }
 
     function routeError(message, safeResumeState, failedKind) {
+        var preflightRecovery = FaucetFlow.externalPreflightRecovery(
+            failedKind, errorMessage(message))
+        if (preflightRecovery) {
+            externalRecipientMode = true
+            if (preflightRecovery.clearVerification)
+                clearExternalRecipientVerification()
+            externalRecipientError = preflightRecovery.message
+            errorText = preflightRecovery.message
+            technicalDetails = typeof message === "object"
+                ? JSON.stringify(message) : preflightRecovery.message
+            resumeState = "ready"
+            failedOperationKind = ""
+            screenState = preflightRecovery.screen
+            statusText = "Check the account ID and try again"
+            return
+        }
         var category = FaucetFlow.classifyJobError(message)
         errorText = errorMessage(message)
         technicalDetails = typeof message === "object" ? JSON.stringify(message) : errorText
@@ -119,8 +136,9 @@ Rectangle {
             }
             var pendingJobId = String(envelope.active_job_id || backend.activeJobId || "")
             var pendingJobKind = String(envelope.active_job_kind || backend.activeJobKind || "")
+            var pendingRecipient = String(envelope.active_recipient_id || "")
             if (pendingJobId !== "" && pendingJobKind !== "") {
-                resumeJob(pendingJobId, pendingJobKind)
+                resumeJob(pendingJobId, pendingJobKind, pendingRecipient)
                 return
             }
             if (envelope.wallet_exists)
@@ -130,7 +148,7 @@ Rectangle {
         }, function(error) { routeError(error, "welcome") })
     }
 
-    function resumeJob(jobId, kind) {
+    function resumeJob(jobId, kind, envelopeRecipient) {
         var screens = {
             "create": "creating", "open": "opening", "verify": "compatibility",
             "initialize": "initializing", "balance": "booting",
@@ -142,8 +160,14 @@ Rectangle {
         var isExternalJob = String(kind).indexOf("external_") === 0
         if (isExternalJob) {
             externalRecipientMode = true
-            externalRecipientInput = String(backend.activeRecipientId || "")
-            activeJobRecipient = FaucetFlow.normalizePublicAccountId(externalRecipientInput)
+            var reconnectedRecipient = FaucetFlow.reconnectRecipient(
+                envelopeRecipient,
+                backend ? backend.activeRecipientId : "",
+                activeJobRecipient)
+            if (reconnectedRecipient !== "") {
+                activeJobRecipient = reconnectedRecipient
+                externalRecipientInput = reconnectedRecipient
+            }
         } else {
             activeJobRecipient = ""
         }
@@ -216,11 +240,18 @@ Rectangle {
         externalRecipientConfirmed = false
     }
 
+    function consumeExternalRecipientVerification() {
+        verifiedExternalRecipient = ""
+        externalRecipientConfirmed = false
+        externalRecipientError = ""
+    }
+
     function selectExternalRecipientMode(enabled) {
         if (activeJobId !== "")
             return
         externalRecipientMode = Boolean(enabled)
         clearExternalRecipientVerification()
+        externalRecipientError = ""
         screenState = FaucetFlow.recipientModeScreen(externalRecipientMode, hasAccount)
         statusText = externalRecipientMode
             ? "Check the existing public account before claiming"
@@ -231,10 +262,15 @@ Rectangle {
         if (externalRecipientMode) {
             var normalizedRecipient = FaucetFlow.normalizePublicAccountId(externalRecipientInput)
             if (normalizedRecipient === "") {
-                errorText = "Enter a public account ID as Public/<account-id> or a bare account ID"
+                clearExternalRecipientVerification()
+                externalRecipientError =
+                    "Enter a public account ID as Public/<account-id> or a bare account ID"
+                errorText = externalRecipientError
+                screenState = "ready"
                 return
             }
             clearExternalRecipientVerification()
+            externalRecipientError = ""
             activeJobRecipient = normalizedRecipient
             screenState = "booting"
             statusText = "Checking the existing public account and balance…"
@@ -262,6 +298,8 @@ Rectangle {
         var reply = externalClaim
             ? backend.startExternalClaimOnce(activeJobRecipient)
             : backend.startClaimOnce()
+        if (externalClaim)
+            consumeExternalRecipientVerification()
         watch(reply, function(raw) {
             startJob(raw, externalClaim ? "external_claim_once" : "claim_once", "ready")
         }, function(error) { routeError(error, "ready") })
@@ -280,6 +318,8 @@ Rectangle {
         var reply = externalClaim
             ? backend.startExternalClaimUntilTarget(activeJobRecipient, targetText)
             : backend.startClaimUntilTarget(targetText)
+        if (externalClaim)
+            consumeExternalRecipientVerification()
         watch(reply, function(raw) {
             startJob(raw, externalClaim ? "external_claim_target" : "claim_target", "ready")
         }, function(error) { routeError(error, "ready") })
@@ -449,6 +489,7 @@ Rectangle {
             externalRecipientInput = verifiedExternalRecipient
             externalBalanceText = String(result)
             externalRecipientConfirmed = false
+            externalRecipientError = ""
             screenState = "ready"
             statusText = "Existing public account verified"
         } else if (kind === "claim_once") {
@@ -456,19 +497,18 @@ Rectangle {
             statusText = Number(result.stale_challenge_retries || 0) > 0
                 ? "150 LEZ claimed after refreshing a stale challenge" : "150 LEZ claimed"
         } else if (kind === "external_claim_once") {
-            verifiedExternalRecipient = String(recipient || "")
             externalBalanceText = String(result.balance_after || externalBalanceText)
             screenState = "ready"
             statusText = Number(result.stale_challenge_retries || 0) > 0
-                ? "150 LEZ claimed after refreshing a stale challenge" : "150 LEZ claimed"
+                ? "150 LEZ claimed after refreshing a stale challenge. Check the account again before another claim."
+                : "150 LEZ claimed. Check the account again before another claim."
         } else if (kind === "claim_target") {
             screenState = "ready"
             statusText = "Target reached"
         } else if (kind === "external_claim_target") {
-            verifiedExternalRecipient = String(recipient || "")
             externalBalanceText = String(result.final_balance || externalBalanceText)
             screenState = "ready"
-            statusText = "Target reached"
+            statusText = "Target reached. Check the account again before another claim."
         }
     }
 
@@ -774,6 +814,7 @@ Rectangle {
                         text: root.externalRecipientInput
                         onTextChanged: {
                             root.externalRecipientInput = text
+                            root.externalRecipientError = ""
                             if (!FaucetFlow.externalRecipientVerified(
                                     text, root.verifiedExternalRecipient))
                                 root.clearExternalRecipientVerification()
@@ -785,6 +826,14 @@ Rectangle {
                             root.externalRecipientInput) !== ""
                         onClicked: root.refreshBalance()
                     }
+                }
+                LogosText {
+                    visible: root.externalRecipientMode
+                        && root.externalRecipientError !== ""
+                    text: root.externalRecipientError
+                    color: Theme.palette.error
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
                 }
                 LogosText {
                     visible: !root.externalRecipientMode || root.externalRecipientVerified

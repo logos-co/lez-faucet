@@ -58,6 +58,40 @@ function recipientModeScreen(externalMode, hasLocalAccount) {
     return externalMode || hasLocalAccount ? "ready" : "initialization_required"
 }
 
+function externalPreflightRecovery(failedOperationKind, message) {
+    if (String(failedOperationKind || "") !== "external_balance")
+        return null
+    var detail = String(message || "Could not verify this public account")
+    var lower = detail.toLowerCase()
+    var actionable
+    if (lower.indexOf("uninitialized") >= 0) {
+        actionable = "This public account is not initialized. Initialize it with its owner wallet, then re-check."
+    } else if (lower.indexOf("authenticated-transfer") >= 0 ||
+               lower.indexOf("program owner") >= 0) {
+        actionable = "This is not an authenticated-transfer public account. Paste an initialized public account, then re-check."
+    } else if (classifyError(detail) === "offline") {
+        actionable = "The faucet could not reach the LEZ network. Check your connection, then re-check this account."
+    } else {
+        actionable = "Could not verify this public account. Check the account ID and try again. " + detail
+    }
+    return {
+        screen: "ready",
+        clearVerification: true,
+        message: actionable
+    }
+}
+
+function reconnectRecipient(envelopeRecipient, backendRecipient, priorRecipient) {
+    var envelope = normalizePublicAccountId(envelopeRecipient)
+    if (envelope !== "")
+        return envelope
+    var backend = normalizePublicAccountId(backendRecipient)
+    var prior = normalizePublicAccountId(priorRecipient)
+    if (prior !== "" && backend !== prior)
+        return prior
+    return backend !== "" ? backend : prior
+}
+
 function classifyError(message) {
     var text = String(message || "").toLowerCase()
     if (text.indexOf("outcome_unknown") >= 0 ||
@@ -120,7 +154,7 @@ function genericRetryDecision(failedOperationKind, resumeState, hasAccount) {
     var kind = String(failedOperationKind || "")
     if (kind === "initialize")
         return { action: "initialize", resumeState: String(resumeState || "initialization_required") }
-    if (kind.indexOf("external_") === 0)
+    if (kind.indexOf("external_") === 0 && kind !== "external_balance")
         return { action: "external_balance", resumeState: "ready" }
     return { action: hasAccount ? "balance" : "bootstrap", resumeState: String(resumeState || "") }
 }

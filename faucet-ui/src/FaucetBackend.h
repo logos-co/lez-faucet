@@ -9,6 +9,7 @@
 #include <QString>
 #include <QVariantList>
 
+#include "ExternalRecipientState.h"
 #include "logos_ui_plugin_context.h"
 #include "rep_FaucetBackend_source.h"
 
@@ -60,10 +61,8 @@ private:
 
     QString m_configPath;
     QString m_storagePath;
-    QString m_verifiedExternalRecipient;
-    bool m_clientOpen = false;
+    ExternalRecipientState m_externalRecipients;
     QHash<QString, QString> m_jobKinds;
-    QHash<QString, QString> m_jobRecipients;
     QHash<QString, QString> m_terminalResponses;
 };
 

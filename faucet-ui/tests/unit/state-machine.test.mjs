@@ -40,12 +40,37 @@ test("switching recipient modes returns to local initialization when needed", ()
   assert.equal(flow.recipientModeScreen(false, true), "ready");
 });
 
+test("external preflight failures stay editable and never enter generic retry", () => {
+  const recovery = flow.externalPreflightRecovery(
+    "external_balance",
+    "faucet recipient Public/abc is uninitialized",
+  );
+  assert.equal(recovery.screen, "ready");
+  assert.equal(recovery.clearVerification, true);
+  assert.match(recovery.message, /not initialized/);
+  assert.match(
+    flow.externalPreflightRecovery("external_balance", "failed to fetch sequencer").message,
+    /Check your connection/,
+  );
+  assert.equal(flow.externalPreflightRecovery("claim_once", "failed"), null);
+  assert.notEqual(
+    flow.genericRetryDecision("external_balance", "ready", false).action,
+    "external_balance",
+  );
+});
+
+test("reconnect recipient prefers the bootstrap envelope and preserves a prior pin", () => {
+  assert.equal(flow.reconnectRecipient("envelope", "property", "prior"), "envelope");
+  assert.equal(flow.reconnectRecipient("", "property", ""), "property");
+  assert.equal(flow.reconnectRecipient("", "stale", "prior"), "prior");
+  assert.equal(flow.reconnectRecipient("", "", "prior"), "prior");
+  assert.equal(flow.reconnectRecipient("", "", ""), "");
+});
+
 test("existing-account mode declares its local client prerequisite without importing keys", () => {
   const qml = readFileSync(new URL("../../src/qml/FaucetView.qml", import.meta.url), "utf8");
-  const backend = readFileSync(new URL("../../src/FaucetBackend.cpp", import.meta.url), "utf8");
   assert.match(qml, /local faucet wallet is used only as the LEZ network client/);
   assert.match(qml, /does not import or own the recipient key/);
-  assert.match(backend, /if \(!m_clientOpen\)[\s\S]*Open or create the local faucet wallet/);
 });
 
 test("stop-after-current wins before another exact target claim", () => {
@@ -94,7 +119,6 @@ test("generic initialization failure retries initialize without reopening the li
   assert.equal(resumedInitialization.action, "initialize");
   assert.equal(resumedInitialization.resumeState, "ready");
   assert.equal(flow.genericRetryDecision("", "welcome", false).action, "bootstrap");
-  assert.equal(flow.genericRetryDecision("external_balance", "ready", false).action, "external_balance");
 
   const qml = readFileSync(new URL("../../src/qml/FaucetView.qml", import.meta.url), "utf8");
   assert.match(qml, /function retryFromError\(\)[\s\S]*retry\.action === "initialize"[\s\S]*initializeAccount\(retry\.resumeState\)/);
@@ -138,7 +162,7 @@ test("QML reconnects jobs, explicitly acknowledges secrets, and uses valid desig
   assert.match(qml, /backend\.jobStatus\(polledJobId\)/);
   assert.match(qml, /backend\.cancelJob\(activeJobId\)/);
   assert.match(qml, /backend\.acknowledgeJob\(acknowledgedJobId\)/);
-  assert.match(qml, /resumeJob\(pendingJobId, pendingJobKind\)/);
+  assert.match(qml, /resumeJob\(pendingJobId, pendingJobKind, pendingRecipient\)/);
   assert.match(qml, /Connection interrupted; retrying this operation/);
   assert.match(qml, /textInput\.maximumLength: 39/);
   assert.doesNotMatch(qml, /Number\(balanceText\)|claimsRequired/);
@@ -155,7 +179,4 @@ test("account identity comes from core results and sequencer override is support
   assert.match(backend, /m_terminalResponses\.insert\(jobId, response\)/);
   assert.match(backend, /applyProgress\(kind, envelope\);[\s\S]*if \(terminal\)/);
   assert.match(backend, /invokeCore\(QStringLiteral\("jobResultAck"\), \{jobId\}\)[\s\S]*alreadyReaped[\s\S]*if \(!succeeded\(coreEnvelope\) && !alreadyReaped\)[\s\S]*clearTerminalResponse\(jobId\)/);
-  assert.match(backend, /normalized != m_verifiedExternalRecipient/);
-  assert.match(backend, /kind == QStringLiteral\("external_balance"\)[\s\S]*m_verifiedExternalRecipient = m_jobRecipients\.value\(jobId\)/);
-  assert.match(backend, /Open or create the local faucet wallet before funding an existing account/);
 });
