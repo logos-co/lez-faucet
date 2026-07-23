@@ -75,7 +75,7 @@
         pname = "lez-faucet-ffi";
         version = "0.2.0";
         src = faucetFfiSource;
-        cargoHash = "sha256-N5RcG24Xz3joKvOy0nKWFWtWEjAQl7bDGL7UCi0qBm8=";
+        cargoHash = "sha256-bynsEIeov27VyVr8NdHVcpPwEQr8Kbmd93o+B61XWEM=";
         cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
         doCheck = false;
 
