@@ -28,12 +28,27 @@ Rectangle {
     property string activeJobId: ""
     property string activeJobKind: ""
     property string activeJobResumeState: "welcome"
+    property string activeJobRecipient: ""
     property string failedOperationKind: ""
     property bool jobPollInFlight: false
+    property bool externalRecipientMode: false
+    property string externalRecipientInput: ""
+    property string verifiedExternalRecipient: ""
+    property string externalBalanceText: ""
+    property bool externalRecipientConfirmed: false
+    property string externalRecipientError: ""
 
     readonly property string accountId: backend ? backend.accountId : ""
-    readonly property string balanceText: backend && backend.balance !== "" ? backend.balance : "0"
+    readonly property string localBalanceText: backend && backend.balance !== "" ? backend.balance : "0"
+    readonly property string balanceText: externalRecipientMode ? externalBalanceText : localBalanceText
+    readonly property string displayedAccountId: externalRecipientMode
+        ? verifiedExternalRecipient : accountId
     readonly property bool hasAccount: accountId !== ""
+    readonly property bool externalRecipientVerified: FaucetFlow.externalRecipientVerified(
+        externalRecipientInput, verifiedExternalRecipient)
+    readonly property bool recipientCanClaim: FaucetFlow.canClaimForRecipient(
+        externalRecipientMode, externalRecipientInput,
+        verifiedExternalRecipient, externalRecipientConfirmed)
 
     function watch(reply, onSuccess, onError) {
         if (typeof logos === "undefined" || !logos.watch) {
@@ -71,6 +86,22 @@ Rectangle {
     }
 
     function routeError(message, safeResumeState, failedKind) {
+        var preflightRecovery = FaucetFlow.externalPreflightRecovery(
+            failedKind, errorMessage(message))
+        if (preflightRecovery) {
+            externalRecipientMode = true
+            if (preflightRecovery.clearVerification)
+                clearExternalRecipientVerification()
+            externalRecipientError = preflightRecovery.message
+            errorText = preflightRecovery.message
+            technicalDetails = typeof message === "object"
+                ? JSON.stringify(message) : preflightRecovery.message
+            resumeState = "ready"
+            failedOperationKind = ""
+            screenState = preflightRecovery.screen
+            statusText = "Check the account ID and try again"
+            return
+        }
         var category = FaucetFlow.classifyJobError(message)
         errorText = errorMessage(message)
         technicalDetails = typeof message === "object" ? JSON.stringify(message) : errorText
@@ -105,8 +136,9 @@ Rectangle {
             }
             var pendingJobId = String(envelope.active_job_id || backend.activeJobId || "")
             var pendingJobKind = String(envelope.active_job_kind || backend.activeJobKind || "")
+            var pendingRecipient = String(envelope.active_recipient_id || "")
             if (pendingJobId !== "" && pendingJobKind !== "") {
-                resumeJob(pendingJobId, pendingJobKind)
+                resumeJob(pendingJobId, pendingJobKind, pendingRecipient)
                 return
             }
             if (envelope.wallet_exists)
@@ -116,11 +148,28 @@ Rectangle {
         }, function(error) { routeError(error, "welcome") })
     }
 
-    function resumeJob(jobId, kind) {
+    function resumeJob(jobId, kind, envelopeRecipient) {
         var screens = {
             "create": "creating", "open": "opening", "verify": "compatibility",
             "initialize": "initializing", "balance": "booting",
-            "claim_once": "claiming_once", "claim_target": "claiming_target"
+            "claim_once": "claiming_once", "claim_target": "claiming_target",
+            "external_balance": "booting",
+            "external_claim_once": "claiming_once",
+            "external_claim_target": "claiming_target"
+        }
+        var isExternalJob = String(kind).indexOf("external_") === 0
+        if (isExternalJob) {
+            externalRecipientMode = true
+            var reconnectedRecipient = FaucetFlow.reconnectRecipient(
+                envelopeRecipient,
+                backend ? backend.activeRecipientId : "",
+                activeJobRecipient)
+            if (reconnectedRecipient !== "") {
+                activeJobRecipient = reconnectedRecipient
+                externalRecipientInput = reconnectedRecipient
+            }
+        } else {
+            activeJobRecipient = ""
         }
         activeJobId = jobId
         activeJobKind = kind
@@ -185,7 +234,51 @@ Rectangle {
         }, function(error) { routeError(error, initializationResumeState, "initialize") })
     }
 
+    function clearExternalRecipientVerification() {
+        verifiedExternalRecipient = ""
+        externalBalanceText = ""
+        externalRecipientConfirmed = false
+    }
+
+    function consumeExternalRecipientVerification() {
+        verifiedExternalRecipient = ""
+        externalRecipientConfirmed = false
+        externalRecipientError = ""
+    }
+
+    function selectExternalRecipientMode(enabled) {
+        if (activeJobId !== "")
+            return
+        externalRecipientMode = Boolean(enabled)
+        clearExternalRecipientVerification()
+        externalRecipientError = ""
+        screenState = FaucetFlow.recipientModeScreen(externalRecipientMode, hasAccount)
+        statusText = externalRecipientMode
+            ? "Check the existing public account before claiming"
+            : (hasAccount ? "Your testnet account is ready" : "Initialize your public account")
+    }
+
     function refreshBalance() {
+        if (externalRecipientMode) {
+            var normalizedRecipient = FaucetFlow.normalizePublicAccountId(externalRecipientInput)
+            if (normalizedRecipient === "") {
+                clearExternalRecipientVerification()
+                externalRecipientError =
+                    "Enter a public account ID as Public/<account-id> or a bare account ID"
+                errorText = externalRecipientError
+                screenState = "ready"
+                return
+            }
+            clearExternalRecipientVerification()
+            externalRecipientError = ""
+            activeJobRecipient = normalizedRecipient
+            screenState = "booting"
+            statusText = "Checking the existing public account and balance…"
+            watch(backend.startExternalBalance(normalizedRecipient), function(raw) {
+                startJob(raw, "external_balance", "ready")
+            }, function(error) { routeError(error, "ready", "external_balance") })
+            return
+        }
         if (!hasAccount) {
             screenState = "initialization_required"
             return
@@ -196,23 +289,39 @@ Rectangle {
     }
 
     function startClaimOnce() {
+        if (!recipientCanClaim)
+            return
+        var externalClaim = externalRecipientMode
         screenState = "claiming_once"
         statusText = "Fetching the current faucet challenge…"
-        watch(backend.startClaimOnce(), function(raw) {
-            startJob(raw, "claim_once", "ready")
+        activeJobRecipient = externalClaim ? verifiedExternalRecipient : accountId
+        var reply = externalClaim
+            ? backend.startExternalClaimOnce(activeJobRecipient)
+            : backend.startClaimOnce()
+        if (externalClaim)
+            consumeExternalRecipientVerification()
+        watch(reply, function(raw) {
+            startJob(raw, externalClaim ? "external_claim_once" : "claim_once", "ready")
         }, function(error) { routeError(error, "ready") })
     }
 
     function startClaimToTarget() {
-        if (!FaucetFlow.targetPending(balanceText, targetText))
+        if (!recipientCanClaim || !FaucetFlow.targetPending(balanceText, targetText))
             return
         requiredClaims = 0
         completedClaims = 0
         stopRequested = false
+        var externalClaim = externalRecipientMode
         screenState = "claiming_target"
         statusText = "Fetching the current faucet challenge…"
-        watch(backend.startClaimUntilTarget(targetText), function(raw) {
-            startJob(raw, "claim_target", "ready")
+        activeJobRecipient = externalClaim ? verifiedExternalRecipient : accountId
+        var reply = externalClaim
+            ? backend.startExternalClaimUntilTarget(activeJobRecipient, targetText)
+            : backend.startClaimUntilTarget(targetText)
+        if (externalClaim)
+            consumeExternalRecipientVerification()
+        watch(reply, function(raw) {
+            startJob(raw, externalClaim ? "external_claim_target" : "claim_target", "ready")
         }, function(error) { routeError(error, "ready") })
     }
 
@@ -251,6 +360,7 @@ Rectangle {
         activeJobId = ""
         activeJobKind = ""
         activeJobResumeState = "welcome"
+        activeJobRecipient = ""
         jobPollInFlight = false
     }
 
@@ -296,9 +406,13 @@ Rectangle {
             var state = update.state
             completedClaims = update.completedClaims
             requiredClaims = update.requiredClaims
+            if (activeJobKind === "external_claim_target")
+                externalBalanceText = update.balance
             if (payload.phase)
                 statusText = String(payload.phase)
-            else if (activeJobKind === "claim_once" || activeJobKind === "claim_target")
+            else if (activeJobKind === "claim_once" || activeJobKind === "claim_target"
+                    || activeJobKind === "external_claim_once"
+                    || activeJobKind === "external_claim_target")
                 statusText = "Computing a solution and waiting for confirmation…"
 
             if (!update.terminal)
@@ -306,13 +420,14 @@ Rectangle {
 
             var finishedKind = activeJobKind
             var finishedResume = activeJobResumeState
+            var finishedRecipient = activeJobRecipient
             var operationResult = normalizeOperationResult(payload.result)
             pauseActiveJob()
 
             if (state === "completed" && finishedKind === "create") {
                 mnemonicJobId = polledJobId
                 clearActiveJob()
-                handleJobSuccess(finishedKind, operationResult || {}, finishedResume)
+                handleJobSuccess(finishedKind, operationResult || {}, finishedResume, finishedRecipient)
                 return
             }
 
@@ -334,7 +449,7 @@ Rectangle {
                     routeError(operationResult.error, finishedResume, finishedKind)
                     return
                 }
-                handleJobSuccess(finishedKind, operationResult || {}, finishedResume)
+                handleJobSuccess(finishedKind, operationResult || {}, finishedResume, finishedRecipient)
             })
         }, function(error) {
             jobPollInFlight = false
@@ -343,7 +458,7 @@ Rectangle {
         })
     }
 
-    function handleJobSuccess(kind, result, successState) {
+    function handleJobSuccess(kind, result, successState, recipient) {
         if (kind === "create") {
             // The backend/core replay this terminal result until the user
             // explicitly acknowledges it; no mnemonic is exposed as a property.
@@ -369,13 +484,31 @@ Rectangle {
         } else if (kind === "balance") {
             screenState = "ready"
             statusText = "Your testnet account is ready"
+        } else if (kind === "external_balance") {
+            verifiedExternalRecipient = String(recipient || "")
+            externalRecipientInput = verifiedExternalRecipient
+            externalBalanceText = String(result)
+            externalRecipientConfirmed = false
+            externalRecipientError = ""
+            screenState = "ready"
+            statusText = "Existing public account verified"
         } else if (kind === "claim_once") {
             screenState = "ready"
             statusText = Number(result.stale_challenge_retries || 0) > 0
                 ? "150 LEZ claimed after refreshing a stale challenge" : "150 LEZ claimed"
+        } else if (kind === "external_claim_once") {
+            externalBalanceText = String(result.balance_after || externalBalanceText)
+            screenState = "ready"
+            statusText = Number(result.stale_challenge_retries || 0) > 0
+                ? "150 LEZ claimed after refreshing a stale challenge. Check the account again before another claim."
+                : "150 LEZ claimed. Check the account again before another claim."
         } else if (kind === "claim_target") {
             screenState = "ready"
             statusText = "Target reached"
+        } else if (kind === "external_claim_target") {
+            externalBalanceText = String(result.final_balance || externalBalanceText)
+            screenState = "ready"
+            statusText = "Target reached. Check the account again before another claim."
         }
     }
 
@@ -425,6 +558,10 @@ Rectangle {
         var retry = FaucetFlow.genericRetryDecision(failedOperationKind, resumeState, hasAccount)
         if (retry.action === "initialize")
             initializeAccount(retry.resumeState)
+        else if (retry.action === "external_balance") {
+            screenState = "ready"
+            refreshBalance()
+        }
         else if (retry.action === "balance")
             refreshBalance()
         else
@@ -635,6 +772,11 @@ Rectangle {
                     Layout.alignment: Qt.AlignRight
                     onClicked: root.initializeAccount()
                 }
+                LogosButton {
+                    text: qsTr("Fund an existing public account instead")
+                    Layout.alignment: Qt.AlignRight
+                    onClicked: root.selectExternalRecipientMode(true)
+                }
             }
 
             ColumnLayout {
@@ -642,40 +784,100 @@ Rectangle {
                 Layout.fillWidth: true
                 spacing: Theme.spacing.medium
                 LogosText {
-                    text: root.statusText || qsTr("Your testnet account is ready")
+                    text: root.statusText || (root.externalRecipientMode
+                        ? qsTr("Fund an existing public account")
+                        : qsTr("Your testnet account is ready"))
                     font.pixelSize: Theme.typography.titleText
                     font.weight: Theme.typography.weightBold
                     color: Theme.palette.text
                 }
+                CheckBox {
+                    text: qsTr("Fund an existing public account")
+                    checked: root.externalRecipientMode
+                    enabled: root.activeJobId === ""
+                    onClicked: root.selectExternalRecipientMode(checked)
+                }
                 LogosText {
+                    visible: root.externalRecipientMode
+                    text: qsTr("Paste an already-initialized public account owned by the authenticated-transfer program. This faucet does not import or own the recipient key. The local faucet wallet is used only as the LEZ network client.")
+                    color: Theme.palette.textSecondary
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                RowLayout {
+                    visible: root.externalRecipientMode
+                    Layout.fillWidth: true
+                    LogosTextField {
+                        id: externalRecipientField
+                        Layout.fillWidth: true
+                        placeholderText: qsTr("Public/<account ID> or bare account ID")
+                        text: root.externalRecipientInput
+                        onTextChanged: {
+                            root.externalRecipientInput = text
+                            root.externalRecipientError = ""
+                            if (!FaucetFlow.externalRecipientVerified(
+                                    text, root.verifiedExternalRecipient))
+                                root.clearExternalRecipientVerification()
+                        }
+                    }
+                    LogosButton {
+                        text: qsTr("Check account and balance")
+                        enabled: FaucetFlow.normalizePublicAccountId(
+                            root.externalRecipientInput) !== ""
+                        onClicked: root.refreshBalance()
+                    }
+                }
+                LogosText {
+                    visible: root.externalRecipientMode
+                        && root.externalRecipientError !== ""
+                    text: root.externalRecipientError
+                    color: Theme.palette.error
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                LogosText {
+                    visible: !root.externalRecipientMode || root.externalRecipientVerified
                     text: qsTr("Balance")
                     color: Theme.palette.textSecondary
                 }
                 LogosText {
+                    visible: !root.externalRecipientMode || root.externalRecipientVerified
                     text: root.balanceText + qsTr(" LEZ")
                     font.pixelSize: Theme.typography.titleText
                     font.weight: Theme.typography.weightBold
                     color: Theme.palette.text
                 }
                 LogosText {
-                    text: root.accountId
+                    visible: !root.externalRecipientMode || root.externalRecipientVerified
+                    text: root.externalRecipientMode
+                        ? "Public/" + root.displayedAccountId : root.displayedAccountId
                     color: Theme.palette.textSecondary
                     elide: Text.ElideMiddle
                     Layout.fillWidth: true
                 }
+                CheckBox {
+                    visible: root.externalRecipientMode && root.externalRecipientVerified
+                    text: qsTr("I confirm this is the initialized public account I intend to fund.")
+                    checked: root.externalRecipientConfirmed
+                    onToggled: root.externalRecipientConfirmed = checked
+                }
                 RowLayout {
+                    visible: !root.externalRecipientMode || root.externalRecipientVerified
                     Layout.fillWidth: true
                     LogosButton {
-                        text: qsTr("Refresh balance")
+                        text: root.externalRecipientMode
+                            ? qsTr("Check balance again") : qsTr("Refresh balance")
                         onClicked: root.refreshBalance()
                     }
                     Item { Layout.fillWidth: true }
                     LogosButton {
                         text: qsTr("Claim 150 LEZ")
+                        enabled: root.recipientCanClaim
                         onClicked: root.startClaimOnce()
                     }
                 }
                 RowLayout {
+                    visible: !root.externalRecipientMode || root.externalRecipientVerified
                     Layout.fillWidth: true
                     LogosTextField {
                         id: targetField
@@ -694,11 +896,13 @@ Rectangle {
                                 ? qsTr("Claim to at least %1 LEZ (max 100 claims)").arg(root.targetText)
                                 : qsTr("Target reached")
                         }
-                        enabled: FaucetFlow.targetPending(root.balanceText, root.targetText)
+                        enabled: root.recipientCanClaim
+                            && FaucetFlow.targetPending(root.balanceText, root.targetText)
                         onClicked: root.startClaimToTarget()
                     }
                 }
                 LogosText {
+                    visible: !root.externalRecipientMode || root.externalRecipientVerified
                     text: qsTr("Each claim adds 150 LEZ. Your final balance may be up to 149 LEZ above the target. One run is limited to 100 claims.")
                     color: Theme.palette.textSecondary
                     wrapMode: Text.WordWrap
@@ -754,7 +958,9 @@ Rectangle {
                 }
                 LogosButton {
                     text: qsTr("Retry compatibility check")
-                    onClicked: root.verifyCompatibility(root.hasAccount ? "ready" : "initialization_required")
+                    onClicked: root.verifyCompatibility(
+                        root.externalRecipientMode || root.hasAccount
+                            ? "ready" : "initialization_required")
                 }
             }
 
@@ -795,7 +1001,8 @@ Rectangle {
                 }
                 LogosButton {
                     text: qsTr("Reconcile balance")
-                    onClicked: root.verifyCompatibility("ready")
+                    onClicked: root.externalRecipientMode
+                        ? root.refreshBalance() : root.verifyCompatibility("ready")
                 }
             }
 
@@ -829,7 +1036,7 @@ Rectangle {
                     color: Theme.palette.text
                 }
                 LogosText {
-                    text: qsTr("The v0.1 faucet core cannot restore from a recovery phrase. Use the LEZ v0.2.0 wallet CLI to recover, then return to this faucet after recovery support is added.")
+                    text: qsTr("The current faucet core cannot restore from a recovery phrase. Use the LEZ v0.2.0 wallet CLI to recover, then return to this faucet after recovery support is added.")
                     color: Theme.palette.textSecondary
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true

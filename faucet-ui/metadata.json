@@ -1,11 +1,11 @@
 {
   "name": "lez_faucet_ui",
   "display_name": "LEZ Faucet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "ui_qml",
   "interface": "universal",
   "category": "blockchain",
-  "description": "Create and fund one public LEZ testnet account from Basecamp",
+  "description": "Create and fund a disposable LEZ testnet account, or fund an existing initialized public account without importing its key.",
   "author": "Logos",
   "main": "lez_faucet_ui_plugin",
   "icon": null,

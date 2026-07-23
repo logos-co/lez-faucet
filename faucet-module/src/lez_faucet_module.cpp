@@ -343,7 +343,7 @@ std::string LezFaucetModule::name() const
 
 std::string LezFaucetModule::version() const
 {
-    return "0.1.0";
+    return "0.2.0";
 }
 
 std::string LezFaucetModule::create(const std::string& configPath, const std::string& storagePath,

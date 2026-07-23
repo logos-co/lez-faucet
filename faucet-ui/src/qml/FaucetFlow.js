@@ -35,6 +35,63 @@ function targetPending(balance, target) {
         && compareDecimals(balance, target) < 0
 }
 
+function normalizePublicAccountId(value) {
+    var normalized = String(value === undefined || value === null ? "" : value).trim()
+    if (normalized.indexOf("Public/") === 0)
+        normalized = normalized.slice(7).trim()
+    else if (normalized.indexOf("/") >= 0)
+        return ""
+    return normalized
+}
+
+function externalRecipientVerified(input, verifiedAccountId) {
+    var normalized = normalizePublicAccountId(input)
+    return normalized !== "" && normalized === String(verifiedAccountId || "")
+}
+
+function canClaimForRecipient(externalMode, input, verifiedAccountId, confirmed) {
+    return !externalMode ||
+        (externalRecipientVerified(input, verifiedAccountId) && Boolean(confirmed))
+}
+
+function recipientModeScreen(externalMode, hasLocalAccount) {
+    return externalMode || hasLocalAccount ? "ready" : "initialization_required"
+}
+
+function externalPreflightRecovery(failedOperationKind, message) {
+    if (String(failedOperationKind || "") !== "external_balance")
+        return null
+    var detail = String(message || "Could not verify this public account")
+    var lower = detail.toLowerCase()
+    var actionable
+    if (lower.indexOf("uninitialized") >= 0) {
+        actionable = "This public account is not initialized. Initialize it with its owner wallet, then re-check."
+    } else if (lower.indexOf("authenticated-transfer") >= 0 ||
+               lower.indexOf("program owner") >= 0) {
+        actionable = "This is not an authenticated-transfer public account. Paste an initialized public account, then re-check."
+    } else if (classifyError(detail) === "offline") {
+        actionable = "The faucet could not reach the LEZ network. Check your connection, then re-check this account."
+    } else {
+        actionable = "Could not verify this public account. Check the account ID and try again. " + detail
+    }
+    return {
+        screen: "ready",
+        clearVerification: true,
+        message: actionable
+    }
+}
+
+function reconnectRecipient(envelopeRecipient, backendRecipient, priorRecipient) {
+    var envelope = normalizePublicAccountId(envelopeRecipient)
+    if (envelope !== "")
+        return envelope
+    var backend = normalizePublicAccountId(backendRecipient)
+    var prior = normalizePublicAccountId(priorRecipient)
+    if (prior !== "" && backend !== prior)
+        return prior
+    return backend !== "" ? backend : prior
+}
+
 function classifyError(message) {
     var text = String(message || "").toLowerCase()
     if (text.indexOf("outcome_unknown") >= 0 ||
@@ -94,7 +151,10 @@ function ackDisposition(envelope) {
 }
 
 function genericRetryDecision(failedOperationKind, resumeState, hasAccount) {
-    if (String(failedOperationKind || "") === "initialize")
+    var kind = String(failedOperationKind || "")
+    if (kind === "initialize")
         return { action: "initialize", resumeState: String(resumeState || "initialization_required") }
+    if (kind.indexOf("external_") === 0 && kind !== "external_balance")
+        return { action: "external_balance", resumeState: "ready" }
     return { action: hasAccount ? "balance" : "bootstrap", resumeState: String(resumeState || "") }
 }

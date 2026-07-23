@@ -94,16 +94,19 @@ reused and concurrent claims would race the same challenge.
 
 ## Live verification
 
-The network-writing integration test is ignored by default and requires an
-explicit acknowledgement value:
+Both network-writing integration tests are ignored by default and require
+distinct explicit acknowledgement values.
+
+The local-account flow creates and initializes a fresh account, then funds it:
 
 ```sh
 LEZ_FAUCET_LIVE_TEST=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
   cargo test -p lez-faucet-ffi --test live_public_testnet \
-  -- --ignored --nocapture
+  create_initialize_and_claim_once_on_public_testnet \
+  -- --ignored --exact --nocapture
 ```
 
-Success evidence must include:
+Its success evidence must include:
 
 - the new public account ID;
 - initialization transaction ID;
@@ -112,5 +115,22 @@ Success evidence must include:
 - balance before and after the claim;
 - an assertion that `after == before + 150`.
 
-The test must use fresh temporary local storage and must not print its mnemonic,
-password, or keys.
+The external-recipient flow creates two isolated wallets and proves that wallet
+A can fund wallet B's initialized public account without importing wallet B's
+key. Run it as an optimized binary so proof of work stays within the product's
+solver deadline:
+
+```sh
+LEZ_FAUCET_RUN_LIVE=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
+  cargo test --release -p lez-faucet-ffi --test live_public_testnet \
+  client_wallet_funds_distinct_external_public_account_on_public_testnet \
+  -- --ignored --exact --nocapture
+```
+
+Its success evidence must additionally prove that the two accounts are distinct,
+the exact `+150` credit reaches wallet B, and the confirmed transaction affects
+wallet B rather than wallet A.
+
+Both tests must use fresh temporary local storage and must not print their
+mnemonics, passwords, or keys. They mutate the same public Piñata state, so run
+only one at a time.

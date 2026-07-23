@@ -11,6 +11,7 @@ logos_module(
     NAME lez_faucet_ui
     REP_FILE src/FaucetBackend.rep
     SOURCES
+        src/ExternalRecipientState.h
         src/FaucetBackend.h
         src/FaucetBackend.cpp
     INCLUDE_DIRS
