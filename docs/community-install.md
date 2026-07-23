@@ -117,15 +117,17 @@ repository:
 
 The script accepts either `Public/<account-id>` or the bare base58 account ID,
 uses `https://testnet.lez.logos.co` by default, and prints only the exact decimal
-balance on success. It requires `curl` and `jq`. Override the endpoint only when
-checking a compatible sequencer:
+balance on success. It requires `curl` and Python 3; Python's arbitrary-precision
+integer parser avoids rounding LEZ's `u128` balances. Override the endpoint only
+when checking a compatible sequencer:
 
 ```sh
 LEZ_FAUCET_SEQUENCER_URL=https://sequencer.example.test \
   ./scripts/lez-balance.sh Public/<account-id>
 ```
 
-Users of the pinned upstream LEZ wallet CLI can make the same read-only query:
+Users with `jq` and the pinned upstream LEZ wallet CLI can make the same
+read-only query:
 
 ```sh
 LEE_WALLET_HOME_DIR=/path/to/wallet \

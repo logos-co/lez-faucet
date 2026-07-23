@@ -125,8 +125,10 @@ account shown by the app with or without its `Public/` prefix:
 ```
 
 It calls the public sequencer's `getAccountBalance` JSON-RPC method directly and
-does not open a wallet or read key material. To query a compatible localnet or a
-different sequencer:
+does not open a wallet or read key material. The helper requires `curl` and
+Python 3; Python's arbitrary-precision integers preserve the full LEZ `u128`
+balance without rounding. To query a compatible localnet or a different
+sequencer:
 
 ```sh
 LEZ_FAUCET_SEQUENCER_URL=https://sequencer.example.test \
@@ -134,7 +136,7 @@ LEZ_FAUCET_SEQUENCER_URL=https://sequencer.example.test \
 ```
 
 If you already have the pinned LEZ wallet CLI and a configured wallet home, the
-equivalent read-only command is:
+equivalent read-only command uses `jq` to select its JSON balance:
 
 ```sh
 LEE_WALLET_HOME_DIR=/path/to/wallet \

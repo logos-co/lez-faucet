@@ -21,8 +21,8 @@ fail() {
 
 command -v curl >/dev/null 2>&1 ||
     fail "curl is required"
-command -v jq >/dev/null 2>&1 ||
-    fail "jq is required"
+command -v python3 >/dev/null 2>&1 ||
+    fail "Python 3 is required"
 
 if [ "$#" -ne 1 ]; then
     usage >&2
@@ -57,10 +57,11 @@ esac
 
 sequencer_url=${LEZ_FAUCET_SEQUENCER_URL:-https://testnet.lez.logos.co}
 
-payload=$(
-    jq -cn --arg account_id "$account_id" \
-        '{jsonrpc:"2.0",id:1,method:"getAccountBalance",params:[$account_id]}'
-) || fail "could not construct the JSON-RPC request"
+# account_id has already been restricted to the base58 alphabet, so it cannot
+# inject JSON syntax into this request.
+payload=$(printf \
+    '{"jsonrpc":"2.0","id":1,"method":"getAccountBalance","params":["%s"]}' \
+    "$account_id")
 
 if ! response=$(
     curl -fsS \
@@ -73,27 +74,66 @@ fi
 
 if ! balance=$(
     printf '%s\n' "$response" |
-        jq -er '
-            if type != "object" then
-                error("response is not a JSON object")
-            elif .error != null then
-                error("JSON-RPC error: " + (.error.message // (.error | tostring)))
-            elif has("result") | not then
-                error("response has no result")
-            elif (.result | type) != "number" then
-                error("balance result is not a number")
-            else
-                .result | tostring
-            end
-        '
-); then
-    fail "sequencer returned an invalid balance response"
-fi
+        python3 -c '
+import json
+import sys
 
-case "$balance" in
-    '' | *[!0-9]*)
-        fail "balance result is not a non-negative decimal integer"
-        ;;
-esac
+U128_MAX = "340282366920938463463374607431768211455"
+
+
+class JsonInteger:
+    def __init__(self, lexeme):
+        self.lexeme = lexeme
+
+
+class JsonNonInteger:
+    pass
+
+
+def fail(message):
+    print(f"lez-balance: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+try:
+    envelope = json.load(
+        sys.stdin,
+        parse_int=JsonInteger,
+        parse_float=lambda _lexeme: JsonNonInteger(),
+        parse_constant=lambda _lexeme: JsonNonInteger(),
+    )
+except (json.JSONDecodeError, UnicodeDecodeError):
+    fail("sequencer returned malformed JSON")
+
+if not isinstance(envelope, dict):
+    fail("sequencer response is not a JSON object")
+
+rpc_error = envelope.get("error")
+if rpc_error is not None:
+    if isinstance(rpc_error, dict) and isinstance(rpc_error.get("message"), str):
+        detail = rpc_error["message"]
+    else:
+        detail = "unspecified error"
+    fail(f"JSON-RPC error: {detail}")
+
+if "result" not in envelope:
+    fail("sequencer response has no result")
+
+result = envelope["result"]
+if not isinstance(result, JsonInteger):
+    fail("balance result is not a decimal integer")
+lexeme = result.lexeme
+if lexeme.startswith("-"):
+    fail("balance result is negative")
+if len(lexeme) > len(U128_MAX) or (
+    len(lexeme) == len(U128_MAX) and lexeme > U128_MAX
+):
+    fail("balance result exceeds u128")
+
+print(lexeme)
+'
+); then
+    exit 1
+fi
 
 printf '%s\n' "$balance"

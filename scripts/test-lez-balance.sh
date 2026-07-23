@@ -4,11 +4,11 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 balance_script=$script_dir/lez-balance.sh
-real_jq=$(command -v jq) || {
-    printf 'test-lez-balance: jq is required\n' >&2
+real_python=$(command -v python3) || {
+    printf 'test-lez-balance: Python 3 is required\n' >&2
     exit 1
 }
-jq_dir=$(dirname -- "$real_jq")
+python_dir=$(dirname -- "$real_python")
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/lez-balance-test.XXXXXX")
 trap '/bin/rm -rf -- "$test_root"' EXIT HUP INT TERM
@@ -52,7 +52,7 @@ fail_test() {
 }
 
 run_script() {
-    PATH="$mock_bin:$jq_dir:/usr/bin:/bin" \
+    PATH="$mock_bin:$python_dir:/usr/bin:/bin" \
         MOCK_CURL_PAYLOAD_FILE="$payload_file" \
         MOCK_CURL_URL_FILE="$url_file" \
         "$balance_script" "$@"
@@ -60,14 +60,27 @@ run_script() {
 
 account_id=11111111111111111111111111111111
 
+payload_value() {
+    "$real_python" -c '
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if sys.argv[2] == "account":
+    print(value["params"][0])
+elif sys.argv[2] == "method":
+    print(value["method"])
+' "$payload_file" "$1"
+}
+
 output=$(
     MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":150}' \
         run_script "Public/$account_id"
 ) || fail_test "strips Public/ and prints the balance"
 [ "$output" = 150 ] || fail_test "strips Public/ and prints the balance"
-[ "$(jq -r '.params[0]' "$payload_file")" = "$account_id" ] ||
+[ "$(payload_value account)" = "$account_id" ] ||
     fail_test "strips Public/ and prints the balance"
-[ "$(jq -r '.method' "$payload_file")" = getAccountBalance ] ||
+[ "$(payload_value method)" = getAccountBalance ] ||
     fail_test "strips Public/ and prints the balance"
 pass "strips Public/ and prints the balance"
 
@@ -81,6 +94,22 @@ output=$(
 [ "$(cat "$url_file")" = 'https://sequencer.example.test' ] ||
     fail_test "accepts a bare ID and honors the sequencer override"
 pass "accepts a bare ID and honors the sequencer override"
+
+output=$(
+    MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":9007199254740993}' \
+        run_script "$account_id"
+) || fail_test "preserves an integer above the IEEE-754 safe range"
+[ "$output" = 9007199254740993 ] ||
+    fail_test "preserves an integer above the IEEE-754 safe range"
+pass "preserves an integer above the IEEE-754 safe range"
+
+u128_max=340282366920938463463374607431768211455
+output=$(
+    MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":340282366920938463463374607431768211455}' \
+        run_script "$account_id"
+) || fail_test "preserves u128 max exactly"
+[ "$output" = "$u128_max" ] || fail_test "preserves u128 max exactly"
+pass "preserves u128 max exactly"
 
 rm -f "$payload_file"
 if run_script >"$test_root/no-arg.out" 2>"$test_root/no-arg.err"; then
@@ -111,13 +140,61 @@ grep -q 'JSON-RPC error: Invalid params' "$test_root/rpc.err" ||
     fail_test "rejects JSON-RPC errors"
 pass "rejects JSON-RPC errors"
 
+if MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":' \
+    run_script "$account_id" >"$test_root/malformed.out" 2>"$test_root/malformed.err"; then
+    fail_test "rejects malformed JSON"
+fi
+grep -q 'sequencer returned malformed JSON' "$test_root/malformed.err" ||
+    fail_test "rejects malformed JSON"
+pass "rejects malformed JSON"
+
 if MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":"150"}' \
     run_script "$account_id" >"$test_root/type.out" 2>"$test_root/type.err"; then
-    fail_test "rejects a non-numeric result"
+    fail_test "rejects a result string"
 fi
-grep -q 'balance result is not a number' "$test_root/type.err" ||
-    fail_test "rejects a non-numeric result"
-pass "rejects a non-numeric result"
+grep -q 'balance result is not a decimal integer' "$test_root/type.err" ||
+    fail_test "rejects a result string"
+pass "rejects a result string"
+
+if MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":1e3}' \
+    run_script "$account_id" >"$test_root/exponent.out" 2>"$test_root/exponent.err"; then
+    fail_test "rejects exponent notation"
+fi
+grep -q 'balance result is not a decimal integer' "$test_root/exponent.err" ||
+    fail_test "rejects exponent notation"
+pass "rejects exponent notation"
+
+if MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":1.5}' \
+    run_script "$account_id" >"$test_root/fraction.out" 2>"$test_root/fraction.err"; then
+    fail_test "rejects a fractional result"
+fi
+grep -q 'balance result is not a decimal integer' "$test_root/fraction.err" ||
+    fail_test "rejects a fractional result"
+pass "rejects a fractional result"
+
+if MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":-1}' \
+    run_script "$account_id" >"$test_root/negative.out" 2>"$test_root/negative.err"; then
+    fail_test "rejects a negative result"
+fi
+grep -q 'balance result is negative' "$test_root/negative.err" ||
+    fail_test "rejects a negative result"
+pass "rejects a negative result"
+
+if MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":-0}' \
+    run_script "$account_id" >"$test_root/negative-zero.out" 2>"$test_root/negative-zero.err"; then
+    fail_test "rejects a negative-zero lexeme"
+fi
+grep -q 'balance result is negative' "$test_root/negative-zero.err" ||
+    fail_test "rejects a negative-zero lexeme"
+pass "rejects a negative-zero lexeme"
+
+if MOCK_CURL_RESPONSE='{"jsonrpc":"2.0","id":1,"result":340282366920938463463374607431768211456}' \
+    run_script "$account_id" >"$test_root/overflow.out" 2>"$test_root/overflow.err"; then
+    fail_test "rejects a result above u128 max"
+fi
+grep -q 'balance result exceeds u128' "$test_root/overflow.err" ||
+    fail_test "rejects a result above u128 max"
+pass "rejects a result above u128 max"
 
 if MOCK_CURL_EXIT=22 MOCK_CURL_RESPONSE='upstream HTTP error' \
     run_script "$account_id" >"$test_root/http.out" 2>"$test_root/http.err"; then
@@ -136,11 +213,11 @@ grep -q 'curl is required' "$test_root/no-curl.err" ||
 pass "reports a missing curl dependency"
 
 if PATH="$mock_bin" /bin/sh "$balance_script" "$account_id" \
-    >"$test_root/no-jq.out" 2>"$test_root/no-jq.err"; then
-    fail_test "reports a missing jq dependency"
+    >"$test_root/no-python.out" 2>"$test_root/no-python.err"; then
+    fail_test "reports a missing Python 3 dependency"
 fi
-grep -q 'jq is required' "$test_root/no-jq.err" ||
-    fail_test "reports a missing jq dependency"
-pass "reports a missing jq dependency"
+grep -q 'Python 3 is required' "$test_root/no-python.err" ||
+    fail_test "reports a missing Python 3 dependency"
+pass "reports a missing Python 3 dependency"
 
 printf '1..%s\n' "$tests_run"
