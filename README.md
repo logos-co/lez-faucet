@@ -90,17 +90,17 @@ function of the transaction bytes, and the sequencer returns that same value.
 So a lost submission response costs nothing: the app can still ask whether its
 own transaction landed. There is no success case with a missing hash.
 
-Success requires both facts together: our transaction observed included, and
-the recipient at exactly `balance_before + 150`. Inclusion alone is not enough,
-because a claim whose proof-of-work went stale is still accepted and included —
-it simply executes and does nothing.
+A claim that loses the proof-of-work race is **not** included. The sequencer
+accepts it, but when it comes to build a block the stale solution fails
+execution and the transaction is discarded rather than sealed in. So our
+transaction appearing on chain is itself proof that it paid out, and a losing
+claim simply never appears.
 
-That last point also supplies the only safe retry rule. A second attempt is
-made only when the app has watched its own transaction land and credit nothing,
-which proves it has already executed and cannot execute again. The app never
-infers "safe to retry" from a transaction's *absence*: a transaction that was
-included a moment ago looks exactly like one that was never sent, and acting on
-that guess is how one press becomes two credits.
+A second attempt is therefore made only once the app can see that its own
+transaction is absent, the balance has not moved, and another claimant has
+taken the challenge it solved for. The balance check is what makes this safe:
+the sequencer applies state before the transaction becomes findable by hash, so
+had our claim credited, the balance would already show it.
 
 The recipient must already be a public, initialized account owned by the
 authenticated-transfer program. That is this app's policy, not a rule the

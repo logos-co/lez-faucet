@@ -35,7 +35,6 @@ pub enum ErrorCode {
     SolveAttemptLimit,
     StaleChallengeExhausted,
     SubmissionRejected,
-    IncludedWithoutCredit,
     OutcomeUnknown,
     Cancelled,
     DropInProgress,
@@ -187,10 +186,6 @@ mod tests {
         assert_eq!(rendered(ErrorCode::OutcomeUnknown), "outcome_unknown");
         assert_eq!(rendered(ErrorCode::PoolDepleted), "pool_depleted");
         assert_eq!(
-            rendered(ErrorCode::IncludedWithoutCredit),
-            "included_without_credit"
-        );
-        assert_eq!(
             rendered(ErrorCode::InvalidPublicAccountId),
             "invalid_public_account_id"
         );
@@ -210,7 +205,6 @@ mod tests {
         // resubmit a claim that may already have credited the recipient.
         for code in [
             ErrorCode::OutcomeUnknown,
-            ErrorCode::IncludedWithoutCredit,
             ErrorCode::SubmissionRejected,
             ErrorCode::PoolDepleted,
             ErrorCode::ProgramFingerprintMismatch,

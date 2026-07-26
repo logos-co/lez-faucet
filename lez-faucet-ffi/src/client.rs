@@ -216,7 +216,10 @@ pub struct ClaimObservation {
     pub included: Option<bool>,
     pub balance: Option<u128>,
     /// Whether the global challenge has moved away from the one we solved.
-    /// Read **before** `included`; see [`classify`].
+    ///
+    /// Meaningful only alongside an absent transaction and an unchanged
+    /// balance; on its own it says nothing about our claim, because every
+    /// claimant races the same challenge. See [`classify`].
     pub challenge_rotated: Option<bool>,
 }
 
@@ -226,37 +229,43 @@ pub enum ClaimDecision {
     Continue,
     /// Our transaction is on chain and the recipient gained exactly the prize.
     Credited,
-    /// Our transaction is on chain and provably credited nothing. Safe to
-    /// re-solve: it has already executed and cannot execute again.
-    CreditedNothing,
+    /// Our transaction lost the race and was discarded before reaching a block.
+    /// It credited nothing and never can, so re-solving is safe.
+    LostRace,
     /// The recipient's balance moved in a way that makes our credit unprovable.
     Unattributable,
 }
 
 /// Decide what a round of observations proves.
 ///
-/// Every conclusion here rests on **positive** evidence about our own
-/// transaction. In particular, retrying is authorised only by observing that
-/// our transaction was included and did nothing — never by failing to observe
-/// it.
+/// Two facts about the pinned sequencer drive every rule here, and both were
+/// checked in its source rather than assumed.
 ///
-/// The tempting alternative is to treat "absent from the chain, and the global
-/// challenge has moved on" as proof that our transaction is inert. It is not
-/// safe. Those two facts come from two separate RPC calls at two different
-/// moments, so a transaction that was included between them looks identical to
-/// one that was never included at all: index lag on the first read and a fresh
-/// second read produce exactly that pattern with no adversary involved.
-/// Retrying on it would submit a second claim for a transaction that had in
-/// fact just credited the recipient — 300 LEZ from one button press.
+/// **A losing claim is never included.** When the proof-of-work is stale the
+/// guest returns without calling `ProgramOutput::write`, so it commits an empty
+/// journal (`lee/state_machine/core/src/program.rs:464` is the only journal
+/// write). Decoding that empty journal fails, surfacing as
+/// `ProgramExecutionFailed`, and `build_block_from_mempool` logs and `continue`s
+/// past such a transaction rather than sealing it into a block
+/// (`lez/sequencer/core/src/lib.rs`). So our transaction appearing on chain
+/// *is* proof that it paid out, and a losing claim simply never appears.
 ///
-/// Giving up that inference costs almost nothing, because a stale claim is
-/// still a well-formed transaction: the sequencer accepts it, it is included,
-/// and the guest simply returns without writing any output. The common case
-/// therefore *does* produce the positive proof this function requires.
+/// **State is applied before the transaction becomes queryable.**
+/// `apply_state_diff` runs while the block is still being assembled, and the
+/// block — the thing `get_transaction` searches — is stored afterwards. A
+/// credit is therefore visible in the balance no later than the transaction is
+/// visible by hash, never after it.
 ///
-/// `balance` must be read after `included` within a round, so that a balance
-/// equal to `balance_before` alongside a confirmed inclusion genuinely reflects
-/// the state at or after that inclusion.
+/// That second fact is what makes the `LostRace` rule safe. Reading "absent"
+/// and "challenge rotated" would otherwise be the classic double-credit trap:
+/// two reads at two moments, where a transaction included between them looks
+/// exactly like one never included. Requiring the balance to still equal
+/// `balance_before` closes it — had our transaction credited, the balance would
+/// already show it, because state leads the index.
+///
+/// Note that inclusion with an unchanged balance is *not* a safe retry. It
+/// cannot happen if the model above holds, so seeing it means the model is
+/// wrong, and guessing in that state is how one press becomes two credits.
 #[must_use]
 pub fn classify(
     balance_before: u128,
@@ -264,7 +273,9 @@ pub fn classify(
     observation: ClaimObservation,
 ) -> ClaimDecision {
     let ClaimObservation {
-        included, balance, ..
+        included,
+        balance,
+        challenge_rotated,
     } = observation;
 
     // Someone else moved this account. A balance can no longer attribute a
@@ -273,18 +284,26 @@ pub fn classify(
         return ClaimDecision::Unattributable;
     }
 
-    if included != Some(true) {
-        return ClaimDecision::Continue;
+    if included == Some(true) {
+        return match balance {
+            Some(value) if value == expected => ClaimDecision::Credited,
+            // Included but no credit visible. Under the rules above this is
+            // unreachable; treat it as a broken assumption rather than as
+            // permission to send a second claim.
+            Some(_) => ClaimDecision::Unattributable,
+            None => ClaimDecision::Continue,
+        };
     }
 
-    match balance {
-        Some(value) if value == expected => ClaimDecision::Credited,
-        // Our transaction ran and the recipient is unchanged, so it credited
-        // nothing and never will: its solution was stale by the time it
-        // executed. A fresh attempt cannot double-credit.
-        Some(value) if value == balance_before => ClaimDecision::CreditedNothing,
-        _ => ClaimDecision::Continue,
+    // Absent, the balance has not moved, and another claimant has taken the
+    // challenge we solved for. Our transaction can only fail validation from
+    // here, so it will be discarded and can never credit.
+    if included == Some(false) && balance == Some(balance_before) && challenge_rotated == Some(true)
+    {
+        return ClaimDecision::LostRace;
     }
+
+    ClaimDecision::Continue
 }
 
 // ---- client ----------------------------------------------------------------
@@ -625,8 +644,13 @@ impl FaucetClient {
         request_key: &str,
         token: u64,
     ) -> ApiResult<DropReceipt> {
-        let stop = || {
-            if self.cancellation.is_cancelled(token) {
+        // Once anything has been submitted, no path may report a cancellation
+        // or claim that nothing was sent: the chain action cannot be recalled,
+        // only reconciled, and saying otherwise would hide a live transaction
+        // from the user.
+        let mut submitted = false;
+        let stop = |submitted: bool| {
+            if !submitted && self.cancellation.is_cancelled(token) {
                 Err(ApiError::new(
                     ErrorCode::Cancelled,
                     "The request was cancelled before anything was submitted.",
@@ -636,12 +660,12 @@ impl FaucetClient {
             }
         };
 
-        stop()?;
+        stop(submitted)?;
         self.verify_fingerprint()
             .await
             .map_err(|error| error.at(DropPhase::VerifyingPrograms))?;
 
-        stop()?;
+        stop(submitted)?;
         let recipient_account = self
             .account(account_id, "recipient account")
             .await
@@ -657,7 +681,7 @@ impl FaucetClient {
         })?;
 
         for attempt in 0..=self.policy.max_stale_challenge_retries {
-            stop()?;
+            stop(submitted)?;
             let (pinata, challenge) = self
                 .pinata_state()
                 .await
@@ -667,7 +691,7 @@ impl FaucetClient {
                 .map_err(|error| error.at(DropPhase::FetchingChallenge))?;
             require_pool_can_pay(pinata.balance)?;
 
-            stop()?;
+            stop(submitted)?;
             let cancellation = Arc::clone(&self.cancellation);
             let solution = solver::solve_with_deadline(
                 challenge,
@@ -682,7 +706,7 @@ impl FaucetClient {
             // Re-establish every gate immediately before submitting. Up to a
             // minute of mining may have passed since they were last checked,
             // and each one is a reason not to send this transaction at all.
-            stop()?;
+            stop(submitted)?;
             self.verify_fingerprint()
                 .await
                 .map_err(|error| error.at(DropPhase::RefreshingChallenge))?;
@@ -720,8 +744,11 @@ impl FaucetClient {
 
             // Last point at which cancelling is free. After this the chain
             // action cannot be taken back, only reconciled.
-            stop()?;
+            stop(submitted)?;
 
+            // Latched before the network call, not after: a submission whose
+            // response is lost has still been submitted.
+            submitted = true;
             let transaction = build_claim(account_id, solution)?;
             let tx_hash = HashType(transaction.hash());
             let submission = self
@@ -762,10 +789,10 @@ impl FaucetClient {
                         stale_challenge_retries: attempt,
                     });
                 }
-                // Our transaction has already executed and credited nothing, so
-                // it cannot execute again. This is the one case in which a
-                // second submission is provably safe.
-                Reconciled::CreditedNothing => continue,
+                // Our transaction was discarded before it could reach a block,
+                // so it credited nothing and never can. This is the one case in
+                // which a second submission is provably safe.
+                Reconciled::LostRace => continue,
                 Reconciled::Unknown(error) => {
                     self.mark_unreconciled(&recipient.account_id);
                     return Err(error);
@@ -775,7 +802,7 @@ impl FaucetClient {
 
         Err(ApiError::new(
             ErrorCode::StaleChallengeExhausted,
-            "Other claimants kept winning the challenge first. Nothing was sent. Try again.",
+            "Other claimants kept winning the proof-of-work race. Nothing was credited. You can try again.",
         ))
     }
 
@@ -814,6 +841,13 @@ impl FaucetClient {
                 .await
                 .ok()
                 .map(|account| account.balance);
+            // Only meaningful together with an unchanged balance; on its own
+            // rotation says nothing about our claim, since every claimant
+            // races the same challenge.
+            let challenge_rotated = match self.pinata_state().await {
+                Ok((_, current)) => Some(current != submitted),
+                Err(_) => None,
+            };
 
             match classify(
                 balance_before,
@@ -821,11 +855,11 @@ impl FaucetClient {
                 ClaimObservation {
                     included,
                     balance,
-                    challenge_rotated: None,
+                    challenge_rotated,
                 },
             ) {
                 ClaimDecision::Credited => return Ok(Reconciled::Credited),
-                ClaimDecision::CreditedNothing => return Ok(Reconciled::CreditedNothing),
+                ClaimDecision::LostRace => return Ok(Reconciled::LostRace),
                 ClaimDecision::Unattributable => {
                     return Ok(Reconciled::Unknown(unknown_outcome(
                         "Another transaction changed this account's balance while the claim was in flight, so this credit cannot be attributed to this request.",
@@ -872,7 +906,7 @@ impl Drop for DropPermit {
 
 enum Reconciled {
     Credited,
-    CreditedNothing,
+    LostRace,
     Unknown(ApiError),
 }
 
@@ -1053,55 +1087,71 @@ mod tests {
     }
 
     #[test]
-    fn retry_is_authorised_only_by_positive_proof_of_a_no_op() {
-        // Our transaction ran and the recipient did not move: it credited
-        // nothing and cannot run again.
+    fn retry_is_authorised_only_when_the_claim_provably_lost() {
+        // Absent, balance untouched, and someone else has taken the challenge.
+        // Our transaction can now only fail validation, so it is discarded and
+        // can never credit.
+        assert_eq!(
+            decide(observe(Some(false), Some(BEFORE), Some(true))),
+            ClaimDecision::LostRace
+        );
+    }
+
+    #[test]
+    fn every_weaker_observation_refuses_to_authorise_a_second_claim() {
+        for weaker in [
+            // The challenge is unchanged: our claim may still win.
+            observe(Some(false), Some(BEFORE), Some(false)),
+            // An unreadable challenge is not proof of rotation.
+            observe(Some(false), Some(BEFORE), None),
+            // An unreadable inclusion is not proof of absence.
+            observe(None, Some(BEFORE), Some(true)),
+            // An unreadable balance cannot rule out a credit.
+            observe(Some(false), None, Some(true)),
+            // Already credited: retrying would double it.
+            observe(Some(false), Some(EXPECTED), Some(true)),
+        ] {
+            assert_ne!(
+                decide(weaker),
+                ClaimDecision::LostRace,
+                "{weaker:?} must not authorise a second claim"
+            );
+        }
+    }
+
+    #[test]
+    fn inclusion_without_a_visible_credit_is_never_a_retry() {
+        // Unreachable if the sequencer behaves as its source says: a losing
+        // claim is discarded rather than included, and state is applied before
+        // the transaction is indexed. Seeing this means an assumption broke,
+        // and guessing here is exactly how one press becomes two credits.
         assert_eq!(
             decide(observe(Some(true), Some(BEFORE), Some(true))),
-            ClaimDecision::CreditedNothing
+            ClaimDecision::Unattributable
         );
         assert_eq!(
             decide(observe(Some(true), Some(BEFORE), None)),
-            ClaimDecision::CreditedNothing,
-            "the challenge is irrelevant to this proof"
+            ClaimDecision::Unattributable
         );
     }
 
     #[test]
-    fn absence_from_the_chain_never_authorises_a_second_submission() {
-        // This is the double-credit trap. "Not found" plus "balance unchanged"
-        // plus "challenge rotated" is exactly what a *successfully included*
-        // transaction looks like when the transaction index lags the state
-        // read by one poll. Concluding "stale, safe to retry" here would send a
-        // second claim for a transaction that already paid out.
-        for rotated in [Some(true), Some(false), None] {
-            assert_eq!(
-                decide(observe(Some(false), Some(BEFORE), rotated)),
-                ClaimDecision::Continue,
-                "absence must never authorise a retry (rotated: {rotated:?})"
-            );
-            assert_eq!(
-                decide(observe(None, Some(BEFORE), rotated)),
-                ClaimDecision::Continue,
-                "an unreadable inclusion must never authorise a retry"
-            );
-        }
-    }
-
-    #[test]
-    fn challenge_rotation_carries_no_evidentiary_weight() {
-        // Every claimant races one global challenge, so rotation only says
-        // "somebody won" — never "we did" or "we did not". No decision may
-        // turn on it.
-        for included in [Some(true), Some(false), None] {
+    fn challenge_rotation_alone_never_decides_anything() {
+        // Rotation only says "somebody won", never "we did" or "we did not".
+        // It may narrow the losing case, but it can never on its own turn a
+        // non-decision into a decision — least of all a success.
+        for included in [Some(true), None] {
             for balance in [Some(BEFORE), Some(EXPECTED), None] {
                 let rotated = decide(observe(included, balance, Some(true)));
-                let unrotated = decide(observe(included, balance, Some(false)));
-                let unknown = decide(observe(included, balance, None));
-                assert_eq!(rotated, unrotated);
-                assert_eq!(rotated, unknown);
+                assert_eq!(rotated, decide(observe(included, balance, Some(false))));
+                assert_eq!(rotated, decide(observe(included, balance, None)));
             }
         }
+        // And it never manufactures a success on its own.
+        assert_ne!(
+            decide(observe(Some(false), Some(BEFORE), Some(true))),
+            ClaimDecision::Credited
+        );
     }
 
     #[test]

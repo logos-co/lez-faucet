@@ -27,6 +27,9 @@ var maxAccountIdLength = 64
 
 // ---- exact decimal arithmetic ----------------------------------------------
 
+// The exact prize the deployed Piñata guest pays per claim.
+var PRIZE_AMOUNT = "150"
+
 function normalizedDecimal(value) {
     var text = String(value === undefined || value === null ? "" : value)
     if (!/^[0-9]+$/.test(text))
@@ -349,11 +352,6 @@ var errorPresentations = {
         guidance: "The sequencer rejected the transaction outright, so nothing was sent and nothing is pending.",
         newAttempt: true
     },
-    "included_without_credit": {
-        title: "The claim ran but credited nothing",
-        guidance: "The solution had already gone stale by the time it executed. The account is unchanged.",
-        newAttempt: false
-    },
     "cancelled": {
         title: "Stopped before anything was sent",
         guidance: "No transaction was submitted.",
@@ -449,6 +447,12 @@ function receiptView(result) {
     if (txHash === "" || txHash.length > 128 || /\s/.test(txHash))
         return null
     if (addDecimals(before, amount) !== after)
+        return null
+    // The prize is fixed by the protocol, so a receipt claiming any other
+    // figure is not a receipt this app is willing to show. Defence in depth:
+    // the core already sends only the constant, and this is the one number a
+    // user will act on.
+    if (amount !== PRIZE_AMOUNT)
         return null
 
     var retries = normalizedDecimal(payload.stale_challenge_retries)

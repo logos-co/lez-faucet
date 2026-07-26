@@ -74,15 +74,20 @@ these operations in order:
    the same value the sequencer returns, so a lost submission response never
    leaves the client unable to identify its own transaction.
 8. Reconcile. Success requires the client's own transaction observed included
-   **and** the recipient at exactly `balance_before + 150`. Inclusion alone is
-   insufficient: a claim whose solution went stale is still accepted and
-   included, and simply executes without writing any output.
+   **and** the recipient at exactly `balance_before + 150`.
 
-A second attempt is made only after watching that own transaction land and
-credit nothing, which proves it has already executed. Absence of the
-transaction is never treated as proof that it is safe to retry — a
-just-included transaction is indistinguishable from one never sent, and
-retrying on that guess would credit 300.
+A losing claim never reaches a block. The guest returns without calling
+`ProgramOutput::write`, so it commits an empty journal; decoding that fails as
+`ProgramExecutionFailed`; and `build_block_from_mempool` logs and skips such a
+transaction instead of sealing it in. Inclusion is therefore itself proof of
+payout.
+
+A second attempt is made only once the client's own transaction is absent, the
+recipient balance is unchanged, and the challenge has rotated. The balance
+check carries the safety: `apply_state_diff` runs while the block is still
+being assembled and the block is stored afterwards, so a credit is visible in
+the balance no later than the transaction is visible by hash. Rotation alone is
+never evidence — every claimant races the same challenge.
 
 The pinata program hashes its seed after each successful claim, so an old
 solution cannot be reused and all claimants race one global challenge.

@@ -1147,24 +1147,33 @@ std::string LezFaucetModule::startJob(const std::string& operation, const std::s
         m_jobs.emplace(job->id, job);
     }
 
-    std::thread worker([this, job, work = std::move(work)]() {
-        bool ran = false;
-        {
-            std::lock_guard<std::mutex> lock(job->mutex);
-            // A cancel that lands before the worker starts is honoured without
-            // ever entering the FFI, which is what makes a pre-submit
-            // cancellation provably free of any submitted transaction.
-            if (!job->cancelRequested && !m_stopping.load()) {
-                job->status = "running";
-                ran = true;
-            }
-        }
-        settleJob(job, ran, ran ? work(job) : std::string());
-    });
-
+    // The thread handle must be in place before the worker can possibly finish.
+    //
+    // Holding job->mutex across both the spawn and the assignment is what
+    // guarantees that: the worker's first act is to lock the same mutex, so it
+    // blocks until the handle is stored. Spawning outside the lock instead
+    // would let a worker that finished early be observed by a concurrent reap
+    // or join as a default-constructed, non-joinable job->worker and skipped —
+    // and the joinable handle assigned a moment later would then be destroyed
+    // by ~Job with nothing having joined it, which calls std::terminate() and
+    // takes the whole host application down with it.
     {
         std::lock_guard<std::mutex> lock(job->mutex);
-        job->worker = std::move(worker);
+        job->worker = std::thread([this, job, work = std::move(work)]() {
+            bool ran = false;
+            {
+                std::lock_guard<std::mutex> workerLock(job->mutex);
+                // A cancel that lands before the worker starts is honoured
+                // without ever entering the FFI, which is what makes a
+                // pre-submit cancellation provably free of any submitted
+                // transaction.
+                if (!job->cancelRequested && !m_stopping.load()) {
+                    job->status = "running";
+                    ran = true;
+                }
+            }
+            settleJob(job, ran, ran ? work(job) : std::string());
+        });
     }
     return startedJson(job);
 }
