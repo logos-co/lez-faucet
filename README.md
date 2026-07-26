@@ -5,14 +5,19 @@ Execution Zone public testnet. It supports two guided recipient flows:
 
 1. Create a local faucet wallet, show its recovery mnemonic once, derive a
    public account, and initialize that account on-chain; or
-2. Enter an existing, already-initialized public account ID without importing
-   its keys.
+2. Enter an existing public account ID from LEZ Wallet or the wallet CLI,
+   verify whether it is ready for native transfers, and fund it without
+   importing its keys. If it is uninitialized, the app provides the exact
+   owner-side initialization command and a re-check action.
 3. Check the selected recipient and its current balance.
 4. Claim 150 testnet LEZ, once or repeatedly until a target is reached.
 
 The project is intentionally not a general wallet. Existing-account funding is
 address-only: the faucet neither imports the recipient's keys nor proves or
-takes ownership of that account. Transfers, private accounts, key import,
+takes ownership of that account. The recipient must be public and initialized
+under authenticated-transfer. A `Private/<account-id>` alone is insufficient:
+private funding also requires recipient privacy keys and private state/proof
+handling that this release does not implement. Transfers, key import,
 multiple-account management, and mainnet are outside the v0.2.0 scope.
 
 ## Security: testnet only
@@ -74,6 +79,20 @@ the recipient and does not sign on its behalf. The recipient must already be a
 public, initialized account owned by the authenticated-transfer program. Before
 enabling a claim, the app fetches and displays that account's balance and
 requires the user to confirm the checked account ID explicitly.
+
+For an account newly created by LEZ Wallet or the wallet CLI, initialize it from
+the wallet that owns its signing key. Run the command in that owning wallet's
+context, setting `LEE_WALLET_HOME_DIR` first when it is not the CLI default:
+
+```sh
+wallet auth-transfer init --account-id Public/<account-id>
+```
+
+The app distinguishes an invalid ID, a valid-but-uninitialized account, and an
+account owned by another program. For an uninitialized account it displays this
+exact command with **Copy command** and **Re-check account** actions. The
+recipient mnemonic and private key must remain in the owning wallet and are
+never needed by the faucet.
 
 ## Development
 

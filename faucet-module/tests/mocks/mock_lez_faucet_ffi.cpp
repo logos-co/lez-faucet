@@ -21,6 +21,7 @@ namespace {
 
 FaucetHandle g_handle{42};
 std::atomic<uint64_t> g_balance{0};
+std::atomic<bool> g_balanceRecipientError{false};
 std::atomic<int> g_claimDelayMs{0};
 std::atomic<int> g_fingerprintDelayMs{0};
 std::atomic<bool> g_cancelStopsClaim{false};
@@ -55,6 +56,7 @@ namespace MockLezFaucetFfi {
 void reset()
 {
     g_balance = 0;
+    g_balanceRecipientError = false;
     g_claimDelayMs = 0;
     g_fingerprintDelayMs = 0;
     g_cancelStopsClaim = false;
@@ -75,6 +77,7 @@ void reset()
 }
 
 void setBalance(uint64_t value) { g_balance = value; }
+void setBalanceRecipientError(bool value) { g_balanceRecipientError = value; }
 uint64_t balance() { return g_balance.load(); }
 void setClaimDelayMs(int value) { g_claimDelayMs = value; }
 void setFingerprintDelayMs(int value) { g_fingerprintDelayMs = value; }
@@ -178,6 +181,13 @@ char* lez_faucet_get_balance(FaucetHandle*, const char* accountId)
     {
         std::lock_guard<std::mutex> lock(g_eventMutex);
         g_lastBalanceAccountId = accountId == nullptr ? "" : accountId;
+    }
+    if (g_balanceRecipientError.load()) {
+        return copyString(
+            "{\"ok\":false,\"error\":{\"code\":\"recipient_uninitialized\","
+            "\"message\":\"Public/MockAccount is valid but uninitialized\","
+            "\"account_id\":\"Public/MockAccount\","
+            "\"initialization_command\":\"wallet auth-transfer init --account-id Public/MockAccount\"}}");
     }
     return copyString("{\"ok\":true,\"result\":" + std::to_string(g_balance.load()) + "}");
 }

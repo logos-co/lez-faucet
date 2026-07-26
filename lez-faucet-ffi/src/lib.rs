@@ -108,6 +108,65 @@ pub struct ClaimUntilResult {
     pub claims: Vec<ClaimReceipt>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FaucetRecipientError {
+    InvalidPublicAccountId,
+    Uninitialized {
+        account_id: AccountId,
+    },
+    WrongOwner {
+        account_id: AccountId,
+        owner: [u32; 8],
+    },
+}
+
+impl FaucetRecipientError {
+    fn json_payload(&self) -> serde_json::Value {
+        match self {
+            Self::InvalidPublicAccountId => serde_json::json!({
+                "code": "invalid_public_account_id",
+                "message": "Enter a valid 32-byte base58 public account ID as Public/<account-id> or a bare account ID",
+            }),
+            Self::Uninitialized { account_id } => {
+                let public_account_id = format!("Public/{account_id}");
+                let initialization_command =
+                    format!("wallet auth-transfer init --account-id {public_account_id}");
+                serde_json::json!({
+                    "code": "recipient_uninitialized",
+                    "message": format!(
+                        "{public_account_id} is valid but uninitialized. Initialize it from the wallet that owns its signing key, then re-check it. The faucet never needs its mnemonic or private key."
+                    ),
+                    "account_id": public_account_id,
+                    "initialization_command": initialization_command,
+                })
+            }
+            Self::WrongOwner { account_id, owner } => serde_json::json!({
+                "code": "recipient_wrong_owner",
+                "message": format!(
+                    "Public/{account_id} is initialized under program {}, not authenticated-transfer. This faucet cannot safely fund it.",
+                    program_id_hex(*owner)
+                ),
+                "account_id": format!("Public/{account_id}"),
+                "program_owner": program_id_hex(*owner),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for FaucetRecipientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let payload = self.json_payload();
+        formatter.write_str(
+            payload
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("invalid faucet recipient"),
+        )
+    }
+}
+
+impl std::error::Error for FaucetRecipientError {}
+
 pub struct CreatedWallet {
     pub client: FaucetClient,
     /// Display this exactly once, never log it, then discard it.
@@ -1297,18 +1356,20 @@ fn restrict_file(_path: &Path) -> Result<()> {
 
 fn parse_account_id(raw: &str) -> Result<AccountId> {
     let raw = raw.strip_prefix("Public/").unwrap_or(raw);
-    AccountId::from_str(raw).context("invalid public account ID")
+    AccountId::from_str(raw).map_err(|_| anyhow!(FaucetRecipientError::InvalidPublicAccountId))
 }
 
 fn validate_faucet_recipient(account_id: AccountId, account: &Account) -> Result<()> {
-    ensure!(
-        account != &Account::default(),
-        "faucet recipient Public/{account_id} is uninitialized"
-    );
-    ensure!(
-        account.program_owner == programs::authenticated_transfer().id(),
-        "faucet recipient Public/{account_id} is not owned by authenticated-transfer"
-    );
+    if account == &Account::default() {
+        return Err(FaucetRecipientError::Uninitialized { account_id }.into());
+    }
+    if account.program_owner != programs::authenticated_transfer().id() {
+        return Err(FaucetRecipientError::WrongOwner {
+            account_id,
+            owner: account.program_owner,
+        }
+        .into());
+    }
     Ok(())
 }
 
@@ -1348,11 +1409,16 @@ fn c_string(value: &str) -> *mut c_char {
     CString::new(safe).map_or(ptr::null_mut(), CString::into_raw)
 }
 
-fn json_result<T: Serialize>(result: Result<T>) -> *mut c_char {
-    let value = match result {
+fn json_result_value<T: Serialize>(result: Result<T>) -> serde_json::Value {
+    match result {
         Ok(value) => serde_json::json!({ "ok": true, "result": value }),
         Err(error) => {
-            if let Some(unknown) = error.downcast_ref::<OutcomeUnknown>() {
+            if let Some(recipient) = error.downcast_ref::<FaucetRecipientError>() {
+                serde_json::json!({
+                    "ok": false,
+                    "error": recipient.json_payload(),
+                })
+            } else if let Some(unknown) = error.downcast_ref::<OutcomeUnknown>() {
                 serde_json::json!({
                     "ok": false,
                     "outcome": "unknown",
@@ -1363,8 +1429,11 @@ fn json_result<T: Serialize>(result: Result<T>) -> *mut c_char {
                 serde_json::json!({ "ok": false, "error": format!("{error:#}") })
             }
         }
-    };
-    c_string(&value.to_string())
+    }
+}
+
+fn json_result<T: Serialize>(result: Result<T>) -> *mut c_char {
+    c_string(&json_result_value(result).to_string())
 }
 
 unsafe fn required_str<'a>(value: *const c_char, name: &str) -> Result<&'a str> {
@@ -1852,21 +1921,39 @@ mod tests {
     fn faucet_recipient_requires_initialized_authenticated_transfer_account() {
         let account_id = AccountId::new([7; 32]);
         let uninitialized = Account::default();
-        let error = validate_faucet_recipient(account_id, &uninitialized)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("uninitialized"));
-        assert!(error.contains(&account_id.to_string()));
+        let error = validate_faucet_recipient(account_id, &uninitialized).unwrap_err();
+        let message = error.to_string();
+        let details = error.downcast_ref::<FaucetRecipientError>().unwrap();
+        assert_eq!(
+            details.json_payload()["code"],
+            serde_json::json!("recipient_uninitialized")
+        );
+        assert_eq!(
+            details.json_payload()["initialization_command"],
+            serde_json::json!(format!(
+                "wallet auth-transfer init --account-id Public/{account_id}"
+            ))
+        );
+        assert!(message.contains("uninitialized"));
+        assert!(message.contains(&account_id.to_string()));
+        assert!(message.contains("never needs its mnemonic or private key"));
 
         let wrong_owner = Account {
             program_owner: programs::token().id(),
             balance: 900,
             ..Account::default()
         };
-        let error = validate_faucet_recipient(account_id, &wrong_owner)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not owned by authenticated-transfer"));
+        let error = validate_faucet_recipient(account_id, &wrong_owner).unwrap_err();
+        let details = error.downcast_ref::<FaucetRecipientError>().unwrap();
+        assert_eq!(
+            details.json_payload()["code"],
+            serde_json::json!("recipient_wrong_owner")
+        );
+        assert_eq!(
+            details.json_payload()["program_owner"],
+            serde_json::json!(program_id_hex(programs::token().id()))
+        );
+        assert!(error.to_string().contains("not authenticated-transfer"));
 
         let valid = Account {
             program_owner: programs::authenticated_transfer().id(),
@@ -1874,6 +1961,31 @@ mod tests {
             ..Account::default()
         };
         validate_faucet_recipient(account_id, &valid).unwrap();
+    }
+
+    #[test]
+    fn recipient_errors_are_structured_for_the_ui() {
+        let invalid = parse_account_id("not-a-base58-account").unwrap_err();
+        let payload = json_result_value::<()>(Err(invalid));
+        assert_eq!(payload["ok"], serde_json::json!(false));
+        assert_eq!(
+            payload["error"]["code"],
+            serde_json::json!("invalid_public_account_id")
+        );
+
+        let account_id = AccountId::new([11; 32]);
+        let uninitialized = validate_faucet_recipient(account_id, &Account::default()).unwrap_err();
+        let payload = json_result_value::<()>(Err(uninitialized));
+        assert_eq!(
+            payload["error"]["account_id"],
+            serde_json::json!(format!("Public/{account_id}"))
+        );
+        assert_eq!(
+            payload["error"]["initialization_command"],
+            serde_json::json!(format!(
+                "wallet auth-transfer init --account-id Public/{account_id}"
+            ))
+        );
     }
 
     #[test]

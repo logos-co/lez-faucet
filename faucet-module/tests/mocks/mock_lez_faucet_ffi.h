@@ -7,6 +7,7 @@ namespace MockLezFaucetFfi {
 
 void reset();
 void setBalance(uint64_t value);
+void setBalanceRecipientError(bool value);
 uint64_t balance();
 void setClaimDelayMs(int value);
 void setFingerprintDelayMs(int value);

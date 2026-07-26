@@ -131,6 +131,15 @@ Its success evidence must additionally prove that the two accounts are distinct,
 the exact `+150` credit reaches wallet B, and the confirmed transaction affects
 wallet B rather than wallet A.
 
+This proof deliberately initializes wallet B's account from wallet B before
+wallet A claims to it. A public account ID alone cannot authorize
+authenticated-transfer initialization: the owner-side command is
+`wallet auth-transfer init --account-id Public/<account-id>`. The Basecamp UI
+copies that command and re-checks state, but never requests the recipient
+mnemonic or private key. Private account IDs are outside this proof and are not
+accepted by the faucet because private funding requires additional privacy
+keys, synchronized private state, and proof handling.
+
 Both tests must use fresh temporary local storage and must not print their
 mnemonics, passwords, or keys. They mutate the same public Piñata state, so run
 only one at a time.

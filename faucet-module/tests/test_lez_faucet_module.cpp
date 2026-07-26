@@ -249,6 +249,21 @@ void errorsAreStructured()
     CHECK(module.cancel("missing").find("\"code\":\"unknown_job\"") != std::string::npos);
 }
 
+void recipientErrorsRemainStructuredAcrossTheCoreModule()
+{
+    MockLezFaucetFfi::reset();
+    MockLezFaucetFfi::setBalanceRecipientError(true);
+    LezFaucetModule module;
+    startAndWait(module, module.open("config.json", "wallet.json", "https://testnet"));
+    const std::string failed = startAndWait(module, module.balance("MockAccount"));
+    CHECK(hasStatus(failed, "failed"));
+    CHECK(failed.find("\"code\":\"recipient_uninitialized\"") != std::string::npos);
+    CHECK(failed.find(
+        "\"initialization_command\":\"wallet auth-transfer init --account-id Public/MockAccount\"")
+        != std::string::npos);
+    CHECK(MockLezFaucetFfi::lastBalanceAccountId() == "MockAccount");
+}
+
 void unknownClaimOutcomeRemainsStructured()
 {
     MockLezFaucetFfi::reset();
@@ -409,6 +424,7 @@ int main()
     shutdownCancelsActiveSolveBeforeJoining();
     shutdownWaitsForSubmittedClaimReconciliation();
     errorsAreStructured();
+    recipientErrorsRemainStructuredAcrossTheCoreModule();
     unknownClaimOutcomeRemainsStructured();
     exactDecimalsSurviveAboveJavaScriptSafeInteger();
     claimRunsHaveAHardBound();

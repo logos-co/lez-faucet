@@ -29,6 +29,7 @@ class FaucetBackend
     SLOT(QString startExternalBalance(QString accountId))
     SLOT(QString startExternalClaimOnce(QString accountId))
     SLOT(QString startExternalClaimUntilTarget(QString accountId, QString target))
+    SLOT(QString copyText(QString text))
     SLOT(QString cancelJob(QString jobId))
     SLOT(QString jobStatus(QString jobId))
     // Terminal envelopes, including the create mnemonic, remain replayable in
