@@ -73,9 +73,14 @@
 
       faucetFfi = rustPlatform.buildRustPackage {
         pname = "lez-faucet-ffi";
-        version = "0.2.0";
+        version = "0.3.0";
         src = faucetFfiSource;
-        cargoHash = "sha256-bynsEIeov27VyVr8NdHVcpPwEQr8Kbmd93o+B61XWEM=";
+        # MUST be regenerated: vNext drops the `wallet`, `zeroize` and
+        # `tempfile` dependencies, so the vendored set no longer matches the
+        # 0.2.0 hash. `lib.fakeHash` makes the build fail with the correct
+        # value rather than with a confusing mismatch against a stale one.
+        # Replace with the `got:` hash the first `nix build` reports.
+        cargoHash = pkgs.lib.fakeHash;
         cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
         doCheck = false;
 

@@ -1,0 +1,71 @@
+{
+  "error_outcome_unknown": {
+    "code": "outcome_unknown",
+    "details": {
+      "balance_before": "6000",
+      "outcome": "unknown",
+      "recipient": {
+        "account_id": "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
+        "address": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
+      },
+      "submitted_challenge_fingerprint": "0011223344556677",
+      "tx_hash": "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f"
+    },
+    "message": "could not be confirmed in time",
+    "phase": "reconciling",
+    "retryable": false
+  },
+  "error_uninitialized": {
+    "code": "recipient_uninitialized",
+    "message": "not initialized",
+    "phase": "inspecting_recipient",
+    "retryable": false
+  },
+  "faucet_info": {
+    "can_claim": true,
+    "claims_remaining": "9846",
+    "difficulty_bytes": 3,
+    "effective_difficulty_bits": 24,
+    "network": "lez-public-testnet",
+    "pinata_account": {
+      "account_id": "EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7",
+      "address": "Public/EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7"
+    },
+    "pool_balance": "1476900",
+    "prize_amount": "150",
+    "program_fingerprint": {
+      "authenticated_transfer": "dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc",
+      "pinata": "e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6"
+    },
+    "sequencer_url": "https://testnet.lez.logos.co/"
+  },
+  "inspection_eligible": {
+    "balance": "6000",
+    "eligibility": "eligible",
+    "program_owner": "dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc",
+    "recipient": {
+      "account_id": "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
+      "address": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
+    }
+  },
+  "inspection_uninitialized": {
+    "eligibility": "uninitialized",
+    "initialization_command": "wallet auth-transfer init --account-id Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
+    "recipient": {
+      "account_id": "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
+      "address": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
+    }
+  },
+  "receipt": {
+    "amount": "150",
+    "balance_after": "6150",
+    "balance_before": "6000",
+    "recipient": {
+      "account_id": "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
+      "address": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
+    },
+    "request_key": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+    "stale_challenge_retries": 0,
+    "tx_hash": "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f"
+  }
+}

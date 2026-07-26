@@ -12,3 +12,6 @@ target/
 faucet-module/lib/*.dylib
 faucet-module/lib/*.so
 faucet-module/lib/*.dll
+
+# CMake output from the module test harness
+faucet-module/tests/build/
