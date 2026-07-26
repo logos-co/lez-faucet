@@ -34,6 +34,7 @@ public slots:
     QString startExternalBalance(QString accountId) override;
     QString startExternalClaimOnce(QString accountId) override;
     QString startExternalClaimUntilTarget(QString accountId, QString target) override;
+    QString copyText(QString text) override;
     QString cancelJob(QString jobId) override;
     QString jobStatus(QString jobId) override;
     QString acknowledgeJob(QString jobId) override;

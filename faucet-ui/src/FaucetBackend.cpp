@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 #include "FaucetBackend.h"
 
+#include <QClipboard>
 #include <QDir>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonValue>
 #include <QStandardPaths>
@@ -431,6 +433,17 @@ QString FaucetBackend::startExternalClaimUntilTarget(QString accountId, QString 
         QStringLiteral("claimUntilTarget"),
         normalized,
         {target, MAX_CLAIMS_PER_RUN});
+}
+
+QString FaucetBackend::copyText(QString text)
+{
+    if (text.isEmpty())
+        return localError(QStringLiteral("There is no text to copy"));
+    QClipboard* clipboard = QGuiApplication::clipboard();
+    if (clipboard == nullptr)
+        return localError(QStringLiteral("The system clipboard is not available"));
+    clipboard->setText(text);
+    return localSuccess();
 }
 
 QString FaucetBackend::cancelJob(QString jobId)

@@ -40,14 +40,38 @@ test("switching recipient modes returns to local initialization when needed", ()
   assert.equal(flow.recipientModeScreen(false, true), "ready");
 });
 
-test("external preflight failures stay editable and never enter generic retry", () => {
-  const recovery = flow.externalPreflightRecovery(
-    "external_balance",
-    "faucet recipient Public/abc is uninitialized",
-  );
-  assert.equal(recovery.screen, "ready");
-  assert.equal(recovery.clearVerification, true);
-  assert.match(recovery.message, /not initialized/);
+test("external preflight distinguishes invalid, uninitialized, and wrong-owner recipients", () => {
+  const account = "BrrhddVoucvgkLx3Cpe4uyf4HTv8PWJ72JtvJ39ieSCf";
+  const command = `wallet auth-transfer init --account-id Public/${account}`;
+  const uninitialized = flow.externalPreflightRecovery("external_balance", {
+    code: "recipient_uninitialized",
+    message: `Public/${account} is valid but uninitialized`,
+    account_id: `Public/${account}`,
+    initialization_command: command,
+  });
+  assert.equal(uninitialized.screen, "ready");
+  assert.equal(uninitialized.clearVerification, true);
+  assert.equal(uninitialized.issue, "uninitialized");
+  assert.equal(uninitialized.initializationCommand, command);
+  assert.match(uninitialized.message, /valid but uninitialized/);
+
+  const invalid = flow.externalPreflightRecovery("external_balance", {
+    code: "invalid_public_account_id",
+    message: "Enter a valid 32-byte base58 public account ID",
+  });
+  assert.equal(invalid.issue, "invalid");
+  assert.equal(invalid.initializationCommand, "");
+  assert.match(invalid.message, /valid 32-byte base58/);
+
+  const wrongOwner = flow.externalPreflightRecovery("external_balance", {
+    code: "recipient_wrong_owner",
+    message: `Public/${account} is initialized under another program`,
+    program_owner: "deadbeef",
+  });
+  assert.equal(wrongOwner.issue, "wrong_owner");
+  assert.equal(wrongOwner.initializationCommand, "");
+  assert.match(wrongOwner.message, /another program/);
+
   assert.match(
     flow.externalPreflightRecovery("external_balance", "failed to fetch sequencer").message,
     /Check your connection/,
@@ -70,7 +94,14 @@ test("reconnect recipient prefers the bootstrap envelope and preserves a prior p
 test("existing-account mode declares its local client prerequisite without importing keys", () => {
   const qml = readFileSync(new URL("../../src/qml/FaucetView.qml", import.meta.url), "utf8");
   assert.match(qml, /local faucet wallet is used only as the LEZ network client/);
-  assert.match(qml, /does not import or own the recipient key/);
+  assert.match(qml, /never needs the recipient mnemonic or private key/);
+  assert.match(qml, /externalInitializationCommand/);
+  assert.match(qml, /text: qsTr\("Copy command"\)/);
+  assert.match(qml, /qsTr\("Re-check account"\)/);
+  assert.match(
+    qml,
+    /onTextChanged:[\s\S]*clearExternalRecipientIssue\(\)[\s\S]*errorText = ""[\s\S]*technicalDetails = ""[\s\S]*Verify this public account before claiming[\s\S]*clearExternalRecipientVerification\(\)/,
+  );
 });
 
 test("stop-after-current wins before another exact target claim", () => {
@@ -148,6 +179,7 @@ test("the remote interface never exposes mnemonic or password properties", () =>
   assert.match(rep, /SLOT\(QString startExternalBalance\(QString accountId\)\)/);
   assert.match(rep, /SLOT\(QString startExternalClaimOnce\(QString accountId\)\)/);
   assert.match(rep, /SLOT\(QString startExternalClaimUntilTarget\(QString accountId, QString target\)\)/);
+  assert.match(rep, /SLOT\(QString copyText\(QString text\)\)/);
 });
 
 test("QML reconnects jobs, explicitly acknowledges secrets, and uses valid design tokens", () => {
@@ -159,6 +191,7 @@ test("QML reconnects jobs, explicitly acknowledges secrets, and uses valid desig
   assert.match(qml, /enabled: root\.recipientCanClaim/);
   assert.match(qml, /I confirm this is the initialized public account I intend to fund/);
   assert.match(qml, /Fund an existing public account instead/);
+  assert.match(qml, /backend\.copyText\(externalInitializationCommand\)/);
   assert.match(qml, /backend\.jobStatus\(polledJobId\)/);
   assert.match(qml, /backend\.cancelJob\(activeJobId\)/);
   assert.match(qml, /backend\.acknowledgeJob\(acknowledgedJobId\)/);

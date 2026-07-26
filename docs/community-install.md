@@ -67,13 +67,21 @@ The recipient must already:
 - be initialized on the same sequencer; and
 - be owned by the authenticated-transfer program.
 
+New public accounts start uninitialized. Initialization claims the account for
+the authenticated-transfer program and must be authorized by the wallet that
+owns the account's signing key. The faucet cannot do this from an address alone,
+and it must never be given the recipient mnemonic or private key.
+
 If necessary, initialize the account from the LEZ wallet that actually owns its
-signing key before opening the faucet:
+signing key:
 
 ```sh
-LEE_WALLET_HOME_DIR=/path/to/owning-wallet \
-  wallet auth-transfer init --account-id Public/<account-id>
+wallet auth-transfer init --account-id Public/<account-id>
 ```
+
+Run this in the owning wallet's context. When using a non-default wallet home,
+set that wallet's `LEE_WALLET_HOME_DIR` environment variable before the
+command; a different wallet home cannot authorize initialization.
 
 Then fund it in Basecamp:
 
@@ -84,18 +92,29 @@ Then fund it in Basecamp:
    mnemonic.
 2. Choose **Fund an existing public account instead** during initialization, or
    enable **Fund an existing public account** on the ready screen.
-3. Paste `Public/<account-id>` or the bare base58 account ID.
-4. Select **Check account and balance**. This preflight rejects an uninitialized
-   account or one not owned by the authenticated-transfer program.
-5. Review the normalized account ID and fetched balance, then select the
+3. Paste `Public/<account-id>` or the bare 32-byte base58 account ID. Private
+   account IDs are not accepted.
+4. Select **Verify account and balance**. The app reports malformed IDs,
+   valid-but-uninitialized accounts, and accounts owned by another program as
+   separate states.
+5. For a valid but uninitialized account, select **Copy command**, run
+   `wallet auth-transfer init --account-id Public/<account-id>` in the owning
+   wallet, wait for inclusion, then select **Re-check account**.
+6. Review the normalized account ID and fetched balance, then select the
    explicit confirmation that this is the account you intend to fund.
-6. Use **Claim 150 LEZ** or **Claim until target**. Changing the recipient text
+7. Use **Claim 150 LEZ** or **Claim until target**. Changing the recipient text
    clears the preflight and confirmation, so the new value must be checked
    again.
 
 Funding is a public credit and does not require the faucet to possess the
 recipient's signing key. The recipient remains controlled only by its original
 wallet.
+
+Only public authenticated-transfer accounts are supported. A
+`Private/<account-id>` is not enough to fund a private account: private
+recipient handling additionally needs privacy public keys, synchronized private
+state, and proof/decryption support. LEZ Faucet v0.2.0 intentionally does not
+collect or import that material.
 
 The public testnet can take tens of seconds to include a transaction. Do not
 close Basecamp while an initialization or claim is pending. Normal claim
@@ -164,10 +183,10 @@ Testnet LEZ has no monetary value. This app must not be used for mainnet funds.
 - **Network version mismatch:** the sequencer fingerprint differs from the
   compiled v0.2.0 program IDs. Stop; the client must be upgraded to the exact
   testnet revision before transacting.
-- **Account is uninitialized:** wait for the initialization transaction, then
-  retry only after the account state is visible from the sequencer. For an
-  existing recipient, initialize it from the wallet that owns its signing key;
-  the faucet does not import or initialize that account.
+- **Account is uninitialized:** use **Copy command**, run it from the wallet
+  that owns the account, wait for the initialization transaction to be visible
+  from the sequencer, then use **Re-check account**. The faucet does not import
+  or initialize that account and never needs its mnemonic or private key.
 - **Existing recipient has the wrong owner:** only a public account owned by the
   authenticated-transfer program can receive a v0.2.0 faucet claim.
 - **Claim solution rejected:** refresh the pinata challenge. Another successful

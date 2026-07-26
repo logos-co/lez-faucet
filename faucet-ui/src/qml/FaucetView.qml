@@ -37,6 +37,8 @@ Rectangle {
     property string externalBalanceText: ""
     property bool externalRecipientConfirmed: false
     property string externalRecipientError: ""
+    property string externalRecipientIssue: ""
+    property string externalInitializationCommand: ""
 
     readonly property string accountId: backend ? backend.accountId : ""
     readonly property string localBalanceText: backend && backend.balance !== "" ? backend.balance : "0"
@@ -64,7 +66,7 @@ Rectangle {
         try {
             var object = JSON.parse(String(raw || "{}"))
             if (!object.ok)
-                return { ok: false, error: errorMessage(object.error) }
+                return { ok: false, error: object.error || "Operation failed" }
             return object
         } catch (error) {
             return { ok: false, error: "The faucet returned an invalid response" }
@@ -87,19 +89,24 @@ Rectangle {
 
     function routeError(message, safeResumeState, failedKind) {
         var preflightRecovery = FaucetFlow.externalPreflightRecovery(
-            failedKind, errorMessage(message))
+            failedKind, message)
         if (preflightRecovery) {
             externalRecipientMode = true
             if (preflightRecovery.clearVerification)
                 clearExternalRecipientVerification()
             externalRecipientError = preflightRecovery.message
+            externalRecipientIssue = preflightRecovery.issue || ""
+            externalInitializationCommand =
+                preflightRecovery.initializationCommand || ""
             errorText = preflightRecovery.message
             technicalDetails = typeof message === "object"
                 ? JSON.stringify(message) : preflightRecovery.message
             resumeState = "ready"
             failedOperationKind = ""
             screenState = preflightRecovery.screen
-            statusText = "Check the account ID and try again"
+            statusText = preflightRecovery.issue === "uninitialized"
+                ? "Initialize this account in its owner wallet, then re-check"
+                : "Check the account ID and try again"
             return
         }
         var category = FaucetFlow.classifyJobError(message)
@@ -240,10 +247,16 @@ Rectangle {
         externalRecipientConfirmed = false
     }
 
+    function clearExternalRecipientIssue() {
+        externalRecipientError = ""
+        externalRecipientIssue = ""
+        externalInitializationCommand = ""
+    }
+
     function consumeExternalRecipientVerification() {
         verifiedExternalRecipient = ""
         externalRecipientConfirmed = false
-        externalRecipientError = ""
+        clearExternalRecipientIssue()
     }
 
     function selectExternalRecipientMode(enabled) {
@@ -251,7 +264,7 @@ Rectangle {
             return
         externalRecipientMode = Boolean(enabled)
         clearExternalRecipientVerification()
-        externalRecipientError = ""
+        clearExternalRecipientIssue()
         screenState = FaucetFlow.recipientModeScreen(externalRecipientMode, hasAccount)
         statusText = externalRecipientMode
             ? "Check the existing public account before claiming"
@@ -270,7 +283,7 @@ Rectangle {
                 return
             }
             clearExternalRecipientVerification()
-            externalRecipientError = ""
+            clearExternalRecipientIssue()
             activeJobRecipient = normalizedRecipient
             screenState = "booting"
             statusText = "Checking the existing public account and balance…"
@@ -286,6 +299,22 @@ Rectangle {
         watch(backend.startBalance(), function(raw) {
             startJob(raw, "balance", "ready")
         }, function(error) { routeError(error, "ready") })
+    }
+
+    function copyInitializationCommand() {
+        if (!backend || externalInitializationCommand === "")
+            return
+        watch(backend.copyText(externalInitializationCommand), function(raw) {
+            var envelope = parseEnvelope(raw)
+            if (!envelope.ok) {
+                externalRecipientError = errorMessage(envelope.error)
+                return
+            }
+            statusText = "Initialization command copied"
+        }, function(error) {
+            externalRecipientError = "Could not copy the initialization command"
+            technicalDetails = String(error || "")
+        })
     }
 
     function startClaimOnce() {
@@ -489,7 +518,7 @@ Rectangle {
             externalRecipientInput = verifiedExternalRecipient
             externalBalanceText = String(result)
             externalRecipientConfirmed = false
-            externalRecipientError = ""
+            clearExternalRecipientIssue()
             screenState = "ready"
             statusText = "Existing public account verified"
         } else if (kind === "claim_once") {
@@ -799,7 +828,7 @@ Rectangle {
                 }
                 LogosText {
                     visible: root.externalRecipientMode
-                    text: qsTr("Paste an already-initialized public account owned by the authenticated-transfer program. This faucet does not import or own the recipient key. The local faucet wallet is used only as the LEZ network client.")
+                    text: qsTr("Paste a public account from LEZ Wallet or the wallet CLI. Use Public/<account ID> or the bare ID. The faucet never needs the recipient mnemonic or private key. The local faucet wallet is used only as the LEZ network client.")
                     color: Theme.palette.textSecondary
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
@@ -814,14 +843,19 @@ Rectangle {
                         text: root.externalRecipientInput
                         onTextChanged: {
                             root.externalRecipientInput = text
-                            root.externalRecipientError = ""
+                            root.clearExternalRecipientIssue()
+                            root.errorText = ""
+                            root.technicalDetails = ""
+                            root.statusText = "Verify this public account before claiming"
                             if (!FaucetFlow.externalRecipientVerified(
                                     text, root.verifiedExternalRecipient))
                                 root.clearExternalRecipientVerification()
                         }
                     }
                     LogosButton {
-                        text: qsTr("Check account and balance")
+                        text: root.externalRecipientIssue === ""
+                            ? qsTr("Verify account and balance")
+                            : qsTr("Re-check account")
                         enabled: FaucetFlow.normalizePublicAccountId(
                             root.externalRecipientInput) !== ""
                         onClicked: root.refreshBalance()
@@ -834,6 +868,27 @@ Rectangle {
                     color: Theme.palette.error
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
+                }
+                LogosText {
+                    visible: root.externalRecipientMode
+                        && root.externalRecipientIssue === "uninitialized"
+                        && root.externalInitializationCommand !== ""
+                    text: root.externalInitializationCommand
+                    font.family: "monospace"
+                    color: Theme.palette.text
+                    wrapMode: Text.WrapAnywhere
+                    Layout.fillWidth: true
+                }
+                RowLayout {
+                    visible: root.externalRecipientMode
+                        && root.externalRecipientIssue === "uninitialized"
+                        && root.externalInitializationCommand !== ""
+                    Layout.fillWidth: true
+                    LogosButton {
+                        text: qsTr("Copy command")
+                        onClicked: root.copyInitializationCommand()
+                    }
+                    Item { Layout.fillWidth: true }
                 }
                 LogosText {
                     visible: !root.externalRecipientMode || root.externalRecipientVerified

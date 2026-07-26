@@ -58,18 +58,29 @@ function recipientModeScreen(externalMode, hasLocalAccount) {
     return externalMode || hasLocalAccount ? "ready" : "initialization_required"
 }
 
-function externalPreflightRecovery(failedOperationKind, message) {
+function externalPreflightRecovery(failedOperationKind, error) {
     if (String(failedOperationKind || "") !== "external_balance")
         return null
-    var detail = String(message || "Could not verify this public account")
+    var structured = error && typeof error === "object" ? error : {}
+    var code = String(structured.code || "")
+    var detail = String(structured.message || error || "Could not verify this public account")
     var lower = detail.toLowerCase()
     var actionable
-    if (lower.indexOf("uninitialized") >= 0) {
-        actionable = "This public account is not initialized. Initialize it with its owner wallet, then re-check."
-    } else if (lower.indexOf("authenticated-transfer") >= 0 ||
+    var issue = "invalid"
+    var initializationCommand = ""
+    if (code === "recipient_uninitialized" || lower.indexOf("uninitialized") >= 0) {
+        issue = "uninitialized"
+        initializationCommand = String(structured.initialization_command || "")
+        actionable = detail
+    } else if (code === "recipient_wrong_owner" ||
+               lower.indexOf("authenticated-transfer") >= 0 ||
                lower.indexOf("program owner") >= 0) {
-        actionable = "This is not an authenticated-transfer public account. Paste an initialized public account, then re-check."
+        issue = "wrong_owner"
+        actionable = detail
+    } else if (code === "invalid_public_account_id") {
+        actionable = detail
     } else if (classifyError(detail) === "offline") {
+        issue = "offline"
         actionable = "The faucet could not reach the LEZ network. Check your connection, then re-check this account."
     } else {
         actionable = "Could not verify this public account. Check the account ID and try again. " + detail
@@ -77,7 +88,9 @@ function externalPreflightRecovery(failedOperationKind, message) {
     return {
         screen: "ready",
         clearVerification: true,
-        message: actionable
+        message: actionable,
+        issue: issue,
+        initializationCommand: initializationCommand
     }
 }
 
