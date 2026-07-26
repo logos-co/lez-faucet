@@ -13,18 +13,29 @@ extern "C" {
 #include <lez_faucet_ffi.h>
 }
 
-// Qt-free Basecamp core module. Every wallet/network operation starts a worker
-// job and returns immediately. Call jobStatus(job_id) until the status is one
-// of completed, failed, or cancelled.
+// Qt-free Basecamp core module for the stateless LEZ Faucet.
 //
-// Every terminal result is replayed by jobStatus until jobResultAck(job_id)
-// explicitly acknowledges it, at which point the retained job is reaped. A
-// create result's stored mnemonic is wiped as part of that acknowledgement.
+// This module owns no wallet, no key material and no files. It accepts one
+// public account address and, per explicit user action, requests exactly one
+// fixed 150 LEZ credit. There is no password, mnemonic, recovery phrase or
+// account-creation surface anywhere in this class, and there must never be:
+// the underlying claim transaction names both accounts as unsigned public
+// participants, so there is nothing to sign with.
 //
-// claimUntilTarget cancellation is cooperative: it is checked before the
-// first claim and between confirmed claims. An in-flight claim is never
-// abandoned because its Rust ABI call owns submission, polling, and balance
-// verification as one atomic operation.
+// getFaucetInfo/inspectRecipient/requestDrop start a worker job and return
+// immediately. Call jobStatus(job_id) until the status is one of succeeded,
+// failed, cancelled or outcome_unknown. Every terminal result is replayed by
+// jobStatus until jobResultAck(job_id) acknowledges it, at which point the
+// retained job record is reaped.
+//
+// A request-key tombstone is *not* a job record. Job records are bounded and
+// reapable; tombstones live for the whole process and are never evicted,
+// because forgetting a key would let a bridge retry become a second claim.
+//
+// Cancellation is cooperative and scoped by an operation token allocated here.
+// Before submission a cancel yields `cancelled`; once the Rust client has
+// submitted, the chain action is irrevocable and the job terminates as
+// succeeded/failed/outcome_unknown, never as cancelled.
 //
 // Keep public declarations on one line: logos-cpp-generator parses this header
 // line-by-line when generating Basecamp glue.
@@ -39,40 +50,56 @@ public:
     std::string name() const;
     std::string version() const;
 
-    std::string create(const std::string& configPath, const std::string& storagePath, const std::string& sequencerUrl, const std::string& password);
-    std::string open(const std::string& configPath, const std::string& storagePath, const std::string& sequencerUrl);
-    std::string destroy();
-    std::string verifyFingerprint();
-    std::string createAndInitializeAccount();
-    std::string balance(const std::string& accountId);
-    std::string claimOnce(const std::string& accountId);
-    std::string claimUntilTarget(const std::string& accountId, const std::string& target, int64_t maxClaims);
+    std::string configure(const std::string& sequencerUrl);
+    std::string getFaucetInfo();
+    std::string inspectRecipient(const std::string& address);
+    std::string requestDrop(const std::string& address, const std::string& requestKey);
     std::string cancel(const std::string& jobId);
     std::string jobStatus(const std::string& jobId);
     std::string jobResultAck(const std::string& jobId);
+    std::string shutdown();
 
 private:
     struct Job;
     using JobPtr = std::shared_ptr<Job>;
 
-    std::string startJob(const std::string& operation, std::function<std::string(const JobPtr&)> work);
+    std::string startJob(const std::string& operation, const std::string& requestKey, bool mutating, std::function<std::string(const JobPtr&)> work);
+    void settleJob(const JobPtr& job, bool ran, const std::string& raw);
     void reapFinishedWorkers();
-    std::string runCreate(const std::string& configPath, const std::string& storagePath, const std::string& sequencerUrl, const std::string& password);
-    std::string runOpen(const std::string& configPath, const std::string& storagePath, const std::string& sequencerUrl);
-    std::string runHandleCall(const std::string& operation, const std::function<char*(FaucetHandle*)>& call);
-    std::string runClaimUntil(const JobPtr& job, const std::string& accountId, const std::string& target, int64_t maxClaims);
+    void joinAllWorkers();
+    std::string runFfiCall(const std::function<char*(LezFaucetClient*)>& call);
+    std::string runDrop(const JobPtr& job, const std::string& address, const std::string& requestKey);
+    JobPtr findJob(const std::string& jobId) const;
+    std::string tombstonedJob(const std::string& requestKey) const;
+    void rememberRequestKey(const std::string& requestKey, const std::string& address, const std::string& jobId);
     static std::string takeFfiString(char* value);
     static std::string structuredError(const std::string& code, const std::string& message);
     static std::string jobJson(const JobPtr& job);
-    static std::string ffiResultPayload(const std::string& json);
-    static std::string ffiErrorPayload(const std::string& json);
+    static std::string startedJson(const JobPtr& job);
     static bool isTerminal(const std::string& status);
-    static bool ffiSucceeded(const std::string& json);
+
+    /// One retained request key. Never evicted; see the class comment.
+    struct Tombstone {
+        std::string accountId;
+        std::string jobId;
+        std::string status;
+    };
+
+    bool reserveDropSlot();
+    void releaseDropSlot();
+    void recordTombstoneStatus(const std::string& requestKey, const std::string& status);
 
     std::atomic<uint64_t> m_nextJobId{1};
+    std::atomic<uint64_t> m_nextOperationToken{1};
     std::atomic<bool> m_stopping{false};
     mutable std::mutex m_jobsMutex;
     std::unordered_map<std::string, JobPtr> m_jobs;
-    std::mutex m_operationMutex;
-    std::atomic<FaucetHandle*> m_handle{nullptr};
+    mutable std::mutex m_tombstonesMutex;
+    std::unordered_map<std::string, Tombstone> m_tombstones;
+    // Guards the single-mutating-job permit only. Reads never take it, so a
+    // 300 s reconciliation can never make getFaucetInfo/inspectRecipient block
+    // (API_LOCK §A1.7.2).
+    mutable std::mutex m_dropMutex;
+    bool m_dropActive = false;
+    std::atomic<LezFaucetClient*> m_client{nullptr};
 };

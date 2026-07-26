@@ -1,8 +1,8 @@
 {
   "name": "lez_faucet",
   "display_name": "LEZ Faucet",
-  "version": "0.2.0",
-  "description": "Create and fund a disposable LEZ testnet account, or fund an existing initialized public account without importing its key.",
+  "version": "0.3.0",
+  "description": "Request one fixed 150 LEZ testnet drop for a public account you already own. Stateless: no wallet, no key material, no stored files.",
   "author": "Logos",
   "type": "core",
   "category": "blockchain",

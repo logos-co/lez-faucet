@@ -1,38 +1,34 @@
 class FaucetBackend
 {
-    PROP(bool walletExists READONLY)
+    // The complete replica surface. There is no account identity, no local
+    // balance and no credential of any kind here, because the faucet core owns
+    // none: it reads public chain state and sends one unsigned transaction.
+    //
+    // busy is true only while a credit request is live. Reads (pool status,
+    // recipient inspection) never set it, so the view never has to block a
+    // status refresh behind a request that may reconcile for minutes.
     PROP(bool busy READONLY)
-    PROP(QString accountId READONLY)
-    PROP(QString balance READONLY)
-    PROP(QString lastTxHash READONLY)
-    PROP(QString sequencerUrl READONLY)
-    PROP(bool recoverySupported READONLY)
     PROP(QString activeJobId READONLY)
-    PROP(QString activeJobKind READONLY)
-    PROP(QString activeRecipientId READONLY)
+    PROP(QString sequencerUrl READONLY)
 
-    // Operations start native jobs and return {"ok":true,"job_id":"..."}
-    // immediately. jobStatus() returns queued/running/progress/terminal JSON.
-    // The one-time mnemonic is returned only in the terminal create job result;
-    // it is never a property, setting, signal payload, or log value.
+    // Every start* slot begins a native job and returns
+    // {"ok":true,"job_id":"..."} immediately, or {"ok":false,"error":{...}}
+    // with a structured code. jobStatus() returns the job envelope until the
+    // status is terminal.
     SLOT(QString bootstrap())
-    SLOT(QString startCreate(QString password))
-    SLOT(QString startOpen())
-    SLOT(QString startVerifyFingerprint())
-    SLOT(QString startInitializeAccount())
-    SLOT(QString startBalance())
-    SLOT(QString startClaimOnce())
-    SLOT(QString startClaimUntilTarget(QString target))
-    // Existing-account operations never import recipient key material. A
-    // successful balance preflight for the exact public account is required
-    // before either claim operation can start.
-    SLOT(QString startExternalBalance(QString accountId))
-    SLOT(QString startExternalClaimOnce(QString accountId))
-    SLOT(QString startExternalClaimUntilTarget(QString accountId, QString target))
-    SLOT(QString copyText(QString text))
+    SLOT(QString startFaucetInfo())
+    SLOT(QString startInspectRecipient(QString address))
+    // requestKey is minted by the view once per button press and reused by
+    // every retry of this same call. The core keys idempotency on
+    // (requestKey, address): a repeat returns the original job instead of
+    // sending a second transaction. See FaucetView.qml's requestCredit().
+    SLOT(QString startRequestDrop(QString address, QString requestKey))
     SLOT(QString cancelJob(QString jobId))
     SLOT(QString jobStatus(QString jobId))
-    // Terminal envelopes, including the create mnemonic, remain replayable in
-    // this backend until the view confirms it has safely handled them.
+    // Terminal envelopes stay replayable until the view confirms it has
+    // presented them, so a dropped connection cannot lose a receipt.
     SLOT(QString acknowledgeJob(QString jobId))
+    // Retained solely so the user can copy the initialization command the core
+    // returns for an uninitialized recipient. It touches no faucet state.
+    SLOT(QString copyText(QString text))
 }

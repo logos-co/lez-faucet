@@ -18,6 +18,13 @@ target_include_directories(lez_faucet_module_tests PRIVATE
     stubs
     mocks
 )
+# The static-surface and version-drift tests read the production sources, so
+# they need their paths rather than a copy that could go stale.
+target_compile_definitions(lez_faucet_module_tests PRIVATE
+    MODULE_HEADER_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../src/lez_faucet_module.h"
+    MODULE_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../src/lez_faucet_module.cpp"
+    MODULE_METADATA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../metadata.json"
+)
 target_link_libraries(lez_faucet_module_tests PRIVATE Threads::Threads)
 target_compile_options(lez_faucet_module_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 

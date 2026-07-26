@@ -6,6 +6,11 @@ import Logos.Theme
 import Logos.Controls
 import "FaucetFlow.js" as FaucetFlow
 
+// One screen, one address, one button, one credit.
+//
+// The faucet owns no account and holds no credential. It reads public chain
+// state, sends one unsigned transaction, and then either proves the recipient
+// gained exactly the prize or refuses to say it did.
 Rectangle {
     id: root
     color: Theme.palette.background
@@ -13,48 +18,58 @@ Rectangle {
     readonly property var backend: typeof logos !== "undefined" && logos.module
         ? logos.module("lez_faucet_ui") : null
     property bool backendReady: false
-    property string screenState: "booting"
-    property string resumeState: "welcome"
-    property string statusText: "Starting LEZ Faucet…"
-    property string errorText: ""
-    property string technicalDetails: ""
-    property string mnemonicText: ""
-    property string mnemonicJobId: ""
-    property string targetText: "1000"
-    property int completedClaims: 0
-    property int requiredClaims: 0
-    property bool stopRequested: false
-    property bool cancelRequestPending: false
-    property string activeJobId: ""
-    property string activeJobKind: ""
-    property string activeJobResumeState: "welcome"
-    property string activeJobRecipient: ""
-    property string failedOperationKind: ""
-    property bool jobPollInFlight: false
-    property bool externalRecipientMode: false
-    property string externalRecipientInput: ""
-    property string verifiedExternalRecipient: ""
-    property string externalBalanceText: ""
-    property bool externalRecipientConfirmed: false
-    property string externalRecipientError: ""
-    property string externalRecipientIssue: ""
-    property string externalInitializationCommand: ""
+    property bool bootstrapped: false
+    property string bootstrapError: ""
 
-    readonly property string accountId: backend ? backend.accountId : ""
-    readonly property string localBalanceText: backend && backend.balance !== "" ? backend.balance : "0"
-    readonly property string balanceText: externalRecipientMode ? externalBalanceText : localBalanceText
-    readonly property string displayedAccountId: externalRecipientMode
-        ? verifiedExternalRecipient : accountId
-    readonly property bool hasAccount: accountId !== ""
-    readonly property bool externalRecipientVerified: FaucetFlow.externalRecipientVerified(
-        externalRecipientInput, verifiedExternalRecipient)
-    readonly property bool recipientCanClaim: FaucetFlow.canClaimForRecipient(
-        externalRecipientMode, externalRecipientInput,
-        verifiedExternalRecipient, externalRecipientConfirmed)
+    // -- pool ---------------------------------------------------------------
+    property var pool: FaucetFlow.poolView(null)
+    property string poolJobId: ""
+    property bool poolPollInFlight: false
+    property string poolError: ""
+
+    // -- the address the user typed -----------------------------------------
+    property string addressInput: ""
+    // The canonical address the core returned for this exact input. Only this
+    // is ever displayed; the raw input is never echoed back as if it were an
+    // account the chain agreed exists.
+    property var inspection: null
+    property string inspectionForInput: ""
+    property string inspectJobId: ""
+    property bool inspectPollInFlight: false
+    property string inspectionError: ""
+
+    // -- the credit request -------------------------------------------------
+    //
+    // `creditAttempt` carries the request key minted for the current button
+    // press. It is created in exactly one place and never re-created for a
+    // re-send. See FaucetFlow.beginCreditAttempt for why.
+    property var creditAttempt: null
+    property string creditJobId: ""
+    property string creditStage: "" // "" | "sending" | "running" | "interrupted"
+    property bool creditPollInFlight: false
+    // True only while the core is still before the point of no return. Once a
+    // transaction has been sent there is nothing left to cancel, only to
+    // reconcile, and no button may suggest otherwise.
+    property bool cancellable: false
+    property bool cancelRequested: false
+    property string statusText: ""
+
+    // -- what the result panel shows ----------------------------------------
+    property string panel: "none" // "none" | "receipt" | "error" | "unknown"
+    property var receipt: null
+    property var failure: null
+    property var unknownOutcome: null
+
+    readonly property bool addressUsable: FaucetFlow.isPlausibleAddressInput(addressInput)
+    readonly property bool creditLive: creditStage !== ""
+    readonly property bool poolBlocked: pool.known && !pool.canClaim
+    readonly property bool canRequest: bootstrapped && !creditLive && addressUsable && !poolBlocked
+
+    // ---- bridge helpers ----------------------------------------------------
 
     function watch(reply, onSuccess, onError) {
         if (typeof logos === "undefined" || !logos.watch) {
-            onError("Logos bridge is not available")
+            onError("The Logos bridge is not available")
             return
         }
         logos.watch(reply,
@@ -62,549 +77,431 @@ Rectangle {
             function(error) { onError(String(error || "Unknown backend error")) })
     }
 
+    // Parse a bridge reply into { ok, ... }. A failure always carries a
+    // structured error object so the view has one contract to dispatch on.
     function parseEnvelope(raw) {
         try {
             var object = JSON.parse(String(raw || "{}"))
-            if (!object.ok)
-                return { ok: false, error: object.error || "Operation failed" }
+            if (object.ok !== true) {
+                var error = object.error
+                if (!error || typeof error !== "object")
+                    error = { code: "", message: String(error || "The request failed.") }
+                return { ok: false, error: error }
+            }
             return object
-        } catch (error) {
-            return { ok: false, error: "The faucet returned an invalid response" }
+        } catch (parseFailure) {
+            return { ok: false, error: { code: "", message: "The faucet returned an unreadable response." } }
         }
     }
 
-    function resultObject(envelope) {
+    function resultOf(envelope) {
         return envelope && envelope.result !== undefined ? envelope.result : envelope
     }
 
-    function errorMessage(error) {
-        if (!error)
-            return "Operation failed"
-        if (typeof error === "string")
-            return error
-        if (error.message)
-            return error.code ? String(error.message) + " (" + String(error.code) + ")" : String(error.message)
-        return "Operation failed"
-    }
-
-    function routeError(message, safeResumeState, failedKind) {
-        var preflightRecovery = FaucetFlow.externalPreflightRecovery(
-            failedKind, message)
-        if (preflightRecovery) {
-            externalRecipientMode = true
-            if (preflightRecovery.clearVerification)
-                clearExternalRecipientVerification()
-            externalRecipientError = preflightRecovery.message
-            externalRecipientIssue = preflightRecovery.issue || ""
-            externalInitializationCommand =
-                preflightRecovery.initializationCommand || ""
-            errorText = preflightRecovery.message
-            technicalDetails = typeof message === "object"
-                ? JSON.stringify(message) : preflightRecovery.message
-            resumeState = "ready"
-            failedOperationKind = ""
-            screenState = preflightRecovery.screen
-            statusText = preflightRecovery.issue === "uninitialized"
-                ? "Initialize this account in its owner wallet, then re-check"
-                : "Check the account ID and try again"
-            return
-        }
-        var category = FaucetFlow.classifyJobError(message)
-        errorText = errorMessage(message)
-        technicalDetails = typeof message === "object" ? JSON.stringify(message) : errorText
-        resumeState = safeResumeState || (hasAccount ? "ready" : "welcome")
-        failedOperationKind = failedKind || ""
-        if (category === "version_mismatch") {
-            screenState = "version_mismatch"
-        } else if (category === "outcome_unknown") {
-            resumeState = "ready"
-            screenState = "outcome_unknown"
-        } else if (category === "stale") {
-            resumeState = safeResumeState || "ready"
-            screenState = "stale"
-        } else if (category === "offline") {
-            resumeState = safeResumeState || (hasAccount ? "ready" : "welcome")
-            screenState = "offline"
-        } else {
-            screenState = "error"
-        }
-    }
+    // ---- bootstrap ---------------------------------------------------------
 
     function beginBootstrap() {
         if (!backendReady || !backend)
             return
-        screenState = "booting"
-        statusText = "Starting LEZ Faucet…"
+        bootstrapError = ""
         watch(backend.bootstrap(), function(raw) {
             var envelope = parseEnvelope(raw)
             if (!envelope.ok) {
-                routeError(envelope.error, "welcome")
+                bootstrapError = FaucetFlow.errorPresentation(envelope.error).title
                 return
             }
-            var pendingJobId = String(envelope.active_job_id || backend.activeJobId || "")
-            var pendingJobKind = String(envelope.active_job_kind || backend.activeJobKind || "")
-            var pendingRecipient = String(envelope.active_recipient_id || "")
-            if (pendingJobId !== "" && pendingJobKind !== "") {
-                resumeJob(pendingJobId, pendingJobKind, pendingRecipient)
+            bootstrapped = true
+            refreshPool()
+            // A reloaded view rejoins a request that is already running. It
+            // resumes by polling the existing job, and recovers the original
+            // request key from that job's envelope, so no second key and no
+            // second transaction can come out of a reload.
+            var resumedJobId = String(envelope.active_job_id || "")
+            if (resumedJobId !== "") {
+                creditJobId = resumedJobId
+                creditStage = "running"
+                statusText = qsTr("Rejoining a request that is already running…")
+            }
+        }, function(error) {
+            bootstrapError = String(error)
+        })
+    }
+
+    // ---- pool status -------------------------------------------------------
+
+    function refreshPool() {
+        if (!backend || poolJobId !== "")
+            return
+        poolError = ""
+        watch(backend.startFaucetInfo(), function(raw) {
+            var envelope = parseEnvelope(raw)
+            if (!envelope.ok) {
+                poolError = FaucetFlow.errorPresentation(envelope.error).title
                 return
             }
-            if (envelope.wallet_exists)
-                openExistingWallet()
+            var jobId = String(envelope.job_id || "")
+            if (jobId === "") {
+                poolError = qsTr("The faucet did not report its pool status.")
+                return
+            }
+            poolJobId = jobId
+        }, function(error) {
+            poolError = String(error)
+        })
+    }
+
+    function pollPool() {
+        if (poolJobId === "" || poolPollInFlight)
+            return
+        poolPollInFlight = true
+        var jobId = poolJobId
+        watch(backend.jobStatus(jobId), function(raw) {
+            poolPollInFlight = false
+            if (jobId !== poolJobId)
+                return
+            var envelope = parseEnvelope(raw)
+            if (!envelope.ok) {
+                poolError = FaucetFlow.errorPresentation(envelope.error).title
+                poolJobId = ""
+                return
+            }
+            var outcome = FaucetFlow.jobOutcome(envelope)
+            if (!FaucetFlow.isTerminalOutcome(outcome))
+                return
+            if (outcome === "succeeded")
+                pool = FaucetFlow.poolView(resultOf(envelope))
             else
-                screenState = "welcome"
-        }, function(error) { routeError(error, "welcome") })
-    }
-
-    function resumeJob(jobId, kind, envelopeRecipient) {
-        var screens = {
-            "create": "creating", "open": "opening", "verify": "compatibility",
-            "initialize": "initializing", "balance": "booting",
-            "claim_once": "claiming_once", "claim_target": "claiming_target",
-            "external_balance": "booting",
-            "external_claim_once": "claiming_once",
-            "external_claim_target": "claiming_target"
-        }
-        var isExternalJob = String(kind).indexOf("external_") === 0
-        if (isExternalJob) {
-            externalRecipientMode = true
-            var reconnectedRecipient = FaucetFlow.reconnectRecipient(
-                envelopeRecipient,
-                backend ? backend.activeRecipientId : "",
-                activeJobRecipient)
-            if (reconnectedRecipient !== "") {
-                activeJobRecipient = reconnectedRecipient
-                externalRecipientInput = reconnectedRecipient
-            }
-        } else {
-            activeJobRecipient = ""
-        }
-        activeJobId = jobId
-        activeJobKind = kind
-        activeJobResumeState = kind === "create" ? "welcome"
-            : (kind === "initialize" ? "initialization_required" : "ready")
-        screenState = screens[kind] || "booting"
-        statusText = "Reconnecting to the in-progress faucet operation…"
-        jobPollTimer.start()
-        pollActiveJob()
-    }
-
-    function openExistingWallet() {
-        screenState = "opening"
-        statusText = "Opening your testnet account…"
-        watch(backend.startOpen(), function(raw) {
-            startJob(raw, "open", "open_error")
+                poolError = FaucetFlow.errorPresentation(envelope.error).title
+            acknowledge(jobId)
+            poolJobId = ""
         }, function(error) {
-            errorText = error
-            screenState = "open_error"
+            poolPollInFlight = false
+            poolError = String(error)
         })
     }
 
-    function verifyCompatibility(nextState) {
-        screenState = "compatibility"
-        statusText = "Checking testnet compatibility…"
-        watch(backend.startVerifyFingerprint(), function(raw) {
-            startJob(raw, "verify", nextState)
-        }, function(error) { routeError(error, nextState) })
+    // ---- recipient inspection ---------------------------------------------
+
+    function clearInspection() {
+        inspection = null
+        inspectionForInput = ""
+        inspectionError = ""
+        inspectJobId = ""
     }
 
-    function submitCreate(password) {
-        screenState = "creating"
-        statusText = "Creating wallet…"
-        watch(backend.startCreate(password), function(raw) {
-            startJob(raw, "create", "welcome")
-        }, function(error) { routeError(error, "welcome") })
-    }
-
-    function acknowledgeMnemonic() {
-        if (mnemonicJobId === "")
+    // Look the address up so the user learns it is uninitialized before
+    // spending a minute of proof-of-work on it. This is advisory only: the
+    // core re-inspects inside the request and is the authority.
+    function inspectAddress() {
+        if (!backend || !addressUsable || inspectJobId !== "")
             return
-        var acknowledgedJobId = mnemonicJobId
-        watch(backend.acknowledgeJob(acknowledgedJobId), function(raw) {
+        var inspected = addressInput
+        inspectionError = ""
+        watch(backend.startInspectRecipient(inspected), function(raw) {
             var envelope = parseEnvelope(raw)
             if (!envelope.ok) {
-                errorText = envelope.error
+                inspectionError = FaucetFlow.errorPresentation(envelope.error).title
                 return
             }
-            mnemonicText = ""
-            mnemonicJobId = ""
-            mnemonicAcknowledged.checked = false
-            verifyCompatibility("initialization_required")
-        }, function(error) { errorText = error })
-    }
-
-    function initializeAccount(successState) {
-        var initializationResumeState = successState || "initialization_required"
-        screenState = "initializing"
-        statusText = "Initializing account on testnet…"
-        watch(backend.startInitializeAccount(), function(raw) {
-            startJob(raw, "initialize", initializationResumeState)
-        }, function(error) { routeError(error, initializationResumeState, "initialize") })
-    }
-
-    function clearExternalRecipientVerification() {
-        verifiedExternalRecipient = ""
-        externalBalanceText = ""
-        externalRecipientConfirmed = false
-    }
-
-    function clearExternalRecipientIssue() {
-        externalRecipientError = ""
-        externalRecipientIssue = ""
-        externalInitializationCommand = ""
-    }
-
-    function consumeExternalRecipientVerification() {
-        verifiedExternalRecipient = ""
-        externalRecipientConfirmed = false
-        clearExternalRecipientIssue()
-    }
-
-    function selectExternalRecipientMode(enabled) {
-        if (activeJobId !== "")
-            return
-        externalRecipientMode = Boolean(enabled)
-        clearExternalRecipientVerification()
-        clearExternalRecipientIssue()
-        screenState = FaucetFlow.recipientModeScreen(externalRecipientMode, hasAccount)
-        statusText = externalRecipientMode
-            ? "Check the existing public account before claiming"
-            : (hasAccount ? "Your testnet account is ready" : "Initialize your public account")
-    }
-
-    function refreshBalance() {
-        if (externalRecipientMode) {
-            var normalizedRecipient = FaucetFlow.normalizePublicAccountId(externalRecipientInput)
-            if (normalizedRecipient === "") {
-                clearExternalRecipientVerification()
-                externalRecipientError =
-                    "Enter a public account ID as Public/<account-id> or a bare account ID"
-                errorText = externalRecipientError
-                screenState = "ready"
+            var jobId = String(envelope.job_id || "")
+            if (jobId === "")
                 return
-            }
-            clearExternalRecipientVerification()
-            clearExternalRecipientIssue()
-            activeJobRecipient = normalizedRecipient
-            screenState = "booting"
-            statusText = "Checking the existing public account and balance…"
-            watch(backend.startExternalBalance(normalizedRecipient), function(raw) {
-                startJob(raw, "external_balance", "ready")
-            }, function(error) { routeError(error, "ready", "external_balance") })
-            return
-        }
-        if (!hasAccount) {
-            screenState = "initialization_required"
-            return
-        }
-        watch(backend.startBalance(), function(raw) {
-            startJob(raw, "balance", "ready")
-        }, function(error) { routeError(error, "ready") })
-    }
-
-    function copyInitializationCommand() {
-        if (!backend || externalInitializationCommand === "")
-            return
-        watch(backend.copyText(externalInitializationCommand), function(raw) {
-            var envelope = parseEnvelope(raw)
-            if (!envelope.ok) {
-                externalRecipientError = errorMessage(envelope.error)
-                return
-            }
-            statusText = "Initialization command copied"
+            inspectJobId = jobId
+            inspectionForInput = inspected
         }, function(error) {
-            externalRecipientError = "Could not copy the initialization command"
-            technicalDetails = String(error || "")
+            inspectionError = String(error)
         })
     }
 
-    function startClaimOnce() {
-        if (!recipientCanClaim)
+    function pollInspection() {
+        if (inspectJobId === "" || inspectPollInFlight)
             return
-        var externalClaim = externalRecipientMode
-        screenState = "claiming_once"
-        statusText = "Fetching the current faucet challenge…"
-        activeJobRecipient = externalClaim ? verifiedExternalRecipient : accountId
-        var reply = externalClaim
-            ? backend.startExternalClaimOnce(activeJobRecipient)
-            : backend.startClaimOnce()
-        if (externalClaim)
-            consumeExternalRecipientVerification()
-        watch(reply, function(raw) {
-            startJob(raw, externalClaim ? "external_claim_once" : "claim_once", "ready")
-        }, function(error) { routeError(error, "ready") })
+        inspectPollInFlight = true
+        var jobId = inspectJobId
+        watch(backend.jobStatus(jobId), function(raw) {
+            inspectPollInFlight = false
+            if (jobId !== inspectJobId)
+                return
+            var envelope = parseEnvelope(raw)
+            if (!envelope.ok) {
+                inspectionError = FaucetFlow.errorPresentation(envelope.error).title
+                inspectJobId = ""
+                return
+            }
+            var outcome = FaucetFlow.jobOutcome(envelope)
+            if (!FaucetFlow.isTerminalOutcome(outcome))
+                return
+            if (outcome === "succeeded")
+                inspection = FaucetFlow.inspectionView(resultOf(envelope))
+            else
+                inspectionError = FaucetFlow.errorPresentation(envelope.error).title
+            acknowledge(jobId)
+            inspectJobId = ""
+        }, function(error) {
+            inspectPollInFlight = false
+            inspectionError = String(error)
+        })
     }
 
-    function startClaimToTarget() {
-        if (!recipientCanClaim || !FaucetFlow.targetPending(balanceText, targetText))
+    // ---- the credit request ------------------------------------------------
+
+    // The one and only place a request key is minted.
+    //
+    // One press of the button is one key, and that key is stored for as long as
+    // the attempt lives. Every re-send below goes through sendCreditRequest()
+    // with the stored key, never through here.
+    function requestCredit() {
+        if (!canRequest || !backend)
             return
-        requiredClaims = 0
-        completedClaims = 0
-        stopRequested = false
-        var externalClaim = externalRecipientMode
-        screenState = "claiming_target"
-        statusText = "Fetching the current faucet challenge…"
-        activeJobRecipient = externalClaim ? verifiedExternalRecipient : accountId
-        var reply = externalClaim
-            ? backend.startExternalClaimUntilTarget(activeJobRecipient, targetText)
-            : backend.startClaimUntilTarget(targetText)
-        if (externalClaim)
-            consumeExternalRecipientVerification()
-        watch(reply, function(raw) {
-            startJob(raw, externalClaim ? "external_claim_target" : "claim_target", "ready")
-        }, function(error) { routeError(error, "ready") })
+        panel = "none"
+        receipt = null
+        failure = null
+        unknownOutcome = null
+        cancelRequested = false
+        creditAttempt = FaucetFlow.beginCreditAttempt(addressInput, FaucetFlow.newRequestKey)
+        sendCreditRequest()
     }
 
-    function startJob(raw, kind, safeResumeState) {
-        var envelope = parseEnvelope(raw)
-        if (!envelope.ok) {
-            routeError(envelope.error, safeResumeState, kind)
+    // Send — or re-send — the current attempt.
+    //
+    // Re-sending carries the *same* request key and the same address, and that
+    // is the whole point. The core keys idempotency on that pair: a repeat
+    // returns the original job rather than starting a second one. Minting a
+    // fresh key here instead would turn a lost reply into a second on-chain
+    // claim, because a lost reply is not evidence that nothing happened — the
+    // request may already be solving, submitting or reconciling.
+    function sendCreditRequest() {
+        if (!backend || !creditAttempt)
+            return
+        creditStage = "sending"
+        statusText = qsTr("Sending your request to the faucet…")
+        watch(backend.startRequestDrop(creditAttempt.address, creditAttempt.requestKey),
+            function(raw) {
+                var envelope = parseEnvelope(raw)
+                if (!envelope.ok) {
+                    var presented = FaucetFlow.errorPresentation(envelope.error)
+                    // The core already has a request under this key. Adopt its
+                    // job instead of starting anything: this is the shape a
+                    // successful re-send can take.
+                    if (presented.code === "drop_in_progress"
+                            && String(backend.activeJobId || "") !== "") {
+                        creditJobId = String(backend.activeJobId)
+                        creditStage = "running"
+                        return
+                    }
+                    presentFailure(envelope.error)
+                    return
+                }
+                var jobId = String(envelope.job_id || "")
+                if (jobId === "") {
+                    // No identifier came back, so this view cannot follow the
+                    // request — but the request may well be running. Re-send
+                    // the same key rather than assume nothing happened.
+                    interruptCreditRequest(qsTr("The faucet did not return a request identifier."))
+                    return
+                }
+                creditJobId = jobId
+                creditStage = "running"
+            },
+            function(error) {
+                interruptCreditRequest(String(error))
+            })
+    }
+
+    // Lost contact before a job identifier was known. Keep the attempt — and
+    // its key — and retry the identical call until it lands.
+    function interruptCreditRequest(reason) {
+        creditStage = "interrupted"
+        statusText = String(reason || "")
+    }
+
+    function pollCredit() {
+        if (creditJobId === "" || creditPollInFlight)
+            return
+        creditPollInFlight = true
+        var jobId = creditJobId
+        watch(backend.jobStatus(jobId), function(raw) {
+            creditPollInFlight = false
+            if (jobId !== creditJobId)
+                return
+            var envelope = parseEnvelope(raw)
+            if (!envelope.ok) {
+                // The job is still the core's; keep polling rather than
+                // deciding anything from a failed read.
+                statusText = qsTr("Connection interrupted. Reconnecting to your request…")
+                return
+            }
+
+            if (!creditAttempt) {
+                // Resumed after a reload: take the original key back from the
+                // envelope instead of inventing a new one.
+                var rejoined = FaucetFlow.rejoinCreditAttempt(envelope)
+                if (rejoined)
+                    creditAttempt = rejoined
+            }
+
+            var outcome = FaucetFlow.jobOutcome(envelope)
+            if (!FaucetFlow.isTerminalOutcome(outcome)) {
+                // A phase name is a state-machine label, never a sentence.
+                statusText = FaucetFlow.phaseSentence(envelope.phase)
+                cancelRequested = envelope.cancel_requested === true
+                cancellable = FaucetFlow.cancelAvailable(
+                    envelope.status, envelope.phase, envelope.cancel_requested)
+                return
+            }
+
+            cancellable = false
+            var terminalEnvelope = envelope
+            acknowledgeThen(jobId, function() {
+                finishCredit(outcome, terminalEnvelope)
+            })
+        }, function(error) {
+            creditPollInFlight = false
+            statusText = qsTr("Connection interrupted. Reconnecting to your request…")
+        })
+    }
+
+    function finishCredit(outcome, envelope) {
+        creditJobId = ""
+        creditStage = ""
+        creditPollInFlight = false
+        cancelRequested = false
+
+        if (outcome === "succeeded") {
+            var proven = FaucetFlow.receiptView(resultOf(envelope))
+            if (proven) {
+                receipt = proven
+                panel = "receipt"
+                statusText = ""
+                creditAttempt = null
+                refreshPool()
+                inspectAddress()
+                return
+            }
+            // The core called it a success but the payload does not prove one.
+            // Never invent a receipt: say the outcome is unproven instead.
+            presentUnknown({ code: "outcome_unknown", message:
+                qsTr("The faucet reported success without proof that the account was credited."),
+                details: {} })
             return
         }
-        var started = resultObject(envelope)
-        var jobId = String(envelope.job_id || (started && started.job_id) || "")
-        if (jobId === "") {
-            routeError("The faucet did not return a job ID", safeResumeState, kind)
+        if (outcome === "outcome_unknown") {
+            presentUnknown(envelope.error)
             return
         }
-        activeJobId = jobId
-        activeJobKind = kind
-        activeJobResumeState = safeResumeState
-        jobPollTimer.start()
-        pollActiveJob()
-    }
-
-    function normalizeOperationResult(value) {
-        var normalized = value
-        if (typeof normalized === "string") {
-            try { normalized = JSON.parse(normalized) }
-            catch (error) { return { ok: false, error: "The job returned an invalid result" } }
+        if (outcome === "cancelled") {
+            statusText = qsTr("Stopped. No transaction was sent.")
+            creditAttempt = null
+            return
         }
-        if (normalized && normalized.ok === false)
-            return normalized
-        return normalized && normalized.ok === true ? resultObject(normalized) : normalized
+        presentFailure(envelope.error)
     }
 
-    function clearActiveJob() {
-        jobPollTimer.stop()
-        activeJobId = ""
-        activeJobKind = ""
-        activeJobResumeState = "welcome"
-        activeJobRecipient = ""
-        jobPollInFlight = false
+    function presentFailure(error) {
+        creditJobId = ""
+        creditStage = ""
+        cancellable = false
+        statusText = ""
+        var presented = FaucetFlow.errorPresentation(error)
+        if (presented.code === "outcome_unknown") {
+            presentUnknown(error)
+            return
+        }
+        failure = presented
+        panel = "error"
+        // The attempt is over. A further request is a new press of the button,
+        // which mints its own key; this one is spent and must not be reused.
+        creditAttempt = null
     }
 
-    function pauseActiveJob() {
-        jobPollTimer.stop()
-        jobPollInFlight = false
+    function presentUnknown(error) {
+        creditJobId = ""
+        creditStage = ""
+        cancellable = false
+        statusText = ""
+        creditAttempt = null
+        var pinned = inspection && inspectionForInput === addressInput ? inspection.address : ""
+        unknownOutcome = FaucetFlow.unknownOutcomeView(error, pinned)
+        panel = "unknown"
     }
 
-    function acknowledgeTerminalJob(jobId, onAcknowledged) {
+    function cancelCreditRequest() {
+        if (!backend || creditJobId === "")
+            return
+        cancelRequested = true
+        statusText = qsTr("Stopping. Once a claim has been sent it cannot be taken back.")
+        watch(backend.cancelJob(creditJobId), function(raw) {
+            var envelope = parseEnvelope(raw)
+            if (!envelope.ok)
+                statusText = FaucetFlow.errorPresentation(envelope.error).title
+        }, function(error) {
+            statusText = String(error)
+        })
+    }
+
+    // ---- acknowledgement ---------------------------------------------------
+
+    function acknowledge(jobId) {
+        if (!backend || jobId === "")
+            return
+        watch(backend.acknowledgeJob(jobId), function(raw) {}, function(error) {})
+    }
+
+    // A terminal envelope is replayed by the backend until it is acknowledged,
+    // so a failed acknowledgement must not clear the local view either: keep
+    // polling and present the result once it sticks.
+    function acknowledgeThen(jobId, onAcknowledged) {
         watch(backend.acknowledgeJob(jobId), function(raw) {
             var envelope = parseEnvelope(raw)
-            if (FaucetFlow.ackDisposition(envelope) !== "clear") {
-                statusText = "Could not acknowledge the result; reconnecting…"
-                jobPollTimer.start()
+            if (!envelope.ok) {
+                statusText = qsTr("Could not confirm the result yet. Reconnecting…")
                 return
             }
-            clearActiveJob()
             onAcknowledged()
         }, function(error) {
-            statusText = "Connection interrupted while acknowledging the result; reconnecting…"
-            jobPollTimer.start()
+            statusText = qsTr("Could not confirm the result yet. Reconnecting…")
         })
     }
 
-    function pollActiveJob() {
-        if (activeJobId === "" || jobPollInFlight)
+    function copyInitializationCommand(command) {
+        if (!backend || !command)
             return
-        jobPollInFlight = true
-        var polledJobId = activeJobId
-        watch(backend.jobStatus(polledJobId), function(raw) {
-            jobPollInFlight = false
-            if (polledJobId !== activeJobId)
-                return
-            var envelope = parseEnvelope(raw)
-            if (!envelope.ok) {
-                statusText = "Connection interrupted; retrying this operation…"
-                errorText = envelope.error
-                return
-            }
-            var payload = envelope
-            var update = FaucetFlow.reduceJobEnvelope(
-                payload, completedClaims, requiredClaims, balanceText)
-            var state = update.state
-            completedClaims = update.completedClaims
-            requiredClaims = update.requiredClaims
-            if (activeJobKind === "external_claim_target")
-                externalBalanceText = update.balance
-            if (payload.phase)
-                statusText = String(payload.phase)
-            else if (activeJobKind === "claim_once" || activeJobKind === "claim_target"
-                    || activeJobKind === "external_claim_once"
-                    || activeJobKind === "external_claim_target")
-                statusText = "Computing a solution and waiting for confirmation…"
-
-            if (!update.terminal)
-                return
-
-            var finishedKind = activeJobKind
-            var finishedResume = activeJobResumeState
-            var finishedRecipient = activeJobRecipient
-            var operationResult = normalizeOperationResult(payload.result)
-            pauseActiveJob()
-
-            if (state === "completed" && finishedKind === "create") {
-                mnemonicJobId = polledJobId
-                clearActiveJob()
-                handleJobSuccess(finishedKind, operationResult || {}, finishedResume, finishedRecipient)
-                return
-            }
-
-            acknowledgeTerminalJob(polledJobId, function() {
-                cancelRequestPending = false
-                if (state === "cancelled") {
-                    screenState = "ready"
-                    statusText = completedClaims > 0
-                        ? qsTr("Stopped after %1 confirmed claim(s)").arg(completedClaims)
-                        : qsTr("Stopped before another claim was submitted")
-                    refreshBalance()
-                    return
-                }
-                if (state !== "completed") {
-                    routeError(payload.error || (operationResult && operationResult.error), finishedResume, finishedKind)
-                    return
-                }
-                if (operationResult && operationResult.ok === false) {
-                    routeError(operationResult.error, finishedResume, finishedKind)
-                    return
-                }
-                handleJobSuccess(finishedKind, operationResult || {}, finishedResume, finishedRecipient)
-            })
-        }, function(error) {
-            jobPollInFlight = false
-            errorText = String(error || "Connection interrupted")
-            statusText = "Connection interrupted; retrying this operation…"
-        })
+        watch(backend.copyText(command), function(raw) {
+            if (parseEnvelope(raw).ok)
+                inspectionError = ""
+        }, function(error) {})
     }
 
-    function handleJobSuccess(kind, result, successState, recipient) {
-        if (kind === "create") {
-            // The backend/core replay this terminal result until the user
-            // explicitly acknowledges it; no mnemonic is exposed as a property.
-            mnemonicText = String(result.mnemonic || "")
-            if (mnemonicText === "") {
-                routeError("Wallet created without a recovery phrase", "initialization_required")
-                return
-            }
-            screenState = "mnemonic"
-        } else if (kind === "open") {
-            verifyCompatibility("resume_account")
-        } else if (kind === "verify") {
-            technicalDetails = JSON.stringify(result)
-            if (successState === "resume_account")
-                initializeAccount("ready")
-            else if (successState === "ready")
-                refreshBalance()
-            else
-                screenState = successState
-        } else if (kind === "initialize") {
-            screenState = "ready"
-            statusText = "Your testnet account is ready"
-        } else if (kind === "balance") {
-            screenState = "ready"
-            statusText = "Your testnet account is ready"
-        } else if (kind === "external_balance") {
-            verifiedExternalRecipient = String(recipient || "")
-            externalRecipientInput = verifiedExternalRecipient
-            externalBalanceText = String(result)
-            externalRecipientConfirmed = false
-            clearExternalRecipientIssue()
-            screenState = "ready"
-            statusText = "Existing public account verified"
-        } else if (kind === "claim_once") {
-            screenState = "ready"
-            statusText = Number(result.stale_challenge_retries || 0) > 0
-                ? "150 LEZ claimed after refreshing a stale challenge" : "150 LEZ claimed"
-        } else if (kind === "external_claim_once") {
-            externalBalanceText = String(result.balance_after || externalBalanceText)
-            screenState = "ready"
-            statusText = Number(result.stale_challenge_retries || 0) > 0
-                ? "150 LEZ claimed after refreshing a stale challenge. Check the account again before another claim."
-                : "150 LEZ claimed. Check the account again before another claim."
-        } else if (kind === "claim_target") {
-            screenState = "ready"
-            statusText = "Target reached"
-        } else if (kind === "external_claim_target") {
-            externalBalanceText = String(result.final_balance || externalBalanceText)
-            screenState = "ready"
-            statusText = "Target reached. Check the account again before another claim."
-        }
-    }
-
-    function requestStop() {
-        if (activeJobId !== "") {
-            cancelRequestPending = true
-            screenState = "cancelling"
-            statusText = "Stopping… A submitted claim cannot be cancelled."
-            watch(backend.cancelJob(activeJobId), function(raw) {
-                var envelope = parseEnvelope(raw)
-                cancelRequestPending = false
-                if (!envelope.ok) {
-                    errorText = envelope.error
-                    screenState = "claiming_target"
-                    statusText = "Could not request stop; claim-to-target continues."
-                    return
-                }
-                if (FaucetFlow.cancelAcknowledged(envelope)) {
-                    stopRequested = true
-                    statusText = "Stop requested. Waiting for any submitted claim to settle…"
-                } else {
-                    screenState = "claiming_target"
-                    statusText = "The faucet did not acknowledge the stop request; claim-to-target continues."
-                }
-            }, function(error) {
-                cancelRequestPending = false
-                errorText = error
-                screenState = "claiming_target"
-                statusText = "Could not request stop; claim-to-target continues."
-            })
-        } else {
-            screenState = "ready"
-            statusText = "Stopped"
-        }
-    }
-
-    function retryFromOffline() {
-        if (resumeState === "ready")
-            verifyCompatibility("ready")
-        else if (resumeState === "initialization_required")
-            verifyCompatibility("initialization_required")
-        else
-            beginBootstrap()
-    }
-
-    function retryFromError() {
-        var retry = FaucetFlow.genericRetryDecision(failedOperationKind, resumeState, hasAccount)
-        if (retry.action === "initialize")
-            initializeAccount(retry.resumeState)
-        else if (retry.action === "external_balance") {
-            screenState = "ready"
-            refreshBalance()
-        }
-        else if (retry.action === "balance")
-            refreshBalance()
-        else
-            beginBootstrap()
-    }
-
-    Component.onDestruction: mnemonicText = ""
+    // ---- timers ------------------------------------------------------------
 
     Timer {
-        id: jobPollTimer
+        id: pollTimer
         interval: 500
         repeat: true
-        running: false
-        onTriggered: root.pollActiveJob()
+        running: root.poolJobId !== "" || root.inspectJobId !== "" || root.creditJobId !== ""
+        onTriggered: {
+            root.pollPool()
+            root.pollInspection()
+            root.pollCredit()
+        }
+    }
+
+    // Re-sends the interrupted attempt with its stored key. Safe to repeat
+    // precisely because the key never changes.
+    Timer {
+        id: reconnectTimer
+        interval: 3000
+        repeat: true
+        running: root.creditStage === "interrupted"
+        onTriggered: root.sendCreditRequest()
+    }
+
+    // Waits until the user has stopped typing before looking the account up.
+    Timer {
+        id: inspectDebounce
+        interval: 800
+        repeat: false
+        onTriggered: root.inspectAddress()
     }
 
     Timer {
@@ -623,6 +520,8 @@ Rectangle {
         }
     }
 
+    // ---- layout ------------------------------------------------------------
+
     ScrollView {
         anchors.fill: parent
         contentWidth: availableWidth
@@ -636,6 +535,7 @@ Rectangle {
 
             LogosText {
                 text: qsTr("LEZ Faucet")
+                textFormat: Text.PlainText
                 font.pixelSize: Theme.typography.titleText
                 font.weight: Theme.typography.weightBold
                 color: Theme.palette.text
@@ -643,489 +543,478 @@ Rectangle {
             }
 
             LogosText {
-                visible: root.screenState === "welcome"
-                text: qsTr("Create one public LEZ testnet account and fund it from the Pinata faucet. Testnet LEZ has no real-world value.")
+                text: qsTr("Enter a public LEZ testnet account and request 150 LEZ for it. Testnet LEZ has no real-world value.")
+                textFormat: Text.PlainText
                 color: Theme.palette.textSecondary
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
 
-            ColumnLayout {
-                visible: root.screenState === "welcome"
+            // -- 1. pool status ---------------------------------------------
+            Rectangle {
                 Layout.fillWidth: true
-                spacing: Theme.spacing.medium
+                implicitHeight: poolColumn.implicitHeight + Theme.spacing.large * 2
+                radius: Theme.spacing.radiusLarge
+                color: Theme.palette.backgroundSecondary
+                border.color: root.poolBlocked ? Theme.palette.warning
+                                               : Theme.palette.backgroundElevated
 
-                Rectangle {
-                    Layout.fillWidth: true
-                    implicitHeight: warningColumn.implicitHeight + Theme.spacing.large * 2
-                    radius: Theme.spacing.radiusLarge
-                    color: Theme.palette.backgroundSecondary
-                    border.color: Theme.palette.warning
+                ColumnLayout {
+                    id: poolColumn
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacing.large
+                    spacing: Theme.spacing.small
 
-                    ColumnLayout {
-                        id: warningColumn
-                        anchors.fill: parent
-                        anchors.margins: Theme.spacing.large
+                    RowLayout {
+                        Layout.fillWidth: true
                         LogosText {
-                            text: qsTr("Important: this testnet wallet is not encrypted")
+                            text: qsTr("Faucet pool")
+                            textFormat: Text.PlainText
                             font.weight: Theme.typography.weightBold
                             color: Theme.palette.text
-                            Layout.fillWidth: true
                         }
-                        LogosText {
-                            text: qsTr("LEZ v0.2.0 stores key material in a plaintext file on this Mac. The password below is required by the wallet API, but it does not encrypt that file. Do not reuse a real password.")
-                            color: Theme.palette.textSecondary
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                        }
-                    }
-                }
-
-                LogosTextField {
-                    id: passwordField
-                    Layout.fillWidth: true
-                    placeholderText: qsTr("Wallet password (not encryption)")
-                    echoMode: TextInput.Password
-                }
-                LogosTextField {
-                    id: confirmField
-                    Layout.fillWidth: true
-                    placeholderText: qsTr("Confirm password")
-                    echoMode: TextInput.Password
-                }
-                CheckBox {
-                    id: plaintextAcknowledged
-                    text: qsTr("I understand that this wallet file contains plaintext key material.")
-                    Layout.fillWidth: true
-                }
-                LogosText {
-                    visible: confirmField.text !== "" && passwordField.text !== confirmField.text
-                    text: qsTr("Passwords do not match.")
-                    color: Theme.palette.error
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    LogosButton {
-                        text: qsTr("Recover an account")
-                        onClicked: root.screenState = "recovery_unavailable"
-                    }
-                    Item { Layout.fillWidth: true }
-                    LogosButton {
-                        text: qsTr("Create wallet")
-                        enabled: passwordField.text !== ""
-                            && passwordField.text === confirmField.text
-                            && plaintextAcknowledged.checked
-                        onClicked: {
-                            var transientPassword = passwordField.text
-                            passwordField.text = ""
-                            confirmField.text = ""
-                            root.submitCreate(transientPassword)
-                            transientPassword = ""
+                        Item { Layout.fillWidth: true }
+                        LogosButton {
+                            text: qsTr("Refresh")
+                            enabled: root.bootstrapped && root.poolJobId === ""
+                            onClicked: root.refreshPool()
                         }
                     }
-                }
-            }
-
-            ColumnLayout {
-                visible: ["booting", "opening", "compatibility", "creating", "initializing"].indexOf(root.screenState) >= 0
-                Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                BusyIndicator { running: parent.visible; Layout.alignment: Qt.AlignHCenter }
-                LogosText {
-                    text: root.statusText
-                    color: Theme.palette.text
-                    horizontalAlignment: Text.AlignHCenter
-                    Layout.fillWidth: true
-                }
-            }
-
-            ColumnLayout {
-                visible: root.screenState === "mnemonic"
-                Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: qsTr("Save your recovery phrase")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.text
-                }
-                LogosText {
-                    text: qsTr("Save it somewhere private before continuing. LEZ Faucet will forget the phrase as soon as you confirm that it is saved.")
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                TextArea {
-                    Layout.fillWidth: true
-                    readOnly: true
-                    selectByMouse: true
-                    wrapMode: TextEdit.Wrap
-                    text: root.mnemonicText
-                    color: Theme.palette.text
-                    background: Rectangle {
-                        color: Theme.palette.backgroundSecondary
-                        radius: Theme.spacing.radiusLarge
-                        border.color: Theme.palette.backgroundElevated
-                    }
-                }
-                CheckBox {
-                    id: mnemonicAcknowledged
-                    text: qsTr("I saved my recovery phrase.")
-                }
-                LogosButton {
-                    text: qsTr("Continue and initialize account")
-                    enabled: mnemonicAcknowledged.checked
-                    Layout.alignment: Qt.AlignRight
-                    onClicked: root.acknowledgeMnemonic()
-                }
-            }
-
-            ColumnLayout {
-                visible: root.screenState === "initialization_required"
-                Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: qsTr("Initialize your public account")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.text
-                }
-                LogosText {
-                    text: qsTr("The account must be initialized on the LEZ testnet before it can receive a faucet claim.")
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                LogosButton {
-                    text: qsTr("Initialize account")
-                    Layout.alignment: Qt.AlignRight
-                    onClicked: root.initializeAccount()
-                }
-                LogosButton {
-                    text: qsTr("Fund an existing public account instead")
-                    Layout.alignment: Qt.AlignRight
-                    onClicked: root.selectExternalRecipientMode(true)
-                }
-            }
-
-            ColumnLayout {
-                visible: root.screenState === "ready"
-                Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: root.statusText || (root.externalRecipientMode
-                        ? qsTr("Fund an existing public account")
-                        : qsTr("Your testnet account is ready"))
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.text
-                }
-                CheckBox {
-                    text: qsTr("Fund an existing public account")
-                    checked: root.externalRecipientMode
-                    enabled: root.activeJobId === ""
-                    onClicked: root.selectExternalRecipientMode(checked)
-                }
-                LogosText {
-                    visible: root.externalRecipientMode
-                    text: qsTr("Paste a public account from LEZ Wallet or the wallet CLI. Use Public/<account ID> or the bare ID. The faucet never needs the recipient mnemonic or private key. The local faucet wallet is used only as the LEZ network client.")
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                RowLayout {
-                    visible: root.externalRecipientMode
-                    Layout.fillWidth: true
-                    LogosTextField {
-                        id: externalRecipientField
+                    LogosText {
+                        visible: root.pool.known
+                        text: qsTr("%1 LEZ in the pool").arg(root.pool.poolBalance)
+                        textFormat: Text.PlainText
+                        font.pixelSize: Theme.typography.titleText
+                        font.weight: Theme.typography.weightBold
+                        color: Theme.palette.text
                         Layout.fillWidth: true
-                        placeholderText: qsTr("Public/<account ID> or bare account ID")
-                        text: root.externalRecipientInput
-                        onTextChanged: {
-                            root.externalRecipientInput = text
-                            root.clearExternalRecipientIssue()
-                            root.errorText = ""
-                            root.technicalDetails = ""
-                            root.statusText = "Verify this public account before claiming"
-                            if (!FaucetFlow.externalRecipientVerified(
-                                    text, root.verifiedExternalRecipient))
-                                root.clearExternalRecipientVerification()
-                        }
                     }
-                    LogosButton {
-                        text: root.externalRecipientIssue === ""
-                            ? qsTr("Verify account and balance")
-                            : qsTr("Re-check account")
-                        enabled: FaucetFlow.normalizePublicAccountId(
-                            root.externalRecipientInput) !== ""
-                        onClicked: root.refreshBalance()
+                    LogosText {
+                        visible: root.pool.known
+                        text: qsTr("Enough for about %1 more claims at this instant. The pool is a finite, shared resource: anyone on the testnet claims from the same balance, so this number moves without you.")
+                            .arg(root.pool.claimsRemaining)
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.pool.known
+                        text: qsTr("Each claim pays %1 LEZ and costs a proof-of-work of %2 bytes (%3 bits).")
+                            .arg(root.pool.prizeAmount)
+                            .arg(root.pool.difficultyBytes)
+                            .arg(root.pool.difficultyBits)
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.pool.blockedSentence !== ""
+                        text: root.pool.blockedSentence
+                        textFormat: Text.PlainText
+                        color: Theme.palette.warning
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: !root.pool.known && root.poolError === ""
+                        text: root.bootstrapped ? qsTr("Reading the pool…")
+                                                : qsTr("Connecting to the LEZ testnet…")
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.poolError !== ""
+                        text: root.poolError
+                        textFormat: Text.PlainText
+                        color: Theme.palette.error
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.bootstrapError !== ""
+                        text: root.bootstrapError
+                        textFormat: Text.PlainText
+                        color: Theme.palette.error
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
                     }
                 }
+            }
+
+            // -- 2. the address ---------------------------------------------
+            LogosText {
+                text: qsTr("Public LEZ address")
+                textFormat: Text.PlainText
+                color: Theme.palette.textSecondary
+                Layout.fillWidth: true
+            }
+
+            LogosTextField {
+                id: addressField
+                Layout.fillWidth: true
+                enabled: !root.creditLive
+                placeholderText: qsTr("Public/<account ID> or bare account ID")
+                // "Public/" plus a 32-byte base58 id, and not one character more.
+                textInput.maximumLength: 71
+                onTextChanged: {
+                    root.addressInput = text
+                    // Changing the address invalidates everything the previous
+                    // one established, including any result still on screen.
+                    root.clearInspection()
+                    root.panel = "none"
+                    root.receipt = null
+                    root.failure = null
+                    root.unknownOutcome = null
+                    inspectDebounce.restart()
+                }
+            }
+
+            LogosText {
+                visible: root.addressInput !== "" && !root.addressUsable
+                text: qsTr("Enter the bare Base58 account ID, or Public/<account ID>. Private accounts cannot receive a faucet claim.")
+                textFormat: Text.PlainText
+                color: Theme.palette.textSecondary
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            // The account the core resolved. Displayed instead of the raw
+            // input, which has no standing until the chain has agreed with it.
+            ColumnLayout {
+                visible: root.inspection !== null
+                Layout.fillWidth: true
+                spacing: Theme.spacing.tiny
                 LogosText {
-                    visible: root.externalRecipientMode
-                        && root.externalRecipientError !== ""
-                    text: root.externalRecipientError
-                    color: Theme.palette.error
+                    text: root.inspection ? root.inspection.address : ""
+                    textFormat: Text.PlainText
+                    color: Theme.palette.text
+                    elide: Text.ElideMiddle
+                    Layout.fillWidth: true
+                }
+                LogosText {
+                    text: root.inspection ? root.inspection.summary : ""
+                    textFormat: Text.PlainText
+                    color: root.inspection && root.inspection.eligible
+                        ? Theme.palette.textSecondary : Theme.palette.warning
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
                 LogosText {
-                    visible: root.externalRecipientMode
-                        && root.externalRecipientIssue === "uninitialized"
-                        && root.externalInitializationCommand !== ""
-                    text: root.externalInitializationCommand
+                    visible: root.inspection !== null && root.inspection.balance !== ""
+                    text: qsTr("Current balance: %1 LEZ").arg(
+                        root.inspection ? root.inspection.balance : "")
+                    textFormat: Text.PlainText
+                    color: Theme.palette.textSecondary
+                    Layout.fillWidth: true
+                }
+                LogosText {
+                    visible: root.inspection !== null
+                        && root.inspection.initializationCommand !== ""
+                    text: root.inspection ? root.inspection.initializationCommand : ""
+                    textFormat: Text.PlainText
                     font.family: "monospace"
                     color: Theme.palette.text
                     wrapMode: Text.WrapAnywhere
                     Layout.fillWidth: true
                 }
-                RowLayout {
-                    visible: root.externalRecipientMode
-                        && root.externalRecipientIssue === "uninitialized"
-                        && root.externalInitializationCommand !== ""
-                    Layout.fillWidth: true
-                    LogosButton {
-                        text: qsTr("Copy command")
-                        onClicked: root.copyInitializationCommand()
-                    }
-                    Item { Layout.fillWidth: true }
-                }
-                LogosText {
-                    visible: !root.externalRecipientMode || root.externalRecipientVerified
-                    text: qsTr("Balance")
-                    color: Theme.palette.textSecondary
-                }
-                LogosText {
-                    visible: !root.externalRecipientMode || root.externalRecipientVerified
-                    text: root.balanceText + qsTr(" LEZ")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.text
-                }
-                LogosText {
-                    visible: !root.externalRecipientMode || root.externalRecipientVerified
-                    text: root.externalRecipientMode
-                        ? "Public/" + root.displayedAccountId : root.displayedAccountId
-                    color: Theme.palette.textSecondary
-                    elide: Text.ElideMiddle
-                    Layout.fillWidth: true
-                }
-                CheckBox {
-                    visible: root.externalRecipientMode && root.externalRecipientVerified
-                    text: qsTr("I confirm this is the initialized public account I intend to fund.")
-                    checked: root.externalRecipientConfirmed
-                    onToggled: root.externalRecipientConfirmed = checked
-                }
-                RowLayout {
-                    visible: !root.externalRecipientMode || root.externalRecipientVerified
-                    Layout.fillWidth: true
-                    LogosButton {
-                        text: root.externalRecipientMode
-                            ? qsTr("Check balance again") : qsTr("Refresh balance")
-                        onClicked: root.refreshBalance()
-                    }
-                    Item { Layout.fillWidth: true }
-                    LogosButton {
-                        text: qsTr("Claim 150 LEZ")
-                        enabled: root.recipientCanClaim
-                        onClicked: root.startClaimOnce()
-                    }
-                }
-                RowLayout {
-                    visible: !root.externalRecipientMode || root.externalRecipientVerified
-                    Layout.fillWidth: true
-                    LogosTextField {
-                        id: targetField
-                        Layout.fillWidth: true
-                        placeholderText: qsTr("Target balance")
-                        text: root.targetText
-                        textInput.inputMethodHints: Qt.ImhDigitsOnly
-                        textInput.maximumLength: 39
-                        onTextChanged: root.targetText = text
-                    }
-                    LogosButton {
-                        text: {
-                            if (!FaucetFlow.isU128Decimal(root.targetText, false))
-                                return qsTr("Enter a valid target")
-                            return FaucetFlow.targetPending(root.balanceText, root.targetText)
-                                ? qsTr("Claim to at least %1 LEZ (max 100 claims)").arg(root.targetText)
-                                : qsTr("Target reached")
-                        }
-                        enabled: root.recipientCanClaim
-                            && FaucetFlow.targetPending(root.balanceText, root.targetText)
-                        onClicked: root.startClaimToTarget()
-                    }
-                }
-                LogosText {
-                    visible: !root.externalRecipientMode || root.externalRecipientVerified
-                    text: qsTr("Each claim adds 150 LEZ. Your final balance may be up to 149 LEZ above the target. One run is limited to 100 claims.")
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
+                LogosButton {
+                    visible: root.inspection !== null
+                        && root.inspection.initializationCommand !== ""
+                    text: qsTr("Copy command")
+                    onClicked: root.copyInitializationCommand(
+                        root.inspection ? root.inspection.initializationCommand : "")
                 }
             }
 
+            LogosText {
+                visible: root.inspectionError !== ""
+                text: root.inspectionError
+                textFormat: Text.PlainText
+                color: Theme.palette.error
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            // -- 3. the button ----------------------------------------------
+            LogosButton {
+                id: requestButton
+                text: qsTr("Request 150 LEZ")
+                enabled: root.canRequest
+                Layout.fillWidth: true
+                onClicked: root.requestCredit()
+            }
+
+            // -- 4. progress, cancel, and the result ------------------------
             ColumnLayout {
-                visible: root.screenState === "claiming_once"
-                    || root.screenState === "claiming_target"
-                    || root.screenState === "cancelling"
+                visible: root.creditLive
                 Layout.fillWidth: true
                 spacing: Theme.spacing.medium
                 BusyIndicator { running: parent.visible; Layout.alignment: Qt.AlignHCenter }
                 LogosText {
                     text: root.statusText
+                    textFormat: Text.PlainText
                     color: Theme.palette.text
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
                 LogosText {
-                    visible: root.screenState !== "claiming_once"
-                    text: qsTr("%1 of %2 claims confirmed · Current balance: %3 LEZ")
-                        .arg(root.completedClaims).arg(root.requiredClaims).arg(root.balanceText)
+                    visible: root.creditStage === "interrupted"
+                    text: qsTr("Reconnecting to the same request. Nothing new is being sent.")
+                    textFormat: Text.PlainText
                     color: Theme.palette.textSecondary
                     horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
                 LogosButton {
-                    visible: root.screenState === "claiming_target"
-                    text: qsTr("Stop after this claim")
+                    visible: root.creditStage === "interrupted"
+                    text: qsTr("Reconnect now")
                     Layout.alignment: Qt.AlignHCenter
-                    onClicked: root.requestStop()
-                }
-            }
-
-            ColumnLayout {
-                visible: root.screenState === "version_mismatch"
-                Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: qsTr("Testnet version mismatch")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.error
-                }
-                LogosText {
-                    text: qsTr("This faucet was built for LEZ v0.2.0, but the sequencer exposes different program IDs. Account initialization and claims are disabled to prevent transactions from being silently dropped.")
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
+                    onClicked: root.sendCreditRequest()
                 }
                 LogosButton {
-                    text: qsTr("Retry compatibility check")
-                    onClicked: root.verifyCompatibility(
-                        root.externalRecipientMode || root.hasAccount
-                            ? "ready" : "initialization_required")
-                }
-            }
-
-            ColumnLayout {
-                visible: root.screenState === "stale"
-                Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: qsTr("The faucet is busy")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.text
+                    visible: root.cancellable
+                    text: qsTr("Cancel")
+                    Layout.alignment: Qt.AlignHCenter
+                    onClicked: root.cancelCreditRequest()
                 }
                 LogosText {
-                    text: qsTr("The Pinata challenge changed too often. No claim was confirmed for this attempt. Refresh the balance and try again in a moment.")
+                    visible: root.cancelRequested
+                    text: qsTr("Stop requested. If the claim has already been sent it will still be reconciled.")
+                    textFormat: Text.PlainText
                     color: Theme.palette.textSecondary
+                    horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
-                LogosButton { text: qsTr("Refresh balance"); onClicked: root.refreshBalance() }
             }
 
-            ColumnLayout {
-                visible: root.screenState === "outcome_unknown"
+            LogosText {
+                visible: !root.creditLive && root.statusText !== "" && root.panel === "none"
+                text: root.statusText
+                textFormat: Text.PlainText
+                color: Theme.palette.textSecondary
+                wrapMode: Text.WordWrap
                 Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: qsTr("Claim outcome needs reconciliation")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.warning
-                }
-                LogosText {
-                    text: qsTr("The claim was submitted, but the faucet could not prove whether it was included. Do not submit another claim yet: reconcile the balance first to avoid a duplicate attempt.")
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                LogosButton {
-                    text: qsTr("Reconcile balance")
-                    onClicked: root.externalRecipientMode
-                        ? root.refreshBalance() : root.verifyCompatibility("ready")
-                }
             }
 
-            ColumnLayout {
-                visible: root.screenState === "offline"
+            // Receipt. Shown only for a proven credit.
+            Rectangle {
+                visible: root.panel === "receipt" && root.receipt !== null
                 Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: qsTr("Can’t reach the LEZ testnet")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.text
-                }
-                LogosText {
-                    text: qsTr("The operation could not be confirmed. The displayed balance may be out of date; reconnect and refresh it before submitting another claim.")
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                LogosButton { text: qsTr("Retry"); onClicked: root.retryFromOffline() }
-            }
+                implicitHeight: receiptColumn.implicitHeight + Theme.spacing.large * 2
+                radius: Theme.spacing.radiusLarge
+                color: Theme.palette.backgroundSecondary
+                border.color: Theme.palette.success
 
-            ColumnLayout {
-                visible: root.screenState === "recovery_unavailable"
-                Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: qsTr("Recovery is not available in this build")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.text
-                }
-                LogosText {
-                    text: qsTr("The current faucet core cannot restore from a recovery phrase. Use the LEZ v0.2.0 wallet CLI to recover, then return to this faucet after recovery support is added.")
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                LogosButton { text: qsTr("Back"); onClicked: root.screenState = "welcome" }
-            }
-
-            ColumnLayout {
-                visible: root.screenState === "open_error" || root.screenState === "error"
-                Layout.fillWidth: true
-                spacing: Theme.spacing.medium
-                LogosText {
-                    text: root.screenState === "open_error"
-                        ? qsTr("We couldn’t open this faucet wallet") : qsTr("Something went wrong")
-                    font.pixelSize: Theme.typography.titleText
-                    font.weight: Theme.typography.weightBold
-                    color: Theme.palette.error
-                }
-                LogosText {
-                    text: root.errorText
-                    color: Theme.palette.textSecondary
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                RowLayout {
-                    LogosButton {
-                        text: qsTr("Recovery options")
-                        onClicked: root.screenState = "recovery_unavailable"
+                ColumnLayout {
+                    id: receiptColumn
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacing.large
+                    spacing: Theme.spacing.small
+                    LogosText {
+                        text: qsTr("%1 LEZ credited").arg(root.receipt ? root.receipt.amount : "")
+                        textFormat: Text.PlainText
+                        font.pixelSize: Theme.typography.titleText
+                        font.weight: Theme.typography.weightBold
+                        color: Theme.palette.text
+                        Layout.fillWidth: true
                     }
-                    LogosButton {
-                        text: qsTr("Retry")
-                        onClicked: root.retryFromError()
+                    LogosText {
+                        text: root.receipt ? root.receipt.address : ""
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        elide: Text.ElideMiddle
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        text: qsTr("Balance %1 LEZ before, %2 LEZ after.")
+                            .arg(root.receipt ? root.receipt.balanceBefore : "")
+                            .arg(root.receipt ? root.receipt.balanceAfter : "")
+                        textFormat: Text.PlainText
+                        color: Theme.palette.text
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        text: qsTr("Transaction")
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                    }
+                    LogosText {
+                        text: root.receipt ? root.receipt.txHash : ""
+                        textFormat: Text.PlainText
+                        font.family: "monospace"
+                        color: Theme.palette.text
+                        wrapMode: Text.WrapAnywhere
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.receipt !== null && root.receipt.retried
+                        text: qsTr("Another claimant won the challenge first, so this took more than one attempt. Only one claim was credited.")
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
                     }
                 }
+            }
+
+            // Unproven outcome. Deliberately offers no retry: a second request
+            // while the first may still be pending is a second 150 LEZ.
+            Rectangle {
+                visible: root.panel === "unknown" && root.unknownOutcome !== null
+                Layout.fillWidth: true
+                implicitHeight: unknownColumn.implicitHeight + Theme.spacing.large * 2
+                radius: Theme.spacing.radiusLarge
+                color: Theme.palette.backgroundSecondary
+                border.color: Theme.palette.warning
+
+                ColumnLayout {
+                    id: unknownColumn
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacing.large
+                    spacing: Theme.spacing.small
+                    LogosText {
+                        text: qsTr("This claim could not be confirmed")
+                        textFormat: Text.PlainText
+                        font.pixelSize: Theme.typography.titleText
+                        font.weight: Theme.typography.weightBold
+                        color: Theme.palette.warning
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        text: qsTr("The claim was sent, but this app could not prove what became of it. Check the account's balance with your own tools before doing anything else. This app will not send another claim to that account.")
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.unknownOutcome !== null && root.unknownOutcome.address !== ""
+                        text: qsTr("Account: %1").arg(
+                            root.unknownOutcome ? root.unknownOutcome.address : "")
+                        textFormat: Text.PlainText
+                        color: Theme.palette.text
+                        wrapMode: Text.WrapAnywhere
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.unknownOutcome !== null
+                            && root.unknownOutcome.balanceBefore !== ""
+                        text: qsTr("Balance before the claim: %1 LEZ").arg(
+                            root.unknownOutcome ? root.unknownOutcome.balanceBefore : "")
+                        textFormat: Text.PlainText
+                        color: Theme.palette.text
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.unknownOutcome !== null && root.unknownOutcome.txHash !== ""
+                        text: qsTr("Transaction: %1").arg(
+                            root.unknownOutcome ? root.unknownOutcome.txHash : "")
+                        textFormat: Text.PlainText
+                        font.family: "monospace"
+                        color: Theme.palette.text
+                        wrapMode: Text.WrapAnywhere
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.unknownOutcome !== null && root.unknownOutcome.message !== ""
+                        text: root.unknownOutcome ? root.unknownOutcome.message : ""
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                }
+            }
+
+            // Failure. The retry offer is decided by the error's code alone.
+            Rectangle {
+                visible: root.panel === "error" && root.failure !== null
+                Layout.fillWidth: true
+                implicitHeight: failureColumn.implicitHeight + Theme.spacing.large * 2
+                radius: Theme.spacing.radiusLarge
+                color: Theme.palette.backgroundSecondary
+                border.color: Theme.palette.error
+
+                ColumnLayout {
+                    id: failureColumn
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacing.large
+                    spacing: Theme.spacing.small
+                    LogosText {
+                        text: root.failure ? root.failure.title : ""
+                        textFormat: Text.PlainText
+                        font.pixelSize: Theme.typography.titleText
+                        font.weight: Theme.typography.weightBold
+                        color: Theme.palette.error
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        text: root.failure ? root.failure.guidance : ""
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.failure !== null && root.failure.message !== ""
+                        text: root.failure ? root.failure.message : ""
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    LogosText {
+                        visible: root.failure !== null
+                            && root.failure.initializationCommand !== ""
+                        text: root.failure ? root.failure.initializationCommand : ""
+                        textFormat: Text.PlainText
+                        font.family: "monospace"
+                        color: Theme.palette.text
+                        wrapMode: Text.WrapAnywhere
+                        Layout.fillWidth: true
+                    }
+                    LogosButton {
+                        visible: root.failure !== null
+                            && root.failure.initializationCommand !== ""
+                        text: qsTr("Copy command")
+                        onClicked: root.copyInitializationCommand(
+                            root.failure ? root.failure.initializationCommand : "")
+                    }
+                    LogosText {
+                        visible: root.failure !== null && root.failure.newAttempt
+                        text: qsTr("Nothing was credited. Requesting again starts a completely new request.")
+                        textFormat: Text.PlainText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                }
+            }
+
+            // -- what this app cannot do for you ----------------------------
+            LogosText {
+                text: qsTr("This app stores nothing between runs. If you quit while a claim is running it cannot reconcile that claim afterwards — check the account's balance yourself before requesting again.")
+                textFormat: Text.PlainText
+                color: Theme.palette.textSecondary
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            LogosText {
+                visible: root.pool.poolAddress !== ""
+                text: qsTr("Pool account: %1").arg(root.pool.poolAddress)
+                textFormat: Text.PlainText
+                color: Theme.palette.textTertiary
+                elide: Text.ElideMiddle
+                Layout.fillWidth: true
             }
 
             Item { Layout.preferredHeight: Theme.spacing.xlarge }

@@ -741,7 +741,14 @@ impl FaucetClient {
             }
 
             match self
-                .reconcile(account_id, tx_hash, balance_before, expected, challenge)
+                .reconcile(
+                    account_id,
+                    recipient,
+                    tx_hash,
+                    balance_before,
+                    expected,
+                    challenge,
+                )
                 .await?
             {
                 Reconciled::Credited => {
@@ -777,6 +784,7 @@ impl FaucetClient {
     async fn reconcile(
         &self,
         account_id: AccountId,
+        recipient: &PublicAddress,
         tx_hash: HashType,
         balance_before: u128,
         expected: u128,
@@ -821,6 +829,7 @@ impl FaucetClient {
                 ClaimDecision::Unattributable => {
                     return Ok(Reconciled::Unknown(unknown_outcome(
                         "Another transaction changed this account's balance while the claim was in flight, so this credit cannot be attributed to this request.",
+                        recipient,
                         balance_before,
                         tx_hash,
                         &submitted,
@@ -832,6 +841,7 @@ impl FaucetClient {
             if tokio::time::Instant::now() >= deadline {
                 return Ok(Reconciled::Unknown(unknown_outcome(
                     "The claim was submitted but its outcome could not be confirmed in time.",
+                    recipient,
                     balance_before,
                     tx_hash,
                     &submitted,
@@ -966,14 +976,20 @@ fn require_pool_can_pay(pool_balance: u128) -> ApiResult<()> {
 
 fn unknown_outcome(
     message: &str,
+    recipient: &PublicAddress,
     balance_before: u128,
     tx_hash: HashType,
     submitted: &Challenge,
 ) -> ApiError {
+    // The view has to be able to tell the user exactly which account is in
+    // doubt and what its balance was beforehand, so that they can check it
+    // themselves. Carrying the canonical recipient here means the view never
+    // has to fall back on echoing whatever the user typed.
     ApiError::new(ErrorCode::OutcomeUnknown, message)
         .at(DropPhase::Reconciling)
         .with_details(serde_json::json!({
             "outcome": "unknown",
+            "recipient": recipient,
             "balance_before": balance_before.to_string(),
             "tx_hash": tx_hash.to_string(),
             "submitted_challenge_fingerprint": submitted.fingerprint(),
@@ -1296,7 +1312,8 @@ mod tests {
             difficulty: 3,
             seed: [0xAB; 32],
         };
-        let error = unknown_outcome("lost", 6_000, HashType([7; 32]), &challenge);
+        let recipient = PublicAddress::new(system_accounts::pinata_account_id());
+        let error = unknown_outcome("lost", &recipient, 6_000, HashType([7; 32]), &challenge);
         assert_eq!(error.code, ErrorCode::OutcomeUnknown);
         assert!(
             !error.retryable,
@@ -1305,6 +1322,10 @@ mod tests {
         let details = error.details.unwrap();
         assert_eq!(details["outcome"], "unknown");
         assert_eq!(details["balance_before"], "6000");
+        // The view must be able to name the account in doubt without ever
+        // falling back on the raw string the user typed.
+        assert_eq!(details["recipient"]["account_id"], recipient.account_id);
+        assert_eq!(details["recipient"]["address"], recipient.address);
         assert_eq!(
             details["submitted_challenge_fingerprint"],
             challenge.fingerprint()
