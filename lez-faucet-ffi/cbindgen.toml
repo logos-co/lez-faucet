@@ -9,17 +9,13 @@ parse_deps = false
 
 [export]
 include = [
-  "FaucetHandle",
-  "FfiCreateOutput",
-  "FfiProgressCallback",
-  "lez_faucet_create",
-  "lez_faucet_open",
-  "lez_faucet_destroy",
+  "LezFaucetClient",
+  "LezFaucetClientOutput",
+  "lez_faucet_client_new",
+  "lez_faucet_client_destroy",
   "lez_faucet_string_free",
+  "lez_faucet_get_info",
+  "lez_faucet_inspect_recipient",
+  "lez_faucet_request_drop",
   "lez_faucet_cancel",
-  "lez_faucet_verify_fingerprint",
-  "lez_faucet_create_and_initialize_account",
-  "lez_faucet_get_balance",
-  "lez_faucet_claim_once",
-  "lez_faucet_claim_until_target",
 ]

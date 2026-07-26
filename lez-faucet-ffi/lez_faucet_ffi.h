@@ -9,127 +9,111 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-typedef struct FaucetHandle FaucetHandle;
+/**
+ * Challenge data as stored in the Piñata account: one difficulty byte
+ * followed by a 32-byte seed.
+ */
+#define CHALLENGE_LEN 33
 
-typedef struct FfiCreateOutput {
-  struct FaucetHandle *handle;
+/**
+ * The protocol permits 0..=32. Anything above this is refused by the client
+ * because the work is not bounded in a way we are willing to impose on a
+ * user's machine.
+ */
+#define MAX_SUPPORTED_DIFFICULTY 3
+
+/**
+ * Opaque handle owned by the caller.
+ */
+typedef struct LezFaucetClient LezFaucetClient;
+
+typedef struct LezFaucetClientOutput {
+  struct LezFaucetClient *client;
   /**
-   * JSON containing the one-time mnemonic or an error. Free with
-   * `lez_faucet_string_free`.
+   * `{"ok":true,...}` or `{"ok":false,"error":ApiError}`. Free with
+   * [`lez_faucet_string_free`].
    */
   char *result_json;
-} FfiCreateOutput;
+} LezFaucetClientOutput;
 
 /**
- * Called synchronously after each successful claim. The JSON pointer is valid
- * only for the duration of the callback; copy it before returning.
+ * The exact prize the deployed Piñata guest pays per successful claim.
  */
-typedef void (*FfiProgressCallback)(const char*, void*);
+#define PRIZE 150
 
 /**
- * The exact public-testnet reward encoded by the v0.2.0 Piñata guest.
- */
-#define PINATA_PRIZE 150
-
-/**
- * Create a new wallet and return its opaque handle plus one-time recovery JSON.
+ * Create a faucet client for `sequencer_url`.
+ *
+ * Performs no filesystem access and creates no key material.
  *
  * # Safety
- * All string pointers must be non-null, valid, NUL-terminated UTF-8 strings.
+ * `sequencer_url` must be a valid NUL-terminated UTF-8 string.
  */
-struct FfiCreateOutput lez_faucet_create(const char *config_path,
-                                         const char *storage_path,
-                                         const char *sequencer_url,
-                                         const char *password);
+struct LezFaucetClientOutput lez_faucet_client_new(const char *sequencer_url);
 
 /**
- * Open an existing wallet and return its handle plus status JSON.
+ * Destroy a client handle.
  *
  * # Safety
- * All string pointers must be non-null, valid, NUL-terminated UTF-8 strings.
+ * `client` must be null, or a live handle returned by this library that is
+ * not in use and is never used or destroyed again.
  */
-struct FfiCreateOutput lez_faucet_open(const char *config_path,
-                                       const char *storage_path,
-                                       const char *sequencer_url);
+void lez_faucet_client_destroy(struct LezFaucetClient *client);
 
 /**
- * Destroy a wallet handle.
+ * Free a string returned by this library.
  *
  * # Safety
- * `handle` must be null or a live handle returned by this library, and must
- * not be used or destroyed again after this call.
- */
-void lez_faucet_destroy(struct FaucetHandle *handle);
-
-/**
- * Free a JSON string returned by this library.
- *
- * # Safety
- * `value` must be null or a pointer returned by this library, and must not be
- * used or freed again after this call.
+ * `value` must be null, or a pointer returned by this library that is never
+ * used or freed again.
  */
 void lez_faucet_string_free(char *value);
 
 /**
- * Request cooperative cancellation before the next transaction submission.
- *
- * An active solver stops promptly. If submission may already have occurred,
- * the blocked call first completes bounded reconciliation and returns a
- * receipt or explicit unknown outcome. This function does not acquire the
- * wallet lock and is safe to call from a different thread.
+ * Read faucet and pool status.
  *
  * # Safety
- * `handle` must be a live handle returned by this library.
+ * `client` must be a live handle returned by this library.
  */
-void lez_faucet_cancel(struct FaucetHandle *handle);
+char *lez_faucet_get_info(struct LezFaucetClient *client);
 
 /**
- * Verify that the sequencer's builtin program IDs match the pinned client.
+ * Inspect a recipient without changing any network state.
  *
  * # Safety
- * `handle` must be a live handle returned by this library.
+ * `client` must be live and `address` a valid NUL-terminated UTF-8 string for
+ * the duration of the call.
  */
-char *lez_faucet_verify_fingerprint(struct FaucetHandle *handle);
+char *lez_faucet_inspect_recipient(struct LezFaucetClient *client, const char *address);
 
 /**
- * Create or resume and initialize one public account.
+ * Request exactly one faucet credit.
+ *
+ * Repeating the same `request_key` with the same address replays the original
+ * outcome and never produces a second claim.
  *
  * # Safety
- * `handle` must be a live handle returned by this library.
+ * `client` must be live and both strings valid NUL-terminated UTF-8 for the
+ * duration of the call.
  */
-char *lez_faucet_create_and_initialize_account(struct FaucetHandle *handle);
+char *lez_faucet_request_drop(struct LezFaucetClient *client,
+                              const char *address,
+                              const char *request_key,
+                              uint64_t operation_token);
 
 /**
- * Read a public account's balance.
+ * Ask the operation identified by `operation_token` to stop.
+ *
+ * Cooperative and scoped: a cancel that arrives after its operation has
+ * finished cannot affect a later one. If submission has already begun the
+ * chain action cannot be recalled, and the call in flight finishes its bounded
+ * reconciliation rather than reporting a cancellation it cannot honour.
+ *
+ * Takes no lock and is safe to call from another thread.
  *
  * # Safety
- * `handle` must be live and `account_id` must be a valid NUL-terminated UTF-8
- * string for the duration of this call.
+ * `client` must be a live handle returned by this library.
  */
-char *lez_faucet_get_balance(struct FaucetHandle *handle, const char *account_id);
-
-/**
- * Solve and submit one Piñata claim.
- *
- * # Safety
- * `handle` must be live and `account_id` must be a valid NUL-terminated UTF-8
- * string for the duration of this call.
- */
-char *lez_faucet_claim_once(struct FaucetHandle *handle, const char *account_id);
-
-/**
- * Claim repeatedly until the decimal target is reached or an error occurs.
- *
- * # Safety
- * `handle` must be live; string pointers must be valid NUL-terminated UTF-8;
- * and any callback/context pair must remain valid until this call returns.
- * The callback must not re-enter this API while the wallet operation is live.
- */
-char *lez_faucet_claim_until_target(struct FaucetHandle *handle,
-                                    const char *account_id,
-                                    const char *target,
-                                    size_t max_claims,
-                                    FfiProgressCallback progress_callback,
-                                    void *progress_context);
+void lez_faucet_cancel(struct LezFaucetClient *client, uint64_t operation_token);
 
 #endif  /* LEZ_FAUCET_FFI_H */
