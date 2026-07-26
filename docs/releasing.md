@@ -193,6 +193,11 @@ Finally, test the user journey in a fresh Basecamp profile:
 
 1. Add the raw `logos-repo.json` URL.
 2. Install `lez_faucet_ui` 0.2.0 and confirm `lez_faucet` 0.2.0 resolves with it.
-3. Create a disposable wallet and save the one-time mnemonic.
-4. Initialize a fresh account.
-5. Claim until its balance reaches at least 1,000 testnet LEZ.
+3. Confirm the first screen has no onboarding, password, recovery phrase or
+   "create account" step.
+4. Paste an independently created, already-initialized public
+   authenticated-transfer address.
+5. Query the recipient and pool balances independently first.
+6. Press **Request 150 LEZ** exactly once.
+7. Confirm the recipient is up exactly 150 and the pool down at least 150.
+8. Confirm no wallet, config or state file was created anywhere.

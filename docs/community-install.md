@@ -40,21 +40,6 @@ is unavailable, use this same core-then-UI order for a new installation.
 Installing only `lez_faucet` does not add a visible panel; the UI package is the
 app entry point. Restart Basecamp if a newly installed view does not appear.
 
-## Create and fund a local account
-
-1. Leave the sequencer set to `https://testnet.lez.logos.co` unless you are
-   deliberately using a compatible localnet.
-2. Read and accept the plaintext-wallet warning.
-3. Create the wallet. LEZ Faucet stores its config, plaintext wallet, and faucet
-   state under Basecamp's application-data directory; v0.2.0 does not expose a
-   custom path chooser.
-4. Save the recovery mnemonic from the one-time recovery screen. It cannot be
-   shown again by the app.
-5. Create and initialize the public account. Wait for the initialization
-   transaction to be confirmed.
-6. Use **Claim 150** for one claim, or enter a target and use **Claim until
-   target**. The app confirms each claim before starting the next one.
-
 ## Fund an existing public account
 
 LEZ Faucet can also send faucet claims to a public account created in another
@@ -85,26 +70,21 @@ command; a different wallet home cannot authorize initialization.
 
 Then fund it in Basecamp:
 
-1. Create or open the app's local faucet wallet. The Rust client currently
-   requires this local wallet as its LEZ `WalletCore` network context, but it
-   does not use it to own or sign for the external recipient. On first use,
-   follow the plaintext-storage warning and save the local wallet's one-time
-   mnemonic.
-2. Choose **Fund an existing public account instead** during initialization, or
-   enable **Fund an existing public account** on the ready screen.
-3. Paste `Public/<account-id>` or the bare 32-byte base58 account ID. Private
+1. Open the LEZ Faucet app. There is no onboarding: no account to create, no
+   password, no recovery phrase.
+2. Paste `Public/<account-id>` or the bare 32-byte base58 account ID. Private
    account IDs are not accepted.
-4. Select **Verify account and balance**. The app reports malformed IDs,
-   valid-but-uninitialized accounts, and accounts owned by another program as
-   separate states.
-5. For a valid but uninitialized account, select **Copy command**, run
-   `wallet auth-transfer init --account-id Public/<account-id>` in the owning
-   wallet, wait for inclusion, then select **Re-check account**.
-6. Review the normalized account ID and fetched balance, then select the
-   explicit confirmation that this is the account you intend to fund.
-7. Use **Claim 150 LEZ** or **Claim until target**. Changing the recipient text
-   clears the preflight and confirmation, so the new value must be checked
-   again.
+3. The app reports malformed IDs, valid-but-uninitialized accounts, and
+   accounts owned by another program as separate states. For an uninitialized
+   account it shows the exact command for **you** to run in the owning wallet.
+4. Press **Request 150 LEZ** once.
+5. Watch the phases. Before the transaction is sent you can cancel; after it is
+   sent the app can only reconcile it, so cancelling then reports the real
+   outcome rather than pretending nothing happened.
+6. A receipt appears only when the app has seen its own transaction included
+   *and* your balance up by exactly 150. If it cannot prove that in time it
+   says so, shows the transaction hash, and offers no retry — re-check the
+   balance yourself before trying again.
 
 Funding is a public credit and does not require the faucet to possess the
 recipient's signing key. The recipient remains controlled only by its original
@@ -164,19 +144,27 @@ and `storage.json`, and its configuration must point at the intended sequencer.
 Use `LEE_WALLET_HOME_DIR` with LEZ v0.2.0, not the older
 `NSSA_WALLET_HOME_DIR` name.
 
-## Security warning
+## What this app does and does not do
 
-The exact v0.2.0 wallet dependency used by this release ignores the wallet
-password and stores its keychain data as plaintext JSON. The password field is
-not encryption.
+- It funds one public, already-initialized account by exactly 150 testnet LEZ
+  per press.
+- It never asks for a password, recovery phrase or private key, and it has no
+  way to accept one.
+- It writes no files and remembers nothing after you quit.
+- It cannot initialize an account for you. If yours is not initialized, the app
+  shows the command for **you** to run in your own wallet.
 
-- Use a disposable testnet-only wallet.
-- Do not put the storage file in iCloud Drive, Dropbox, a shared repository, or
-  another automatically synchronized location.
-- Do not use a mnemonic or password associated with real assets.
-- Remove the local wallet files when you no longer need the test account.
+The Piñata pool is finite and shared: it started at 1,500,000 testnet LEZ, pays
+150 per claim, and every claim is a proof-of-work race against everyone else
+for one global challenge. It is permissionless and repeatedly claimable, but it
+is not unlimited and it will run out. The deployed program has no cooldown and
+no per-address quota; this app's internal limits keep it well behaved on your
+machine and on a shared sequencer, and are not abuse prevention.
 
-Testnet LEZ has no monetary value. This app must not be used for mainnet funds.
+Testnet LEZ has no monetary value.
+
+If you quit the app while a claim is running, it cannot tell you afterwards
+whether that claim went through. Check the balance independently.
 
 ## Troubleshooting
 
