@@ -1051,6 +1051,7 @@ std::string LezFaucetModule::jobStatus(const std::string& jobId)
     if (!job) {
         return structuredError("unknown_job", "No job with that id.");
     }
+    refreshJobPhase(job);
     return jobJson(job);
 }
 
@@ -1338,6 +1339,48 @@ std::string LezFaucetModule::runDrop(const JobPtr& job, const std::string& addre
     return runFfiCall([&address, &requestKey, token](LezFaucetClient* client) {
         return lez_faucet_request_drop(client, address.c_str(), requestKey.c_str(), token);
     });
+}
+
+void LezFaucetModule::refreshJobPhase(const JobPtr& job)
+{
+    // Snapshot the token under the job lock, then RELEASE it before the FFI
+    // call. The Rust side only reads two atomics, but holding job->mutex
+    // across any FFI call would let one slow poll stall every other reader of
+    // this job — and the worker's own settle — behind it.
+    uint64_t token = 0;
+    {
+        std::lock_guard<std::mutex> lock(job->mutex);
+        // Only a live drop has a phase to poll. A terminal job keeps the last
+        // phase it recorded, and a read job never has an operation token.
+        if (!job->mutating || job->operationToken == 0 || isTerminal(job->status)) {
+            return;
+        }
+        token = job->operationToken;
+    }
+    LezFaucetClient* client = m_client.load();
+    if (client == nullptr) {
+        return;
+    }
+    const std::string raw = takeFfiString(lez_faucet_current_phase(client, token));
+    const std::optional<Json> parsed = parseJson(raw);
+    if (!parsed.has_value() || !envelopeSucceeded(*parsed)) {
+        // A phase is a courtesy, never a verdict: an unreadable poll changes
+        // nothing about the job.
+        return;
+    }
+    const Json& phase = parsed->at("result").at("phase");
+    if (!phase.isString()) {
+        // A null phase means "no live phase" — the drop has not started or has
+        // just finished. Keep the last phase rather than blanking it, so the
+        // envelope never moves backwards while the worker settles.
+        return;
+    }
+    std::lock_guard<std::mutex> lock(job->mutex);
+    // The worker may have settled while the poll was in flight. A terminal
+    // job's phase belongs to its outcome; a stale poll must not overwrite it.
+    if (!isTerminal(job->status)) {
+        job->phase = phase.text();
+    }
 }
 
 bool LezFaucetModule::reserveDropSlot()

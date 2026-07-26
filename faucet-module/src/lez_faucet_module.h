@@ -24,9 +24,12 @@ extern "C" {
 //
 // getFaucetInfo/inspectRecipient/requestDrop start a worker job and return
 // immediately. Call jobStatus(job_id) until the status is one of succeeded,
-// failed, cancelled or outcome_unknown. Every terminal result is replayed by
-// jobStatus until jobResultAck(job_id) acknowledges it, at which point the
-// retained job record is reaped.
+// failed, cancelled or outcome_unknown. While a drop is running, jobStatus
+// also polls the Rust client's live phase for that job's token, so the
+// envelope's `phase` tracks the drop (solving, submitting, reconciling, …) in
+// flight instead of appearing only on a terminal error. Every terminal result
+// is replayed by jobStatus until jobResultAck(job_id) acknowledges it, at
+// which point the retained job record is reaped.
 //
 // A request-key tombstone is *not* a job record. Job records are bounded and
 // reapable; tombstones live for the whole process and are never evicted,
@@ -69,6 +72,7 @@ private:
     void joinAllWorkers();
     std::string runFfiCall(const std::function<char*(LezFaucetClient*)>& call);
     std::string runDrop(const JobPtr& job, const std::string& address, const std::string& requestKey);
+    void refreshJobPhase(const JobPtr& job);
     JobPtr findJob(const std::string& jobId) const;
     std::string tombstonedJob(const std::string& requestKey) const;
     void rememberRequestKey(const std::string& requestKey, const std::string& address, const std::string& jobId);

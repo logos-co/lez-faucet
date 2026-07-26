@@ -236,7 +236,7 @@ var phaseSentences = {
     "solving": "Solving the proof-of-work challenge. This can take a while.",
     "refreshing_challenge": "Re-checking the challenge before sending anything…",
     "submitting": "Sending the claim to the testnet…",
-    "reconciling": "Confirming that the claim actually credited the account…"
+    "reconciling": "Confirming that the claim actually credited the account. This can take a few minutes."
 }
 
 // Map a phase onto a sentence.

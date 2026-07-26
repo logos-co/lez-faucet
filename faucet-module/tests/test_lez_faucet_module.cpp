@@ -434,6 +434,112 @@ void aQueuedJobCancelledBeforeItStartsNeverReachesTheFfi()
     CHECK(statusIs(waitForTerminal(module, stringField(drop, "job_id")), "succeeded"));
 }
 
+void aRunningDropReportsALivePhaseThatMovesAndSurvivesTermination()
+{
+    MockLezFaucetFfi::reset();
+    MockLezFaucetFfi::setDropWaitsForRelease(true);
+    MockLezFaucetFfi::setPhaseResponse("{\"ok\":true,\"result\":{\"phase\":\"solving\"}}");
+    LezFaucetModule module;
+    configure(module);
+
+    // A read job has no operation token, so its status never polls a phase.
+    CHECK(statusIs(startAndWait(module, module.getFaucetInfo()), "succeeded"));
+    CHECK(MockLezFaucetFfi::phaseCalls() == 0);
+
+    const std::string started = module.requestDrop(kAddress, kKey);
+    const std::string jobId = stringField(started, "job_id");
+    CHECK(MockLezFaucetFfi::waitForDropStart(1000));
+
+    // The first poll already carries the live phase, fetched for the drop's
+    // own operation token.
+    const std::string solving = module.jobStatus(jobId);
+    CHECK(statusIs(solving, "running"));
+    CHECK(has(solving, "\"phase\":\"solving\""));
+    CHECK(MockLezFaucetFfi::lastPhaseToken() == MockLezFaucetFfi::lastDropToken());
+
+    // The phase moves while the same job is still running.
+    MockLezFaucetFfi::setPhaseResponse("{\"ok\":true,\"result\":{\"phase\":\"submitting\"}}");
+    CHECK(has(module.jobStatus(jobId), "\"phase\":\"submitting\""));
+
+    // A null phase means "no live phase right now"; the envelope keeps the
+    // last known phase rather than flickering back to nothing.
+    MockLezFaucetFfi::setPhaseResponse("{\"ok\":true,\"result\":{\"phase\":null}}");
+    CHECK(has(module.jobStatus(jobId), "\"phase\":\"submitting\""));
+
+    // After the drop succeeds, the terminal envelope still reports the final
+    // phase, and no further poll is made for a terminal job.
+    MockLezFaucetFfi::releaseDrop();
+    const std::string terminal = waitForTerminal(module, jobId);
+    CHECK(statusIs(terminal, "succeeded"));
+    CHECK(has(terminal, "\"phase\":\"submitting\""));
+    const int polls = MockLezFaucetFfi::phaseCalls();
+    CHECK(has(module.jobStatus(jobId), "\"phase\":\"submitting\""));
+    CHECK(MockLezFaucetFfi::phaseCalls() == polls);
+}
+
+void theOutcomePhaseOverridesTheLastPolledPhase()
+{
+    // A terminal error names the phase it actually failed in. That verdict
+    // outranks whatever a poll happened to see last.
+    MockLezFaucetFfi::reset();
+    MockLezFaucetFfi::setDropWaitsForRelease(true);
+    MockLezFaucetFfi::setPhaseResponse("{\"ok\":true,\"result\":{\"phase\":\"solving\"}}");
+    MockLezFaucetFfi::setDropResponse(
+        "{\"ok\":false,\"error\":{\"code\":\"submission_rejected\",\"message\":\"The LEZ testnet "
+        "sequencer rejected the claim transaction.\",\"retryable\":false,"
+        "\"phase\":\"submitting\"}}");
+    LezFaucetModule module;
+    configure(module);
+
+    const std::string started = module.requestDrop(kAddress, kKey);
+    const std::string jobId = stringField(started, "job_id");
+    CHECK(MockLezFaucetFfi::waitForDropStart(1000));
+    CHECK(has(module.jobStatus(jobId), "\"phase\":\"solving\""));
+
+    MockLezFaucetFfi::releaseDrop();
+    const std::string terminal = waitForTerminal(module, jobId);
+    CHECK(statusIs(terminal, "failed"));
+    CHECK(codeIs(terminal, "submission_rejected"));
+    CHECK(has(terminal, "\"phase\":\"submitting\""));
+}
+
+void phasePollingNeverBlocksAConcurrentCaller()
+{
+    // The real phase read is two atomics, but the module must not depend on
+    // that: even a poll that never returns may not hold job->mutex or stall
+    // any other caller of this module.
+    MockLezFaucetFfi::reset();
+    MockLezFaucetFfi::setDropWaitsForRelease(true);
+    MockLezFaucetFfi::setPhaseBlocks(true);
+    LezFaucetModule module;
+    configure(module);
+
+    const std::string started = module.requestDrop(kAddress, kKey);
+    const std::string jobId = stringField(started, "job_id");
+    CHECK(MockLezFaucetFfi::waitForDropStart(1000));
+
+    std::atomic<bool> pollReturned{false};
+    std::thread polling([&]() {
+        const std::string status = module.jobStatus(jobId);
+        CHECK(statusIs(status, "running") || statusIs(status, "cancelling"));
+        pollReturned = true;
+    });
+    CHECK(MockLezFaucetFfi::waitForPhaseStart(1000));
+
+    // While that poll is stuck inside the FFI: a cancel takes job->mutex and
+    // must return, and an unrelated read must run to completion. Both would
+    // deadlock behind the poll if the lock were held across the call.
+    CHECK(has(module.cancel(jobId), "\"cancel_requested\":true"));
+    CHECK(statusIs(startAndWait(module, module.getFaucetInfo()), "succeeded"));
+    CHECK(!pollReturned.load());
+
+    MockLezFaucetFfi::releasePhase();
+    polling.join();
+    CHECK(pollReturned.load());
+    MockLezFaucetFfi::releaseDrop();
+    CHECK(statusIs(waitForTerminal(module, jobId), "succeeded"));
+}
+
 void shutdownJoinsWorkersBeforeDestroyingTheHandle()
 {
     // API_LOCK §A1.7.1. Destroying the client while a worker is inside
@@ -584,7 +690,10 @@ void everyFfiStringIsFreedExactlyOnce()
         startAndWait(module, module.inspectRecipient(kAddress));
         startAndWait(module, module.requestDrop(kAddress, kKey));
     }
-    CHECK(MockLezFaucetFfi::stringAllocations() == 4);
+    // One string each for configure/info/inspect/drop, plus one per phase poll
+    // made while the drop was running. However many there were, every one of
+    // them is freed exactly once.
+    CHECK(MockLezFaucetFfi::stringAllocations() >= 4);
     CHECK(MockLezFaucetFfi::stringFreeCalls() == MockLezFaucetFfi::stringAllocations());
 }
 
@@ -749,6 +858,9 @@ int main()
     anUnknownOutcomeThatMentionsCancellingIsNotCancelled();
     cancellationBeforeSubmissionIsCancelledAndTokenScoped();
     aQueuedJobCancelledBeforeItStartsNeverReachesTheFfi();
+    aRunningDropReportsALivePhaseThatMovesAndSurvivesTermination();
+    theOutcomePhaseOverridesTheLastPolledPhase();
+    phasePollingNeverBlocksAConcurrentCaller();
     shutdownJoinsWorkersBeforeDestroyingTheHandle();
     theDestructorJoinsWorkersToo();
     inputsAreValidatedByTheModuleItself();

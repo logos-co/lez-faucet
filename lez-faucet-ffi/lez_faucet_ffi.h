@@ -102,6 +102,22 @@ char *lez_faucet_request_drop(struct LezFaucetClient *client,
                               uint64_t operation_token);
 
 /**
+ * Read the live phase of the drop identified by `operation_token`.
+ *
+ * The polled companion to [`lez_faucet_request_drop`], and deliberately not a
+ * callback: this ABI carries no function pointers. Call it from a different
+ * thread while that call is blocked — it reads two atomics and returns, and
+ * never takes the drop permit or any lock the drop holds, so it can neither
+ * block nor be blocked by the drop it observes. The result is
+ * `{"phase":"solving"}` while that drop is running and `{"phase":null}` for an
+ * unknown or finished token, which is a normal answer, not an error.
+ *
+ * # Safety
+ * `client` must be a live handle returned by this library.
+ */
+char *lez_faucet_current_phase(struct LezFaucetClient *client, uint64_t operation_token);
+
+/**
  * Ask the operation identified by `operation_token` to stop.
  *
  * Cooperative and scoped: a cancel that arrives after its operation has

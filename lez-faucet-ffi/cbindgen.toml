@@ -17,5 +17,6 @@ include = [
   "lez_faucet_get_info",
   "lez_faucet_inspect_recipient",
   "lez_faucet_request_drop",
+  "lez_faucet_current_phase",
   "lez_faucet_cancel",
 ]

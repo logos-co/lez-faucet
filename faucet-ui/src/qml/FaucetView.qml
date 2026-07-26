@@ -52,6 +52,9 @@ Rectangle {
     // reconcile, and no button may suggest otherwise.
     property bool cancellable: false
     property bool cancelRequested: false
+    // The raw phase from the job envelope. It is compared, never displayed:
+    // every sentence the user reads comes from FaucetFlow.phaseSentence.
+    property string creditPhase: ""
     property string statusText: ""
 
     // -- what the result panel shows ----------------------------------------
@@ -258,6 +261,7 @@ Rectangle {
         failure = null
         unknownOutcome = null
         cancelRequested = false
+        creditPhase = ""
         creditAttempt = FaucetFlow.beginCreditAttempt(addressInput, FaucetFlow.newRequestKey)
         sendCreditRequest()
     }
@@ -344,6 +348,7 @@ Rectangle {
             if (!FaucetFlow.isTerminalOutcome(outcome)) {
                 // A phase name is a state-machine label, never a sentence.
                 statusText = FaucetFlow.phaseSentence(envelope.phase)
+                creditPhase = String(envelope.phase || "")
                 cancelRequested = envelope.cancel_requested === true
                 cancellable = FaucetFlow.cancelAvailable(
                     envelope.status, envelope.phase, envelope.cancel_requested)
@@ -366,6 +371,7 @@ Rectangle {
         creditStage = ""
         creditPollInFlight = false
         cancelRequested = false
+        creditPhase = ""
 
         if (outcome === "succeeded") {
             var proven = FaucetFlow.receiptView(resultOf(envelope))
@@ -401,6 +407,7 @@ Rectangle {
         creditJobId = ""
         creditStage = ""
         cancellable = false
+        creditPhase = ""
         statusText = ""
         var presented = FaucetFlow.errorPresentation(error)
         if (presented.code === "outcome_unknown") {
@@ -418,6 +425,7 @@ Rectangle {
         creditJobId = ""
         creditStage = ""
         cancellable = false
+        creditPhase = ""
         statusText = ""
         creditAttempt = null
         var pinned = inspection && inspectionForInput === addressInput ? inspection.address : ""
@@ -757,6 +765,19 @@ Rectangle {
                     text: root.statusText
                     textFormat: Text.PlainText
                     color: Theme.palette.text
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                LogosText {
+                    // The one honestly slow stage. Its 300 s bound is stated in
+                    // plain language at the moment it applies, along with the
+                    // one thing quitting would cost: this app's in-session
+                    // refusal to pay the same account twice.
+                    visible: root.creditPhase === "reconciling"
+                    text: qsTr("This step can take up to five minutes. Keep the app open: if you quit before it finishes, the claim stays unconfirmed and this app cannot stop a second request from crediting the same account twice.")
+                    textFormat: Text.PlainText
+                    color: Theme.palette.textSecondary
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true

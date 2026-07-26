@@ -220,6 +220,28 @@ pub unsafe extern "C" fn lez_faucet_request_drop(
     })
 }
 
+/// Read the live phase of the drop identified by `operation_token`.
+///
+/// The polled companion to [`lez_faucet_request_drop`], and deliberately not a
+/// callback: this ABI carries no function pointers. Call it from a different
+/// thread while that call is blocked — it reads two atomics and returns, and
+/// never takes the drop permit or any lock the drop holds, so it can neither
+/// block nor be blocked by the drop it observes. The result is
+/// `{"phase":"solving"}` while that drop is running and `{"phase":null}` for an
+/// unknown or finished token, which is a normal answer, not an error.
+///
+/// # Safety
+/// `client` must be a live handle returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lez_faucet_current_phase(
+    client: *mut LezFaucetClient,
+    operation_token: u64,
+) -> *mut c_char {
+    with_client(client, |client| {
+        Ok(serde_json::json!({ "phase": client.current_phase(operation_token) }))
+    })
+}
+
 /// Ask the operation identified by `operation_token` to stop.
 ///
 /// Cooperative and scoped: a cancel that arrives after its operation has
@@ -291,6 +313,7 @@ mod tests {
             take(unsafe {
                 lez_faucet_request_drop(ptr::null_mut(), address.as_ptr(), key.as_ptr(), 1)
             }),
+            take(unsafe { lez_faucet_current_phase(ptr::null_mut(), 1) }),
         ] {
             assert_eq!(json["ok"], false);
             assert_eq!(json["error"]["code"], "not_configured");
@@ -323,6 +346,24 @@ mod tests {
             lez_faucet_request_drop(output.client, address.as_ptr(), bad_key.as_ptr(), 1)
         });
         assert_eq!(json["error"]["code"], "invalid_request_key");
+
+        unsafe { lez_faucet_client_destroy(output.client) };
+    }
+
+    #[test]
+    fn an_idle_or_unknown_token_reports_no_phase_not_an_error() {
+        let url = CString::new("https://testnet.lez.logos.co").unwrap();
+        let output = unsafe { lez_faucet_client_new(url.as_ptr()) };
+        assert!(!output.client.is_null());
+        take(output.result_json);
+
+        // No drop is running, so every token — including the 0 sentinel —
+        // answers with a null phase inside a successful envelope.
+        for token in [0, 1, u64::MAX] {
+            let json = take(unsafe { lez_faucet_current_phase(output.client, token) });
+            assert_eq!(json["ok"], true);
+            assert_eq!(json["result"]["phase"], serde_json::Value::Null);
+        }
 
         unsafe { lez_faucet_client_destroy(output.client) };
     }

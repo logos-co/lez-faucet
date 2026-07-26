@@ -279,6 +279,24 @@ test("cancelling is offered only while nothing has been sent", () => {
   assert.equal(flow.cancelAvailable("succeeded", "", false), false);
 });
 
+test("the live phase drives the cancel button and the reconciliation warning", () => {
+  // The poller feeds the envelope's phase into cancelAvailable, and the Cancel
+  // button is bound to nothing else — so once the phase reaches submitting or
+  // reconciling, the button that would imply "this can still be taken back"
+  // actually disappears.
+  assert.match(qml, /cancellable = FaucetFlow\.cancelAvailable\(\s*envelope\.status, envelope\.phase, envelope\.cancel_requested\)/);
+  assert.match(qml, /visible: root\.cancellable\s*\n\s*text: qsTr\("Cancel"\)/);
+
+  // The 300 s reconciliation bound is disclosed in plain language: in the
+  // phase sentence, and in the keep-the-app-open warning shown while it runs.
+  assert.match(flow.phaseSentence("reconciling"), /minute/);
+  assert.match(qml, /up to five minutes/);
+  assert.match(qml, /visible: root\.creditPhase === "reconciling"/);
+
+  // The stored raw phase is compared, never rendered.
+  assert.doesNotMatch(qml, /text:[^\n]*creditPhase/);
+});
+
 // ---------------------------------------------------------------------------
 // success means credited
 // ---------------------------------------------------------------------------

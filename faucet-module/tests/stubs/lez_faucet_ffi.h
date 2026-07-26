@@ -34,6 +34,7 @@ void lez_faucet_string_free(char* value);
 char* lez_faucet_get_info(struct LezFaucetClient* client);
 char* lez_faucet_inspect_recipient(struct LezFaucetClient* client, const char* address);
 char* lez_faucet_request_drop(struct LezFaucetClient* client, const char* address, const char* request_key, uint64_t operation_token);
+char* lez_faucet_current_phase(struct LezFaucetClient* client, uint64_t operation_token);
 void lez_faucet_cancel(struct LezFaucetClient* client, uint64_t operation_token);
 
 #ifdef __cplusplus

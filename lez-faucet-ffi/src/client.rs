@@ -12,7 +12,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -160,6 +160,99 @@ impl Cancellation {
     #[must_use]
     pub fn is_cancelled(&self, token: u64) -> bool {
         token != 0 && self.cancelled_token.load(Ordering::SeqCst) == token
+    }
+}
+
+// ---- live phase ------------------------------------------------------------
+
+/// Wire codes for [`DropPhase`], for the atomic in [`PhaseChannel`].
+///
+/// 0 is reserved for "no phase". The match is exhaustive, so adding a phase
+/// without a code is a compile error rather than a phase the poller cannot see.
+const fn phase_code(phase: DropPhase) -> u8 {
+    match phase {
+        DropPhase::ValidatingInput => 1,
+        DropPhase::VerifyingPrograms => 2,
+        DropPhase::InspectingRecipient => 3,
+        DropPhase::FetchingChallenge => 4,
+        DropPhase::Solving => 5,
+        DropPhase::RefreshingChallenge => 6,
+        DropPhase::Submitting => 7,
+        DropPhase::Reconciling => 8,
+    }
+}
+
+const fn phase_from_code(code: u8) -> Option<DropPhase> {
+    Some(match code {
+        1 => DropPhase::ValidatingInput,
+        2 => DropPhase::VerifyingPrograms,
+        3 => DropPhase::InspectingRecipient,
+        4 => DropPhase::FetchingChallenge,
+        5 => DropPhase::Solving,
+        6 => DropPhase::RefreshingChallenge,
+        7 => DropPhase::Submitting,
+        8 => DropPhase::Reconciling,
+        _ => return None,
+    })
+}
+
+/// Lock-free live-phase channel for the single in-flight drop.
+///
+/// `lez_faucet_current_phase` polls this from another thread while
+/// `lez_faucet_request_drop` is blocked, so a read must never take the drop
+/// permit or any lock the drop holds. Two atomics suffice because the permit
+/// already guarantees at most one drop is live: `token` names the operation
+/// being reported and `phase` is where it has got to. The token is checked on
+/// every read, so a reader racing an update can see "no phase" or a phase one
+/// step stale, but never a phase attributed to a different operation — by the
+/// time a new drop can publish, its predecessor has already cleared.
+#[derive(Debug, Default)]
+pub struct PhaseChannel {
+    token: AtomicU64,
+    phase: AtomicU8,
+}
+
+impl PhaseChannel {
+    /// Publish `phase` for the operation named by `token`.
+    ///
+    /// Token 0 is the "no operation" sentinel and is never published.
+    fn publish(&self, token: u64, phase: DropPhase) {
+        if token == 0 {
+            return;
+        }
+        // Phase first, then token: a reader that has just seen this token can
+        // only read a phase this operation wrote.
+        self.phase.store(phase_code(phase), Ordering::SeqCst);
+        self.token.store(token, Ordering::SeqCst);
+    }
+
+    /// Clear the channel when the operation named by `token` ends.
+    fn clear(&self, token: u64) {
+        // Compare first, so a delayed clear cannot erase a later operation.
+        let _ = self
+            .token
+            .compare_exchange(token, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// The live phase of `token`, or `None` for an unknown or finished one.
+    #[must_use]
+    pub fn current(&self, token: u64) -> Option<DropPhase> {
+        if token == 0 || self.token.load(Ordering::SeqCst) != token {
+            return None;
+        }
+        phase_from_code(self.phase.load(Ordering::SeqCst))
+    }
+}
+
+/// Clears the phase channel however its drop ends, success or error.
+struct PhaseGuard<'a> {
+    channel: &'a PhaseChannel,
+    token: u64,
+}
+
+impl Drop for PhaseGuard<'_> {
+    fn drop(&mut self) {
+        self.channel.clear(self.token);
     }
 }
 
@@ -319,6 +412,13 @@ pub struct FaucetClient {
     /// points, and a `MutexGuard` held across an await would make the drop
     /// future `!Send` and risk blocking a runtime worker.
     drop_active: Arc<AtomicBool>,
+    /// Where the in-flight drop currently is, for a poller on another thread.
+    ///
+    /// Deliberately a polled channel and not a callback: the previous release
+    /// had a progress callback that re-entered C++ while the module held its
+    /// operation mutex, and this ABI's freedom from function pointers is an
+    /// asserted property.
+    phase_channel: PhaseChannel,
     idempotency: Mutex<HashMap<String, IdempotencyRecord>>,
     /// Recipients with an in-flight claim whose outcome was never proven.
     ///
@@ -388,6 +488,7 @@ impl FaucetClient {
             policy: FaucetPolicy::default(),
             cancellation: Arc::new(Cancellation::default()),
             drop_active: Arc::new(AtomicBool::new(false)),
+            phase_channel: PhaseChannel::default(),
             idempotency: Mutex::new(HashMap::new()),
             unreconciled: Mutex::new(std::collections::HashSet::new()),
         })
@@ -402,6 +503,15 @@ impl FaucetClient {
     #[must_use]
     pub fn cancellation(&self) -> Arc<Cancellation> {
         Arc::clone(&self.cancellation)
+    }
+
+    /// The live phase of the drop named by `token`, if it is still running.
+    ///
+    /// Reads two atomics and returns. No permit, no lock, no `await`: safe to
+    /// call from any thread while a drop is blocked inside [`Self::request_drop`].
+    #[must_use]
+    pub fn current_phase(&self, token: u64) -> Option<DropPhase> {
+        self.phase_channel.current(token)
     }
 
     // -- reads ---------------------------------------------------------------
@@ -644,6 +754,17 @@ impl FaucetClient {
         request_key: &str,
         token: u64,
     ) -> ApiResult<DropReceipt> {
+        // Each step publishes its phase before starting, so a poller on
+        // another thread sees where the drop is rather than where it was. The
+        // guard clears the channel on every exit path, so a finished token
+        // reads as "no phase" rather than as wherever it happened to stop.
+        let _phase = PhaseGuard {
+            channel: &self.phase_channel,
+            token,
+        };
+        let at = |phase: DropPhase| self.phase_channel.publish(token, phase);
+        at(DropPhase::ValidatingInput);
+
         // Once anything has been submitted, no path may report a cancellation
         // or claim that nothing was sent: the chain action cannot be recalled,
         // only reconciled, and saying otherwise would hide a live transaction
@@ -661,11 +782,13 @@ impl FaucetClient {
         };
 
         stop(submitted)?;
+        at(DropPhase::VerifyingPrograms);
         self.verify_fingerprint()
             .await
             .map_err(|error| error.at(DropPhase::VerifyingPrograms))?;
 
         stop(submitted)?;
+        at(DropPhase::InspectingRecipient);
         let recipient_account = self
             .account(account_id, "recipient account")
             .await
@@ -682,6 +805,7 @@ impl FaucetClient {
 
         for attempt in 0..=self.policy.max_stale_challenge_retries {
             stop(submitted)?;
+            at(DropPhase::FetchingChallenge);
             let (pinata, challenge) = self
                 .pinata_state()
                 .await
@@ -692,6 +816,7 @@ impl FaucetClient {
             require_pool_can_pay(pinata.balance)?;
 
             stop(submitted)?;
+            at(DropPhase::Solving);
             let cancellation = Arc::clone(&self.cancellation);
             let solution = solver::solve_with_deadline(
                 challenge,
@@ -707,6 +832,7 @@ impl FaucetClient {
             // minute of mining may have passed since they were last checked,
             // and each one is a reason not to send this transaction at all.
             stop(submitted)?;
+            at(DropPhase::RefreshingChallenge);
             self.verify_fingerprint()
                 .await
                 .map_err(|error| error.at(DropPhase::RefreshingChallenge))?;
@@ -748,6 +874,7 @@ impl FaucetClient {
 
             // Latched before the network call, not after: a submission whose
             // response is lost has still been submitted.
+            at(DropPhase::Submitting);
             submitted = true;
             let transaction = build_claim(account_id, solution)?;
             let tx_hash = HashType(transaction.hash());
@@ -767,6 +894,7 @@ impl FaucetClient {
                 }
             }
 
+            at(DropPhase::Reconciling);
             match self
                 .reconcile(
                     account_id,
@@ -1291,6 +1419,70 @@ mod tests {
             require_pool_can_pay(0).unwrap_err().code,
             ErrorCode::PoolDepleted
         );
+    }
+
+    #[test]
+    fn the_phase_channel_reports_only_the_operation_that_is_live() {
+        let channel = PhaseChannel::default();
+        assert_eq!(channel.current(7), None, "nothing published yet");
+
+        channel.publish(7, DropPhase::Solving);
+        assert_eq!(channel.current(7), Some(DropPhase::Solving));
+        // A different token — earlier, later, or the sentinel — reads nothing.
+        assert_eq!(channel.current(6), None);
+        assert_eq!(channel.current(8), None);
+        assert_eq!(channel.current(0), None);
+
+        channel.publish(7, DropPhase::Reconciling);
+        assert_eq!(channel.current(7), Some(DropPhase::Reconciling));
+
+        channel.clear(7);
+        assert_eq!(
+            channel.current(7),
+            None,
+            "a finished token reads as no phase"
+        );
+    }
+
+    #[test]
+    fn the_sentinel_token_is_never_published_and_a_stale_clear_is_ignored() {
+        let channel = PhaseChannel::default();
+        // Token 0 is the Rust "no operation" sentinel; publishing it would make
+        // an idle poller see a phantom drop.
+        channel.publish(0, DropPhase::Solving);
+        assert_eq!(channel.current(0), None);
+
+        // A clear aimed at an earlier operation must not erase a later one.
+        channel.publish(7, DropPhase::Solving);
+        channel.clear(3);
+        assert_eq!(channel.current(7), Some(DropPhase::Solving));
+    }
+
+    #[test]
+    fn every_phase_survives_its_wire_code() {
+        for phase in [
+            DropPhase::ValidatingInput,
+            DropPhase::VerifyingPrograms,
+            DropPhase::InspectingRecipient,
+            DropPhase::FetchingChallenge,
+            DropPhase::Solving,
+            DropPhase::RefreshingChallenge,
+            DropPhase::Submitting,
+            DropPhase::Reconciling,
+        ] {
+            assert_eq!(phase_from_code(phase_code(phase)), Some(phase));
+            assert_ne!(phase_code(phase), 0, "0 is reserved for no phase");
+        }
+        assert_eq!(phase_from_code(0), None);
+        assert_eq!(phase_from_code(9), None);
+    }
+
+    #[test]
+    fn a_fresh_client_reports_no_live_phase_for_any_token() {
+        let client = FaucetClient::new("https://testnet.lez.logos.co").unwrap();
+        for token in [0, 1, u64::MAX] {
+            assert_eq!(client.current_phase(token), None);
+        }
     }
 
     #[test]

@@ -30,10 +30,19 @@ void setDropHonoursCancel(bool value);
 /// post-submission reconciliation that cannot be recalled.
 void setDropWaitsForRelease(bool value);
 void releaseDrop();
+/// What lez_faucet_current_phase returns. Defaults to a null phase, the "no
+/// drop is live" answer of the real client.
+void setPhaseResponse(const std::string& json);
+/// The phase poll blocks until releasePhase(). Models nothing the real client
+/// does — its poll is two atomic reads — but proves the module never lets a
+/// slow poll hold job->mutex or block a concurrent caller.
+void setPhaseBlocks(bool value);
+void releasePhase();
 
 // -- observation -------------------------------------------------------------
 bool waitForDropStart(int timeoutMs);
 bool waitForCancelCall(int timeoutMs);
+bool waitForPhaseStart(int timeoutMs);
 int clientNewCalls();
 int destroyCalls();
 int stringAllocations();
@@ -42,8 +51,10 @@ int infoCalls();
 int inspectCalls();
 int dropCalls();
 int cancelCalls();
+int phaseCalls();
 uint64_t lastDropToken();
 uint64_t lastCancelToken();
+uint64_t lastPhaseToken();
 std::string lastAddress();
 std::string lastRequestKey();
 std::string lastSequencerUrl();
