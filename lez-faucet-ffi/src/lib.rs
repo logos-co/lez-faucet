@@ -142,9 +142,7 @@ pub unsafe extern "C" fn lez_faucet_client_new(
         },
         Err(_) => LezFaucetClientOutput {
             client: ptr::null_mut(),
-            result_json: error_envelope(&ApiError::internal(
-                "The faucet could not start safely.",
-            )),
+            result_json: error_envelope(&ApiError::internal("The faucet could not start safely.")),
         },
     }
 }
@@ -253,7 +251,10 @@ mod tests {
     /// Take ownership of an FFI string and parse it, freeing the original.
     fn take(pointer: *mut c_char) -> serde_json::Value {
         assert!(!pointer.is_null());
-        let json = unsafe { CStr::from_ptr(pointer) }.to_str().unwrap().to_owned();
+        let json = unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .unwrap()
+            .to_owned();
         unsafe { lez_faucet_string_free(pointer) };
         serde_json::from_str(&json).unwrap()
     }

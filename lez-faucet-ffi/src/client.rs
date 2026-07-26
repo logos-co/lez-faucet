@@ -12,7 +12,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -294,8 +294,12 @@ pub struct FaucetClient {
     sequencer_url: String,
     policy: FaucetPolicy,
     cancellation: Arc<Cancellation>,
-    /// Held for the whole of a drop so only one mutating operation is ever live.
-    drop_permit: Mutex<()>,
+    /// Set for the whole of a drop so only one mutating operation is ever live.
+    ///
+    /// An atomic rather than a mutex: the permit is held across `await`
+    /// points, and a `MutexGuard` held across an await would make the drop
+    /// future `!Send` and risk blocking a runtime worker.
+    drop_active: Arc<AtomicBool>,
     idempotency: Mutex<HashMap<String, IdempotencyRecord>>,
     /// Recipients with an in-flight claim whose outcome was never proven.
     ///
@@ -364,7 +368,7 @@ impl FaucetClient {
             sequencer_url: parsed.to_string(),
             policy: FaucetPolicy::default(),
             cancellation: Arc::new(Cancellation::default()),
-            drop_permit: Mutex::new(()),
+            drop_active: Arc::new(AtomicBool::new(false)),
             idempotency: Mutex::new(HashMap::new()),
             unreconciled: Mutex::new(std::collections::HashSet::new()),
         })
@@ -401,7 +405,10 @@ impl FaucetClient {
             .map_err(|error| ApiError::from_rpc("Reading the deployed program IDs", &error))?;
 
         for (name, local) in [
-            ("authenticated_transfer", programs::authenticated_transfer().id()),
+            (
+                "authenticated_transfer",
+                programs::authenticated_transfer().id(),
+            ),
             ("pinata", programs::pinata().id()),
         ] {
             let deployed = remote.get(name).ok_or_else(|| {
@@ -429,7 +436,10 @@ impl FaucetClient {
     /// Read the Piñata account and validate that it is what we expect.
     async fn pinata_state(&self) -> ApiResult<(Account, Challenge)> {
         let account = self
-            .account(system_accounts::pinata_account_id(), "Piñata faucet account")
+            .account(
+                system_accounts::pinata_account_id(),
+                "Piñata faucet account",
+            )
             .await?;
         if account.program_owner != programs::pinata().id() {
             return Err(ApiError::new(
@@ -494,8 +504,8 @@ impl FaucetClient {
         token: u64,
     ) -> ApiResult<DropReceipt> {
         validate_request_key(request_key)?;
-        let (account_id, recipient) = parse_public_address(address)
-            .map_err(|error| error.at(DropPhase::ValidatingInput))?;
+        let (account_id, recipient) =
+            parse_public_address(address).map_err(|error| error.at(DropPhase::ValidatingInput))?;
 
         // Replay check happens before the permit so a repeat of a finished
         // request answers immediately instead of queueing behind a live one.
@@ -504,7 +514,7 @@ impl FaucetClient {
         }
         self.ensure_reconciled(&recipient)?;
 
-        let _permit = self.drop_permit.try_lock().map_err(|_| {
+        let _permit = DropPermit::acquire(&self.drop_active).ok_or_else(|| {
             ApiError::new(
                 ErrorCode::DropInProgress,
                 "A faucet request is already running. Wait for it to finish.",
@@ -833,6 +843,23 @@ impl FaucetClient {
     }
 }
 
+/// RAII holder for the single-mutating-operation permit.
+struct DropPermit(Arc<AtomicBool>);
+
+impl DropPermit {
+    fn acquire(flag: &Arc<AtomicBool>) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self(Arc::clone(flag)))
+    }
+}
+
+impl Drop for DropPermit {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 enum Reconciled {
     Credited,
     CreditedNothing,
@@ -1003,7 +1030,10 @@ mod tests {
             ClaimDecision::Credited
         );
         // Included but the balance could not be read: nothing is proven yet.
-        assert_eq!(decide(observe(Some(true), None, None)), ClaimDecision::Continue);
+        assert_eq!(
+            decide(observe(Some(true), None, None)),
+            ClaimDecision::Continue
+        );
     }
 
     #[test]
@@ -1135,17 +1165,21 @@ mod tests {
             .as_deref()
             .is_some_and(|command| command.contains("auth-transfer init")));
 
-        let mut eligible_account = Account::default();
-        eligible_account.program_owner = programs::authenticated_transfer().id();
-        eligible_account.balance = 6_000;
+        let eligible_account = Account {
+            program_owner: programs::authenticated_transfer().id(),
+            balance: 6_000,
+            ..Account::default()
+        };
         let eligible = inspect(address.clone(), &eligible_account);
         assert_eq!(eligible.eligibility, Eligibility::Eligible);
         assert_eq!(eligible.balance.as_deref(), Some("6000"));
         assert!(eligible.initialization_command.is_none());
 
-        let mut foreign = Account::default();
-        foreign.program_owner = programs::pinata().id();
-        foreign.balance = 1;
+        let foreign = Account {
+            program_owner: programs::pinata().id(),
+            balance: 1,
+            ..Account::default()
+        };
         let wrong = inspect(address, &foreign);
         assert_eq!(wrong.eligibility, Eligibility::WrongOwner);
         assert!(wrong.program_owner.is_some());
@@ -1154,8 +1188,10 @@ mod tests {
     #[test]
     fn only_an_eligible_recipient_may_start_a_drop() {
         let address = PublicAddress::new(system_accounts::pinata_account_id());
-        let mut eligible_account = Account::default();
-        eligible_account.program_owner = programs::authenticated_transfer().id();
+        let eligible_account = Account {
+            program_owner: programs::authenticated_transfer().id(),
+            ..Account::default()
+        };
 
         assert!(require_eligible(&inspect(address.clone(), &eligible_account)).is_ok());
         assert_eq!(
@@ -1165,11 +1201,15 @@ mod tests {
             ErrorCode::RecipientUninitialized
         );
 
-        let mut foreign = Account::default();
-        foreign.program_owner = programs::pinata().id();
-        foreign.balance = 1;
+        let foreign = Account {
+            program_owner: programs::pinata().id(),
+            balance: 1,
+            ..Account::default()
+        };
         assert_eq!(
-            require_eligible(&inspect(address, &foreign)).unwrap_err().code,
+            require_eligible(&inspect(address, &foreign))
+                .unwrap_err()
+                .code,
             ErrorCode::RecipientWrongOwner
         );
     }
@@ -1181,7 +1221,10 @@ mod tests {
             require_pool_can_pay(PRIZE - 1).unwrap_err().code,
             ErrorCode::PoolDepleted
         );
-        assert_eq!(require_pool_can_pay(0).unwrap_err().code, ErrorCode::PoolDepleted);
+        assert_eq!(
+            require_pool_can_pay(0).unwrap_err().code,
+            ErrorCode::PoolDepleted
+        );
     }
 
     #[test]
@@ -1200,7 +1243,10 @@ mod tests {
         let winner = system_accounts::pinata_account_id();
         let transaction = build_claim(winner, 25_385_721).unwrap();
         assert!(
-            transaction.witness_set().signatures_and_public_keys().is_empty(),
+            transaction
+                .witness_set()
+                .signatures_and_public_keys()
+                .is_empty(),
             "a faucet claim must never be signed: there is no key to sign it with"
         );
         assert!(transaction.message().nonces.is_empty());
@@ -1213,23 +1259,34 @@ mod tests {
         let winner = system_accounts::pinata_account_id();
         let first = build_claim(winner, 42).unwrap().hash();
         let second = build_claim(winner, 42).unwrap().hash();
-        assert_eq!(first, second, "the hash must be a pure function of the transaction");
+        assert_eq!(
+            first, second,
+            "the hash must be a pure function of the transaction"
+        );
         assert_ne!(first, build_claim(winner, 43).unwrap().hash());
     }
 
     #[test]
     fn balances_are_exact_decimal_strings_beyond_the_javascript_safe_range() {
-        let mut account = Account::default();
-        account.program_owner = programs::authenticated_transfer().id();
-        account.balance = u128::MAX;
-        let inspection = inspect(PublicAddress::new(system_accounts::pinata_account_id()), &account);
+        let mut account = Account {
+            program_owner: programs::authenticated_transfer().id(),
+            balance: u128::MAX,
+            ..Account::default()
+        };
+        let inspection = inspect(
+            PublicAddress::new(system_accounts::pinata_account_id()),
+            &account,
+        );
         assert_eq!(
             inspection.balance.as_deref(),
             Some("340282366920938463463374607431768211455")
         );
 
         account.balance = (1_u128 << 53) + 1;
-        let inspection = inspect(PublicAddress::new(system_accounts::pinata_account_id()), &account);
+        let inspection = inspect(
+            PublicAddress::new(system_accounts::pinata_account_id()),
+            &account,
+        );
         assert_eq!(inspection.balance.as_deref(), Some("9007199254740993"));
     }
 
@@ -1241,7 +1298,10 @@ mod tests {
         };
         let error = unknown_outcome("lost", 6_000, HashType([7; 32]), &challenge);
         assert_eq!(error.code, ErrorCode::OutcomeUnknown);
-        assert!(!error.retryable, "an unknown outcome must never invite a retry");
+        assert!(
+            !error.retryable,
+            "an unknown outcome must never invite a retry"
+        );
         let details = error.details.unwrap();
         assert_eq!(details["outcome"], "unknown");
         assert_eq!(details["balance_before"], "6000");

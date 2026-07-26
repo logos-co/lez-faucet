@@ -186,8 +186,14 @@ mod tests {
         let rendered = |code: ErrorCode| serde_json::to_value(code).unwrap();
         assert_eq!(rendered(ErrorCode::OutcomeUnknown), "outcome_unknown");
         assert_eq!(rendered(ErrorCode::PoolDepleted), "pool_depleted");
-        assert_eq!(rendered(ErrorCode::IncludedWithoutCredit), "included_without_credit");
-        assert_eq!(rendered(ErrorCode::InvalidPublicAccountId), "invalid_public_account_id");
+        assert_eq!(
+            rendered(ErrorCode::IncludedWithoutCredit),
+            "included_without_credit"
+        );
+        assert_eq!(
+            rendered(ErrorCode::InvalidPublicAccountId),
+            "invalid_public_account_id"
+        );
     }
 
     #[test]
@@ -221,7 +227,8 @@ mod tests {
 
     #[test]
     fn omitted_fields_stay_absent_from_the_wire() {
-        let json = serde_json::to_value(ApiError::new(ErrorCode::UnknownJob, "no such job")).unwrap();
+        let json =
+            serde_json::to_value(ApiError::new(ErrorCode::UnknownJob, "no such job")).unwrap();
         assert!(json.get("phase").is_none());
         assert!(json.get("details").is_none());
         assert_eq!(json["code"], "unknown_job");

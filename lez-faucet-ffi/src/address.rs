@@ -172,8 +172,14 @@ mod tests {
 
     #[test]
     fn rejects_nested_and_malformed_separators() {
-        assert_eq!(code(&format!("Public/Private/{VALID}")), ErrorCode::InvalidPublicAccountId);
-        assert_eq!(code(&format!("Public/{VALID}/x")), ErrorCode::InvalidPublicAccountId);
+        assert_eq!(
+            code(&format!("Public/Private/{VALID}")),
+            ErrorCode::InvalidPublicAccountId
+        );
+        assert_eq!(
+            code(&format!("Public/{VALID}/x")),
+            ErrorCode::InvalidPublicAccountId
+        );
         assert_eq!(code("Public/"), ErrorCode::InvalidPublicAccountId);
         assert_eq!(code("/"), ErrorCode::InvalidPublicAccountId);
     }
@@ -182,9 +188,18 @@ mod tests {
     fn rejects_empty_oversized_and_control_characters() {
         assert_eq!(code(""), ErrorCode::InvalidPublicAccountId);
         assert_eq!(code("   "), ErrorCode::InvalidPublicAccountId);
-        assert_eq!(code(&"a".repeat(MAX_INPUT_LEN + 1)), ErrorCode::InvalidPublicAccountId);
-        assert_eq!(code(&format!("Public/{VALID}\u{0}")), ErrorCode::InvalidPublicAccountId);
-        assert_eq!(code(&format!("Pub\u{7}lic/{VALID}")), ErrorCode::InvalidPublicAccountId);
+        assert_eq!(
+            code(&"a".repeat(MAX_INPUT_LEN + 1)),
+            ErrorCode::InvalidPublicAccountId
+        );
+        assert_eq!(
+            code(&format!("Public/{VALID}\u{0}")),
+            ErrorCode::InvalidPublicAccountId
+        );
+        assert_eq!(
+            code(&format!("Pub\u{7}lic/{VALID}")),
+            ErrorCode::InvalidPublicAccountId
+        );
     }
 
     #[test]
@@ -227,7 +242,10 @@ mod tests {
         for length in [133, 134, 512, 4096] {
             let bomb = "1".repeat(length);
             assert_eq!(code(&bomb), ErrorCode::InvalidPublicAccountId);
-            assert_eq!(code(&format!("Public/{bomb}")), ErrorCode::InvalidPublicAccountId);
+            assert_eq!(
+                code(&format!("Public/{bomb}")),
+                ErrorCode::InvalidPublicAccountId
+            );
         }
     }
 
@@ -250,7 +268,10 @@ mod tests {
     #[test]
     fn the_length_bound_applies_after_the_prefix_is_stripped() {
         let long_but_legal_prefix = format!("Public/{}", "1".repeat(MAX_INPUT_LEN + 1));
-        assert_eq!(code(&long_but_legal_prefix), ErrorCode::InvalidPublicAccountId);
+        assert_eq!(
+            code(&long_but_legal_prefix),
+            ErrorCode::InvalidPublicAccountId
+        );
     }
 
     #[test]

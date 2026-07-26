@@ -25,7 +25,9 @@ fn client() -> FaucetClient {
 }
 
 fn decimal(value: &str) -> u128 {
-    value.parse().expect("balances are canonical decimal strings")
+    value
+        .parse()
+        .expect("balances are canonical decimal strings")
 }
 
 #[tokio::test]
@@ -56,9 +58,16 @@ async fn faucet_info_matches_the_pinned_protocol() {
 
     // The pool only ever moves in multiples of the prize.
     let pool = decimal(&info.pool_balance);
-    assert_eq!(pool % PRIZE, 0, "pool balance is not a multiple of the prize");
+    assert_eq!(
+        pool % PRIZE,
+        0,
+        "pool balance is not a multiple of the prize"
+    );
     assert_eq!(info.claims_remaining, (pool / PRIZE).to_string());
-    assert_eq!(info.can_claim, pool >= PRIZE && info.blocked_reason.is_none());
+    assert_eq!(
+        info.can_claim,
+        pool >= PRIZE && info.blocked_reason.is_none()
+    );
 
     println!(
         "pool={pool} claims_remaining={} difficulty={}",
@@ -150,7 +159,10 @@ async fn one_authorized_claim_credits_exactly_the_prize() {
     // The receipt must prove the credit, not merely the submission.
     assert_eq!(receipt.amount, "150");
     assert_eq!(receipt.request_key, request_key);
-    assert_eq!(receipt.recipient.account_id, inspection.recipient.account_id);
+    assert_eq!(
+        receipt.recipient.account_id,
+        inspection.recipient.account_id
+    );
     assert_eq!(decimal(&receipt.balance_before), balance_before);
     assert_eq!(decimal(&receipt.balance_after), balance_before + PRIZE);
     assert_eq!(

@@ -81,7 +81,10 @@ impl Challenge {
         hasher.update([self.difficulty]);
         hasher.update(self.seed);
         let digest: [u8; 32] = hasher.finalize().into();
-        digest[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     #[must_use]
@@ -151,7 +154,10 @@ pub fn solve_bounded(
     let difficulty = usize::from(challenge.difficulty);
     for attempt in 0..max_attempts {
         if attempt % CANCEL_CHECK_INTERVAL == 0 && stop() {
-            return Err(ApiError::new(ErrorCode::Cancelled, "The request was cancelled."));
+            return Err(ApiError::new(
+                ErrorCode::Cancelled,
+                "The request was cancelled.",
+            ));
         }
         let solution = start.wrapping_add(u128::from(attempt));
         if valid_solution(difficulty, &challenge.seed, solution) {
@@ -241,9 +247,18 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_data() {
-        assert_eq!(Challenge::parse(&[]).unwrap_err().code, ErrorCode::InvalidChallenge);
-        assert_eq!(Challenge::parse(&[0; 32]).unwrap_err().code, ErrorCode::InvalidChallenge);
-        assert_eq!(Challenge::parse(&[0; 34]).unwrap_err().code, ErrorCode::InvalidChallenge);
+        assert_eq!(
+            Challenge::parse(&[]).unwrap_err().code,
+            ErrorCode::InvalidChallenge
+        );
+        assert_eq!(
+            Challenge::parse(&[0; 32]).unwrap_err().code,
+            ErrorCode::InvalidChallenge
+        );
+        assert_eq!(
+            Challenge::parse(&[0; 34]).unwrap_err().code,
+            ErrorCode::InvalidChallenge
+        );
     }
 
     #[test]
@@ -257,7 +272,10 @@ mod tests {
         );
 
         assert_eq!(
-            challenge(MAX_SUPPORTED_DIFFICULTY + 1, 0).ensure_supported().unwrap_err().code,
+            challenge(MAX_SUPPORTED_DIFFICULTY + 1, 0)
+                .ensure_supported()
+                .unwrap_err()
+                .code,
             ErrorCode::UnsupportedDifficulty,
             "a protocol-legal but too-hard challenge is a client limit, not corruption"
         );
@@ -284,7 +302,10 @@ mod tests {
         for (index, byte) in seed.iter_mut().enumerate() {
             *byte = u8::from_str_radix(&seed_hex[index * 2..index * 2 + 2], 16).unwrap();
         }
-        let live = Challenge { difficulty: 3, seed };
+        let live = Challenge {
+            difficulty: 3,
+            seed,
+        };
         assert!(live.is_valid_solution(25_385_721));
         assert!(!live.is_valid_solution(25_385_720));
     }
@@ -326,8 +347,7 @@ mod tests {
 
     #[test]
     fn random_start_varies_between_calls() {
-        let samples: std::collections::HashSet<u128> =
-            (0..64).map(|_| random_start()).collect();
+        let samples: std::collections::HashSet<u128> = (0..64).map(|_| random_start()).collect();
         assert!(
             samples.len() > 32,
             "the nonce start must vary; got {} distinct values from 64 draws",
@@ -381,7 +401,10 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
-        assert!(!worker_active.load(Ordering::SeqCst), "no orphaned solver may remain");
+        assert!(
+            !worker_active.load(Ordering::SeqCst),
+            "no orphaned solver may remain"
+        );
     }
 
     #[tokio::test]
@@ -397,7 +420,10 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::SolveTimeout);
-        assert!(!worker_active.load(Ordering::SeqCst), "no orphaned solver may remain");
+        assert!(
+            !worker_active.load(Ordering::SeqCst),
+            "no orphaned solver may remain"
+        );
     }
 
     #[tokio::test]
