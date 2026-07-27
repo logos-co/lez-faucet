@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "lez-faucet",
   "displayName": "LEZ Testnet Faucet",
-  "description": "Create and fund a disposable LEZ testnet account, or fund an existing initialized public account without importing its key.",
+  "description": "Request one fixed 150 LEZ testnet drop for a public LEZ account you already own. The faucet holds no account, asks for no secret, and stores nothing.",
   "homepage": "https://github.com/logos-co/lez-faucet",
   "indexUrl": "https://github.com/logos-co/lez-faucet/releases/download/index/index.json",
   "trustedSigners": []
