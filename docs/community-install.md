@@ -5,9 +5,17 @@ not currently part of the built-in Logos module catalog.
 
 ## Requirements
 
-- Logos Basecamp 0.2.1
+- **LEZ Faucet 0.3.0** is the version documented here, for both packages
+  (`lez_faucet` and `lez_faucet_ui`).
+- Requires **Logos Basecamp 0.2.1**. That 0.2.1 is the host application's
+  version, not the faucet's. The two numbers are unrelated and are not meant to
+  match.
 - Apple Silicon macOS (`darwin-arm64`)
 - Public-testnet use only
+
+Version numbers in these docs always name their subject. Where you see LEZ
+`v0.2.0`, that is the pinned upstream protocol revision this client is built
+against, and it is a third independent number.
 
 Linux and Intel macOS packages are not published yet because the required
 circuit and rapidsnark fixed-output artifacts have only been validated for
@@ -22,8 +30,8 @@ https://raw.githubusercontent.com/logos-co/lez-faucet/main/logos-repo.json
 ```
 
 The repository descriptor points Basecamp at the rolling catalog index hosted
-in this repository's `index` GitHub release. The index retains both v0.2.0 and
-v0.1.0 packages so users can roll back when necessary.
+in this repository's `index` GitHub release. The index retains the v0.2.0 and
+v0.1.0 packages alongside 0.3.0 so users can roll back when necessary.
 
 ## Install the app
 
@@ -31,11 +39,16 @@ For a new installation, install **`lez_faucet_ui`** from the package browser. It
 declares **`lez_faucet`** as a dependency, so Basecamp should install the newest
 core module automatically from the same catalog.
 
-For an existing v0.1.0 installation, upgrade or install **`lez_faucet` 0.2.0
-first**, then upgrade **`lez_faucet_ui` to 0.2.0**. The UI dependency is
-currently unversioned, so upgrading the UI alone may treat an installed 0.1.0
+For an existing 0.1.0 or 0.2.0 installation, upgrade or install **`lez_faucet`
+0.3.0 first**, then upgrade **`lez_faucet_ui` to 0.3.0**. The UI dependency is
+currently unversioned, so upgrading the UI alone may treat an installed older
 core as sufficient and leave it in place. If automatic dependency resolution
 is unavailable, use this same core-then-UI order for a new installation.
+
+Get that order wrong and the app does not merely look old: 0.3.0 removed the
+wallet flow and changed the core module's interface, so a 0.3.0 UI calls slots a
+0.2.x core does not have. Expect errors on the first action rather than a
+working, older screen.
 
 Installing only `lez_faucet` does not add a visible panel; the UI package is the
 app entry point. Restart Basecamp if a newly installed view does not appear.
@@ -68,7 +81,9 @@ Run this in the owning wallet's context. When using a non-default wallet home,
 set that wallet's `LEE_WALLET_HOME_DIR` environment variable before the
 command; a different wallet home cannot authorize initialization.
 
-Then fund it in Basecamp:
+Then fund it in Basecamp. This is the 0.3.0 screen: one address field and one
+button. If you see a password or recovery-phrase step instead, you are running
+0.2.0 and the core-then-UI upgrade above did not complete.
 
 1. Open the LEZ Faucet app. There is no onboarding: no account to create, no
    password, no recovery phrase.
@@ -93,8 +108,13 @@ wallet.
 Only public authenticated-transfer accounts are supported. A
 `Private/<account-id>` is not enough to fund a private account: private
 recipient handling additionally needs privacy public keys, synchronized private
-state, and proof/decryption support. LEZ Faucet v0.2.0 intentionally does not
-collect or import that material.
+state, and proof/decryption support. LEZ Faucet 0.3.0 collects no key material
+of any kind and has no surface that could accept it.
+
+Attribute that to 0.3.0 and no earlier. The shipped 0.2.0 screen did ask for a
+"Wallet password", which the pinned wallet API accepted and then ignored; see
+`docs/screenshots/README.md`. 0.3.0 removed that field rather than relabelling
+it, which is exactly why this release is a breaking one.
 
 The public testnet can take tens of seconds to include a transaction. Do not
 close Basecamp while an initialization or claim is pending. Normal claim
@@ -141,8 +161,8 @@ LEE_WALLET_HOME_DIR=/path/to/wallet \
 The CLI wallet home is used only as the network-client context and does not need
 to own the account being checked. It must already contain `wallet_config.json`
 and `storage.json`, and its configuration must point at the intended sequencer.
-Use `LEE_WALLET_HOME_DIR` with LEZ v0.2.0, not the older
-`NSSA_WALLET_HOME_DIR` name.
+Use `LEE_WALLET_HOME_DIR` with the pinned upstream LEZ v0.2.0 wallet CLI, not
+the older `NSSA_WALLET_HOME_DIR` name.
 
 ## What this app does and does not do
 
@@ -169,14 +189,14 @@ whether that claim went through. Check the balance independently.
 ## Troubleshooting
 
 - **Network version mismatch:** the sequencer fingerprint differs from the
-  compiled v0.2.0 program IDs. Stop; the client must be upgraded to the exact
-  testnet revision before transacting.
+  program IDs compiled from the pinned upstream LEZ v0.2.0 revision. Stop; the
+  client must be upgraded to the exact testnet revision before transacting.
 - **Account is uninitialized:** use **Copy command**, run it from the wallet
   that owns the account, wait for the initialization transaction to be visible
   from the sequencer, then use **Re-check account**. The faucet does not import
   or initialize that account and never needs its mnemonic or private key.
 - **Existing recipient has the wrong owner:** only a public account owned by the
-  authenticated-transfer program can receive a v0.2.0 faucet claim.
+  authenticated-transfer program can receive a faucet claim.
 - **Claim solution rejected:** refresh the pinata challenge. Another successful
   claim changes the challenge seed.
 - **Claim outcome unknown:** do not immediately claim again. Reconnect and

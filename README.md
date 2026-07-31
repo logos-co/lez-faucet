@@ -122,8 +122,14 @@ owning wallet and are never needed by the faucet.
 
 ## Development
 
-Prerequisites are Nix with flakes, Rust, and logos-scaffold 0.1.1. Apple Silicon
-macOS (`darwin-arm64`) is the only release target currently supported.
+Prerequisites are Nix with flakes, Rust, and the logos-scaffold CLI at 0.1.1
+(`lgs --version` prints `logos-scaffold 0.1.1`). Do not read the `version =
+"0.2.0"` at the top of `scaffold.toml` as a tool version: that field is the
+`scaffold.toml` schema version, and CLI 0.1.1 is what reads schema 0.2.0. The
+schema number is the one the machine checks, and it is already correct in the
+file; nothing in this repository pins the CLI, so `lgs --version` is the only
+way to know which one you have. Apple Silicon macOS (`darwin-arm64`) is the only
+release target currently supported.
 
 ```sh
 ./scripts/scaffold-setup.sh
@@ -137,8 +143,8 @@ lgs basecamp build --variant lgx --module lez_faucet_ui
 
 The filtered builds are deliberately sequential because Scaffold recreates its
 portable-artifact directory for each run. `lgs basecamp build` is the intended
-aggregate check, but logos-scaffold 0.1.1 can still fail on same-repository
-module paths during pure Nix evaluation; treat the filtered builds and direct
+aggregate check, but the 0.1.1 CLI can still fail on same-repository module
+paths during pure Nix evaluation; treat the filtered builds and direct
 `nix build ...#lgx-portable` commands as the reliable fallback while that
 upstream issue remains.
 
@@ -199,26 +205,51 @@ LEE_WALLET_HOME_DIR=/path/to/wallet \
 
 The CLI wallet is only the network-client context for this query and need not
 own the account being checked. Its `wallet_config.json` must point at the same
-sequencer. LEZ v0.2.0 uses `LEE_WALLET_HOME_DIR`; the older
-`NSSA_WALLET_HOME_DIR` name is not read by this pinned wallet.
+sequencer. Upstream LEZ v0.2.0 — the pinned protocol revision, not this app's
+version — uses `LEE_WALLET_HOME_DIR`; the older `NSSA_WALLET_HOME_DIR` name is
+not read by this pinned wallet.
 
 ## Install and release
 
+This tree builds **LEZ Faucet 0.3.0**: `lez_faucet` 0.3.0 and `lez_faucet_ui`
+0.3.0, per each module's `metadata.json`. Three unrelated version numbers appear
+around this app, so name the subject every time:
+
+| Subject | Version |
+| --- | --- |
+| LEZ Faucet (this repository, both packages) | 0.3.0 |
+| Logos Basecamp (the host app it installs into) | 0.2.1 |
+| Upstream LEZ (the pinned protocol revision) | `v0.2.0` |
+
+0.3.0 is a breaking release, not a patch. The core module's C++ ABI changed, the
+UI's Qt Remote Objects interface changed, and the entire wallet and key-material
+flow was removed. Under semver a 0.x breaking change bumps the minor, which is
+why this is 0.3.0 and not 0.2.1. `CHANGELOG.md` records what moved.
+
 For a new installation, install `lez_faucet_ui`; Basecamp should resolve its
 `lez_faucet` core dependency from the same catalog. When upgrading an existing
-v0.1.0 installation, upgrade or install `lez_faucet` 0.2.0 first, then
-`lez_faucet_ui` 0.2.0. The UI dependency is currently unversioned, so installing
-the new UI alone may leave an already-installed 0.1.0 core in place. The rolling
-catalog retains v0.1.0 for rollback. See
-[Community installation](docs/community-install.md).
+0.1.0 or 0.2.0 installation, upgrade or install `lez_faucet` 0.3.0 first, then
+`lez_faucet_ui` 0.3.0. The UI dependency is currently unversioned, so installing
+the new UI alone may leave an older core in place — and against 0.3.0 that is
+not a degraded app but a broken one, because the 0.2.x core does not implement
+the slots the 0.3.0 UI calls. The rolling catalog retains v0.1.0 and v0.2.0 for
+rollback. See [Community installation](docs/community-install.md).
 
-Release workflows are present for both modules, but the shared Nix release
-pipeline is currently affected by
-[`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159):
-the pinned cargo-vendor fetch receives HTTP 403 responses from crates.io. Until
-that upstream fix lands, produce the release artifacts locally and publish the
-`.lgx` plus generated `sidecar.json` as described in [Releasing](docs/releasing.md).
-The catalog index reads the published `.lgx` directly. The sidecar remains the
+Release workflows are present for both modules. The crates.io HTTP 403 that
+blocked every Nix build of the core module is fixed in this tree:
+`faucet-module/flake.nix` patches nixpkgs' cargo-vendor fetcher to send a
+descriptive User-Agent and pins the regenerated `cargoHash`, and
+`nix build ./faucet-module#lez-faucet-ffi` succeeds with that patch. The
+upstream issue
+[`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159)
+is still open; this repository carries its own workaround rather than waiting on
+it.
+
+That workaround has not been exercised by a GitHub Actions run, so treat a
+release build as unproven until both the `.lgx` and `sidecar.json` assets exist
+on the release. Producing the artifacts locally and publishing them by hand, as
+described in [Releasing](docs/releasing.md), is still the documented path. The
+catalog index reads the published `.lgx` directly. The sidecar remains the
 release's artifact metadata and is required by the release workflow's
 already-published check.
 
