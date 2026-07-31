@@ -69,6 +69,40 @@ test("decimal addition is exact where Number would round", () => {
   assert.notEqual(String(Number("9007199254740993") + 150), flow.addDecimals("9007199254740993", "150"));
 });
 
+test("grouping a balance for reading never changes its value", () => {
+  // The separators are inserted by walking the string, so the digits that come
+  // out are exactly the digits that went in. A divide-and-format
+  // implementation would pass the first few of these and silently corrupt the
+  // rest.
+  assert.equal(flow.groupDigits("1476750"), "1,476,750");
+  assert.equal(flow.groupDigits("150"), "150");
+  assert.equal(flow.groupDigits("6000"), "6,000");
+  assert.equal(flow.groupDigits("0"), "0");
+  assert.equal(flow.groupDigits("1"), "1");
+  assert.equal(flow.groupDigits("999"), "999");
+  assert.equal(flow.groupDigits("1000"), "1,000");
+
+  // Above 2^53 a Number would round; every digit must survive untouched.
+  assert.equal(flow.groupDigits("9007199254740993"), "9,007,199,254,740,993");
+  assert.equal(
+    flow.groupDigits("340282366920938463463374607431768211455"),
+    "340,282,366,920,938,463,463,374,607,431,768,211,455",
+  );
+  for (const value of ["9007199254740993", "340282366920938463463374607431768211455"]) {
+    assert.equal(flow.groupDigits(value).split(",").join(""), value);
+  }
+
+  // Anything that is not a plain run of digits comes back as it arrived, so a
+  // malformed balance degrades to whatever the core sent rather than to a
+  // plausible-looking number.
+  assert.equal(flow.groupDigits(""), "");
+  assert.equal(flow.groupDigits("12.5"), "12.5");
+  assert.equal(flow.groupDigits("-150"), "-150");
+  assert.equal(flow.groupDigits("not a balance"), "not a balance");
+  assert.equal(flow.groupDigits(null), "");
+  assert.equal(flow.groupDigits(undefined), "");
+});
+
 // ---------------------------------------------------------------------------
 // address input
 // ---------------------------------------------------------------------------
@@ -267,6 +301,75 @@ test("no phase ever renders as its raw enum name", () => {
   // The view renders the mapped sentence, never envelope.phase.
   assert.match(qml, /statusText = FaucetFlow\.phaseSentence\(envelope\.phase\)/);
   assert.doesNotMatch(qml, /statusText = String\(payload\.phase\)|text: [^\n]*\.phase\b/);
+});
+
+test("every phase lands on exactly one of the three lamps", () => {
+  // The rail promises the user a shape for the whole request, so a phase the
+  // core can report must never leave every lamp dark while a claim is plainly
+  // running.
+  for (const phase of dropPhases.concat(["queued"])) {
+    const stage = flow.phaseStage(phase);
+    assert.equal(
+      Number.isInteger(stage) && stage >= 0 && stage <= 2,
+      true,
+      `${phase} maps to ${stage}, which is not one of the three lamps`,
+    );
+  }
+
+  // The order the lamps light in is the order the work happens in.
+  assert.equal(flow.phaseStage("queued"), 0);
+  assert.equal(flow.phaseStage("solving"), 0);
+  assert.equal(flow.phaseStage("refreshing_challenge"), 0);
+  assert.equal(flow.phaseStage("submitting"), 1);
+  assert.equal(flow.phaseStage("reconciling"), 2);
+
+  // Reconciling is the only phase on the last lamp. That lamp is the one
+  // carrying the five-minute caution, so anything else landing on it would
+  // put the warning in front of a step that does not deserve it.
+  const onLastLamp = dropPhases.filter((phase) => flow.phaseStage(phase) === 2);
+  assert.deepEqual(onLastLamp, ["reconciling"]);
+
+  // Every phase that cannot be cancelled is at or past the submit lamp: the
+  // rail and the cancel button tell the same story about the point of no
+  // return.
+  for (const phase of dropPhases) {
+    if (!flow.cancelAvailable("running", phase, false))
+      assert.equal(flow.phaseStage(phase) >= 1, true, `${phase} is uncancellable but lights an early lamp`);
+  }
+
+  // An unrecognised phase lights nothing rather than lighting the wrong lamp.
+  for (const unheard of ["", null, undefined, "some_future_phase", "SOLVING"]) {
+    assert.equal(flow.phaseStage(unheard), -1);
+  }
+});
+
+// Asserted against railStage itself rather than against the QML binding's
+// characters: the binding was previously pinned by a source regex, which said
+// nothing about what the rail does and broke the moment the expression moved.
+test("the rail lights nothing before a claim and everything after a proven one", () => {
+  const LAMPS = 3;
+
+  // Before the first press the rail is a promise, not a report.
+  assert.equal(flow.railStage("none", false, "", LAMPS), -1);
+
+  // While a claim runs it tracks the phase.
+  assert.equal(flow.railStage("none", true, "solving", LAMPS), flow.phaseStage("solving"));
+  assert.equal(flow.railStage("none", true, "submitting", LAMPS), flow.phaseStage("submitting"));
+  assert.equal(flow.railStage("none", true, "reconciling", LAMPS), flow.phaseStage("reconciling"));
+
+  // A proven credit keeps every lamp lit beside the receipt. The poller has
+  // stopped by then, so without this the rail would go dark exactly when it
+  // has the most to say.
+  assert.equal(flow.railStage("receipt", false, "", LAMPS), LAMPS);
+
+  // Only a receipt earns it. An error or an unproven outcome is not a
+  // finished run, and must not be dressed as one.
+  for (const panel of ["error", "unknown"]) {
+    assert.equal(flow.railStage(panel, false, "", LAMPS), -1, `${panel} must not light the rail`);
+  }
+
+  // An unrecognised phase mid-run still lights nothing rather than guessing.
+  assert.equal(flow.railStage("none", true, "some_future_phase", LAMPS), -1);
 });
 
 test("cancelling is offered only while nothing has been sent", () => {

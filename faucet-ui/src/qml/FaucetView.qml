@@ -68,6 +68,34 @@ Rectangle {
     readonly property bool poolBlocked: pool.known && !pool.canClaim
     readonly property bool canRequest: bootstrapped && !creditLive && addressUsable && !poolBlocked
 
+    // -- the three lamps -----------------------------------------------------
+    //
+    // The rail is drawn whether or not a claim is running, because its whole
+    // point is to say what the five-minute step is *before* the button is
+    // pressed. -1 means nothing is lit: either no claim is live, or the core
+    // reported a phase this build does not recognise.
+    readonly property var stages: [
+        { title: qsTr("Solve"), detail: qsTr("Proof-of-work, usually seconds") },
+        { title: qsTr("Submit"), detail: qsTr("One unsigned claim, no key needed") },
+        { title: qsTr("Confirm"), detail: qsTr("Up to five minutes. Keep the app open.") }
+    ]
+    // The decision lives in FaucetFlow.railStage so that "a proven credit leaves
+    // every lamp lit" is a tested rule rather than an accident of this binding.
+    readonly property int currentStage: FaucetFlow.railStage(
+        panel, creditLive, creditPhase, stages.length)
+
+    // Addresses, hashes and shell commands are read character by character —
+    // an l against a 1, a 0 against an O — so they are set in a fixed-pitch
+    // face and aligned in columns.
+    //
+    // "monospace" is a CSS generic, not a font family, and Qt does not treat it
+    // as one: on macOS it matches nothing and silently falls back to the
+    // proportional default, which is how every hash in this view came to be set
+    // in Public Sans. Name families that actually exist on each platform.
+    readonly property string monoFamily: Qt.platform.os === "osx"
+        ? "Menlo"
+        : (Qt.platform.os === "windows" ? "Consolas" : "DejaVu Sans Mono")
+
     // ---- bridge helpers ----------------------------------------------------
 
     function watch(reply, onSuccess, onError) {
@@ -559,13 +587,20 @@ Rectangle {
             }
 
             // -- 1. pool status ---------------------------------------------
+            //
+            // A readout, not a headline. The balance is the one figure worth
+            // setting large; everything qualifying it sits underneath it in
+            // descending weight. There is deliberately no proportional meter:
+            // the core reports the pool's *current* balance and nothing else,
+            // so any "x% full" bar would need a capacity this app has never
+            // been told and could not keep true across a refill.
             Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: poolColumn.implicitHeight + Theme.spacing.large * 2
                 radius: Theme.spacing.radiusLarge
-                color: Theme.palette.backgroundSecondary
+                color: Theme.palette.backgroundTertiary
                 border.color: root.poolBlocked ? Theme.palette.warning
-                                               : Theme.palette.backgroundElevated
+                                               : Theme.palette.borderSecondary
 
                 ColumnLayout {
                     id: poolColumn
@@ -578,42 +613,110 @@ Rectangle {
                         LogosText {
                             text: qsTr("Faucet pool")
                             textFormat: Text.PlainText
-                            font.weight: Theme.typography.weightBold
-                            color: Theme.palette.text
+                            font.pixelSize: Theme.typography.secondaryText
+                            font.weight: Theme.typography.weightMedium
+                            color: Theme.palette.textTertiary
                         }
                         Item { Layout.fillWidth: true }
+                        LogosText {
+                            visible: root.poolJobId !== ""
+                            text: qsTr("Reading…")
+                            textFormat: Text.PlainText
+                            font.pixelSize: Theme.typography.secondaryText
+                            color: Theme.palette.textTertiary
+                        }
+                        // Sized down from the stock 200x50: re-reading the pool
+                        // is a secondary action and must not read as loudly as
+                        // the one button on the screen that spends a claim.
                         LogosButton {
                             text: qsTr("Refresh")
                             enabled: root.bootstrapped && root.poolJobId === ""
+                            implicitWidth: 88
+                            implicitHeight: 32
                             onClicked: root.refreshPool()
                         }
                     }
-                    LogosText {
+
+                    // The readout itself.
+                    RowLayout {
                         visible: root.pool.known
-                        text: qsTr("%1 LEZ in the pool").arg(root.pool.poolBalance)
-                        textFormat: Text.PlainText
-                        font.pixelSize: Theme.typography.titleText
-                        font.weight: Theme.typography.weightBold
-                        color: Theme.palette.text
                         Layout.fillWidth: true
+                        spacing: Theme.spacing.small
+                        LogosText {
+                            text: FaucetFlow.groupDigits(root.pool.poolBalance)
+                            textFormat: Text.PlainText
+                            font.pixelSize: Theme.typography.panelTitleText
+                            font.weight: Theme.typography.weightBold
+                            color: Theme.palette.text
+                        }
+                        LogosText {
+                            text: qsTr("LEZ")
+                            textFormat: Text.PlainText
+                            font.pixelSize: Theme.typography.primaryText
+                            color: Theme.palette.textSecondary
+                        }
+                        Item { Layout.fillWidth: true }
                     }
-                    LogosText {
+
+                    RowLayout {
                         visible: root.pool.known
-                        text: qsTr("Enough for about %1 more claims at this instant. The pool is a finite, shared resource: anyone on the testnet claims from the same balance, so this number moves without you.")
-                            .arg(root.pool.claimsRemaining)
-                        textFormat: Text.PlainText
-                        color: Theme.palette.textSecondary
-                        wrapMode: Text.WordWrap
                         Layout.fillWidth: true
+                        spacing: Theme.spacing.small
+                        LogosText {
+                            text: qsTr("~%1 claims left at this instant")
+                                .arg(FaucetFlow.groupDigits(root.pool.claimsRemaining))
+                            textFormat: Text.PlainText
+                            font.pixelSize: Theme.typography.secondaryText
+                            color: Theme.palette.textSecondary
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+                        // Prize and difficulty as badges: two fixed facts about
+                        // the protocol, not prose to be read twice.
+                        Rectangle {
+                            implicitWidth: prizeBadge.implicitWidth + Theme.spacing.medium
+                            implicitHeight: prizeBadge.implicitHeight + Theme.spacing.small
+                            radius: Theme.spacing.radiusSmall
+                            color: "transparent"
+                            border.color: Theme.palette.primary
+                            border.width: 1
+                            LogosText {
+                                id: prizeBadge
+                                anchors.centerIn: parent
+                                text: qsTr("%1 LEZ / claim").arg(
+                                    FaucetFlow.groupDigits(root.pool.prizeAmount))
+                                textFormat: Text.PlainText
+                                font.pixelSize: Theme.typography.secondaryText
+                                font.weight: Theme.typography.weightMedium
+                                color: Theme.palette.primary
+                            }
+                        }
+                        Rectangle {
+                            visible: root.pool.difficultyBits !== ""
+                            implicitWidth: powBadge.implicitWidth + Theme.spacing.medium
+                            implicitHeight: powBadge.implicitHeight + Theme.spacing.small
+                            radius: Theme.spacing.radiusSmall
+                            color: "transparent"
+                            border.color: Theme.palette.border
+                            border.width: 1
+                            LogosText {
+                                id: powBadge
+                                anchors.centerIn: parent
+                                text: qsTr("%1-bit PoW").arg(root.pool.difficultyBits)
+                                textFormat: Text.PlainText
+                                font.pixelSize: Theme.typography.secondaryText
+                                font.weight: Theme.typography.weightMedium
+                                color: Theme.palette.textSecondary
+                            }
+                        }
                     }
+
                     LogosText {
                         visible: root.pool.known
-                        text: qsTr("Each claim pays %1 LEZ and costs a proof-of-work of %2 bytes (%3 bits).")
-                            .arg(root.pool.prizeAmount)
-                            .arg(root.pool.difficultyBytes)
-                            .arg(root.pool.difficultyBits)
+                        text: qsTr("The pool is a finite, shared resource: everyone on the testnet claims from the same balance, so this figure moves without you.")
                         textFormat: Text.PlainText
-                        color: Theme.palette.textSecondary
+                        font.pixelSize: Theme.typography.secondaryText
+                        color: Theme.palette.textTertiary
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
@@ -656,8 +759,11 @@ Rectangle {
             LogosText {
                 text: qsTr("Public LEZ address")
                 textFormat: Text.PlainText
-                color: Theme.palette.textSecondary
+                font.pixelSize: Theme.typography.secondaryText
+                font.weight: Theme.typography.weightMedium
+                color: Theme.palette.textTertiary
                 Layout.fillWidth: true
+                Layout.bottomMargin: -Theme.spacing.small
             }
 
             LogosTextField {
@@ -698,23 +804,29 @@ Rectangle {
                 LogosText {
                     text: root.inspection ? root.inspection.address : ""
                     textFormat: Text.PlainText
-                    color: Theme.palette.text
+                    font.family: root.monoFamily
+                    font.pixelSize: Theme.typography.secondaryText
+                    color: Theme.palette.textSecondary
                     elide: Text.ElideMiddle
                     Layout.fillWidth: true
                 }
                 LogosText {
                     text: root.inspection ? root.inspection.summary : ""
                     textFormat: Text.PlainText
+                    font.pixelSize: Theme.typography.secondaryText
+                    // Eligibility is the one thing the user needs off this
+                    // block, so it carries the only colour in it.
                     color: root.inspection && root.inspection.eligible
-                        ? Theme.palette.textSecondary : Theme.palette.warning
+                        ? Theme.palette.success : Theme.palette.warning
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
                 LogosText {
                     visible: root.inspection !== null && root.inspection.balance !== ""
-                    text: qsTr("Current balance: %1 LEZ").arg(
-                        root.inspection ? root.inspection.balance : "")
+                    text: qsTr("Current balance %1 LEZ").arg(
+                        FaucetFlow.groupDigits(root.inspection ? root.inspection.balance : ""))
                     textFormat: Text.PlainText
+                    font.pixelSize: Theme.typography.secondaryText
                     color: Theme.palette.textSecondary
                     Layout.fillWidth: true
                 }
@@ -723,7 +835,7 @@ Rectangle {
                         && root.inspection.initializationCommand !== ""
                     text: root.inspection ? root.inspection.initializationCommand : ""
                     textFormat: Text.PlainText
-                    font.family: "monospace"
+                    font.family: root.monoFamily
                     color: Theme.palette.text
                     wrapMode: Text.WrapAnywhere
                     Layout.fillWidth: true
@@ -747,12 +859,148 @@ Rectangle {
             }
 
             // -- 3. the button ----------------------------------------------
+            //
+            // The only saturated element on the screen, because it is the only
+            // thing the user came here to do. LogosButton ships one grey
+            // appearance for every button in the product, which left the
+            // request indistinguishable from Refresh; background and
+            // contentItem are overridden here rather than in the design system
+            // so nothing else in Basecamp changes.
+            //
+            // The label is near-black on orange (about 6.6:1) rather than the
+            // stock white (about 2.8:1, which fails AA on this fill).
             LogosButton {
                 id: requestButton
                 text: qsTr("Request 150 LEZ")
                 enabled: root.canRequest
                 Layout.fillWidth: true
                 onClicked: root.requestCredit()
+                background: Rectangle {
+                    radius: Theme.spacing.radiusXlarge
+                    color: !requestButton.enabled
+                           ? Theme.palette.backgroundMuted
+                           : (requestButton.isActive ? Theme.palette.primaryHover
+                                                     : Theme.palette.primary)
+                    border.width: requestButton.enabled ? 0 : 1
+                    border.color: Theme.palette.border
+                }
+                contentItem: LogosText {
+                    text: requestButton.text
+                    textFormat: Text.PlainText
+                    font.pixelSize: Theme.typography.primaryText
+                    font.weight: Theme.typography.weightBold
+                    color: requestButton.enabled ? Theme.palette.background
+                                                 : Theme.palette.textMuted
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+
+            // -- 3b. what pressing it costs ---------------------------------
+            //
+            // Drawn before the press, not after. The old view disclosed the
+            // five-minute reconcile only once the user was already inside it.
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: railColumn.implicitHeight + Theme.spacing.large * 2
+                radius: Theme.spacing.radiusLarge
+                color: Theme.palette.backgroundTertiary
+                border.color: Theme.palette.borderSecondary
+
+                ColumnLayout {
+                    id: railColumn
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacing.large
+                    spacing: Theme.spacing.medium
+
+                    LogosText {
+                        text: root.creditLive && root.statusText !== ""
+                              ? root.statusText
+                              : qsTr("What happens when you press")
+                        textFormat: Text.PlainText
+                        font.pixelSize: Theme.typography.secondaryText
+                        font.weight: Theme.typography.weightMedium
+                        color: root.creditLive ? Theme.palette.text
+                                               : Theme.palette.textTertiary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacing.medium
+
+                        Repeater {
+                            model: root.stages
+                            delegate: ColumnLayout {
+                                id: stageItem
+                                required property int index
+                                required property var modelData
+                                readonly property bool isDone: root.currentStage > index
+                                readonly property bool isActive: root.currentStage === index
+                                readonly property color lamp:
+                                    isDone ? Theme.palette.success
+                                           : (isActive ? Theme.palette.primary
+                                                       : Theme.palette.textTertiary)
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignTop
+                                spacing: Theme.spacing.small
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+                                    Rectangle {
+                                        implicitWidth: 20
+                                        implicitHeight: 20
+                                        radius: 10
+                                        color: "transparent"
+                                        border.color: stageItem.lamp
+                                        border.width: 1
+                                        LogosText {
+                                            anchors.centerIn: parent
+                                            text: String(stageItem.index + 1)
+                                            textFormat: Text.PlainText
+                                            font.pixelSize: Theme.typography.secondaryText
+                                            font.weight: Theme.typography.weightMedium
+                                            color: stageItem.lamp
+                                        }
+                                    }
+                                    Rectangle {
+                                        visible: stageItem.index < root.stages.length - 1
+                                        Layout.fillWidth: true
+                                        implicitHeight: 1
+                                        color: stageItem.isDone ? Theme.palette.success
+                                                                : Theme.palette.borderSecondary
+                                    }
+                                }
+
+                                LogosText {
+                                    text: stageItem.modelData.title
+                                    textFormat: Text.PlainText
+                                    font.pixelSize: Theme.typography.secondaryText
+                                    font.weight: Theme.typography.weightMedium
+                                    color: stageItem.isDone || stageItem.isActive
+                                           ? Theme.palette.text : Theme.palette.textSecondary
+                                    Layout.fillWidth: true
+                                }
+                                LogosText {
+                                    text: stageItem.modelData.detail
+                                    textFormat: Text.PlainText
+                                    font.pixelSize: Theme.typography.secondaryText
+                                    // The slow step keeps its caution colour
+                                    // until it is actually behind the user.
+                                    color: stageItem.isDone
+                                           ? Theme.palette.textTertiary
+                                           : (stageItem.index === root.stages.length - 1
+                                              ? Theme.palette.warning
+                                              : Theme.palette.textTertiary)
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // -- 4. progress, cancel, and the result ------------------------
@@ -760,15 +1008,9 @@ Rectangle {
                 visible: root.creditLive
                 Layout.fillWidth: true
                 spacing: Theme.spacing.medium
+                // The live sentence is drawn once, as the rail's heading. It is
+                // deliberately not repeated here.
                 BusyIndicator { running: parent.visible; Layout.alignment: Qt.AlignHCenter }
-                LogosText {
-                    text: root.statusText
-                    textFormat: Text.PlainText
-                    color: Theme.palette.text
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
                 LogosText {
                     // The one honestly slow stage. Its 300 s bound is stated in
                     // plain language at the moment it applies, along with the
@@ -829,7 +1071,7 @@ Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: receiptColumn.implicitHeight + Theme.spacing.large * 2
                 radius: Theme.spacing.radiusLarge
-                color: Theme.palette.backgroundSecondary
+                color: Theme.palette.backgroundTertiary
                 border.color: Theme.palette.success
 
                 ColumnLayout {
@@ -837,39 +1079,85 @@ Rectangle {
                     anchors.fill: parent
                     anchors.margins: Theme.spacing.large
                     spacing: Theme.spacing.small
-                    LogosText {
-                        text: qsTr("%1 LEZ credited").arg(root.receipt ? root.receipt.amount : "")
-                        textFormat: Text.PlainText
-                        font.pixelSize: Theme.typography.titleText
-                        font.weight: Theme.typography.weightBold
-                        color: Theme.palette.text
+
+                    // The delta is the fact. The two balances that prove it sit
+                    // underneath, and the hashes that prove *those* sit under
+                    // them, in the order someone checking the claim reads them.
+                    RowLayout {
                         Layout.fillWidth: true
+                        spacing: Theme.spacing.small
+                        LogosText {
+                            text: qsTr("+%1 LEZ").arg(
+                                FaucetFlow.groupDigits(root.receipt ? root.receipt.amount : ""))
+                            textFormat: Text.PlainText
+                            font.pixelSize: Theme.typography.panelTitleText
+                            font.weight: Theme.typography.weightBold
+                            color: Theme.palette.success
+                        }
+                        Item { Layout.fillWidth: true }
+                        Rectangle {
+                            implicitWidth: confirmedBadge.implicitWidth + Theme.spacing.medium
+                            implicitHeight: confirmedBadge.implicitHeight + Theme.spacing.small
+                            radius: Theme.spacing.radiusSmall
+                            color: "transparent"
+                            border.color: Theme.palette.success
+                            border.width: 1
+                            LogosText {
+                                id: confirmedBadge
+                                anchors.centerIn: parent
+                                text: qsTr("Confirmed on chain")
+                                textFormat: Text.PlainText
+                                font.pixelSize: Theme.typography.secondaryText
+                                font.weight: Theme.typography.weightMedium
+                                color: Theme.palette.success
+                            }
+                        }
+                    }
+                    LogosText {
+                        text: qsTr("Balance %1 → %2 LEZ")
+                            .arg(FaucetFlow.groupDigits(root.receipt ? root.receipt.balanceBefore : ""))
+                            .arg(FaucetFlow.groupDigits(root.receipt ? root.receipt.balanceAfter : ""))
+                        textFormat: Text.PlainText
+                        font.pixelSize: Theme.typography.secondaryText
+                        color: Theme.palette.textSecondary
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.topMargin: Theme.spacing.small
+                        implicitHeight: 1
+                        color: Theme.palette.borderSubtle
+                    }
+
+                    LogosText {
+                        text: qsTr("Account")
+                        textFormat: Text.PlainText
+                        font.pixelSize: Theme.typography.secondaryText
+                        color: Theme.palette.textTertiary
                     }
                     LogosText {
                         text: root.receipt ? root.receipt.address : ""
                         textFormat: Text.PlainText
-                        color: Theme.palette.textSecondary
-                        elide: Text.ElideMiddle
-                        Layout.fillWidth: true
-                    }
-                    LogosText {
-                        text: qsTr("Balance %1 LEZ before, %2 LEZ after.")
-                            .arg(root.receipt ? root.receipt.balanceBefore : "")
-                            .arg(root.receipt ? root.receipt.balanceAfter : "")
-                        textFormat: Text.PlainText
+                        font.family: root.monoFamily
+                        font.pixelSize: Theme.typography.secondaryText
                         color: Theme.palette.text
-                        wrapMode: Text.WordWrap
+                        wrapMode: Text.WrapAnywhere
                         Layout.fillWidth: true
                     }
                     LogosText {
                         text: qsTr("Transaction")
                         textFormat: Text.PlainText
-                        color: Theme.palette.textSecondary
+                        font.pixelSize: Theme.typography.secondaryText
+                        color: Theme.palette.textTertiary
+                        Layout.topMargin: Theme.spacing.tiny
                     }
                     LogosText {
                         text: root.receipt ? root.receipt.txHash : ""
                         textFormat: Text.PlainText
-                        font.family: "monospace"
+                        font.family: root.monoFamily
+                        font.pixelSize: Theme.typography.secondaryText
                         color: Theme.palette.text
                         wrapMode: Text.WrapAnywhere
                         Layout.fillWidth: true
@@ -878,9 +1166,11 @@ Rectangle {
                         visible: root.receipt !== null && root.receipt.retried
                         text: qsTr("Another claimant won the challenge first, so this took more than one attempt. Only one claim was credited.")
                         textFormat: Text.PlainText
-                        color: Theme.palette.textSecondary
+                        font.pixelSize: Theme.typography.secondaryText
+                        color: Theme.palette.textTertiary
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
+                        Layout.topMargin: Theme.spacing.tiny
                     }
                 }
             }
@@ -892,7 +1182,7 @@ Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: unknownColumn.implicitHeight + Theme.spacing.large * 2
                 radius: Theme.spacing.radiusLarge
-                color: Theme.palette.backgroundSecondary
+                color: Theme.palette.backgroundTertiary
                 border.color: Theme.palette.warning
 
                 ColumnLayout {
@@ -903,7 +1193,7 @@ Rectangle {
                     LogosText {
                         text: qsTr("This claim could not be confirmed")
                         textFormat: Text.PlainText
-                        font.pixelSize: Theme.typography.titleText
+                        font.pixelSize: Theme.typography.panelTitleText
                         font.weight: Theme.typography.weightBold
                         color: Theme.palette.warning
                         Layout.fillWidth: true
@@ -928,7 +1218,8 @@ Rectangle {
                         visible: root.unknownOutcome !== null
                             && root.unknownOutcome.balanceBefore !== ""
                         text: qsTr("Balance before the claim: %1 LEZ").arg(
-                            root.unknownOutcome ? root.unknownOutcome.balanceBefore : "")
+                            FaucetFlow.groupDigits(
+                                root.unknownOutcome ? root.unknownOutcome.balanceBefore : ""))
                         textFormat: Text.PlainText
                         color: Theme.palette.text
                         Layout.fillWidth: true
@@ -938,7 +1229,7 @@ Rectangle {
                         text: qsTr("Transaction: %1").arg(
                             root.unknownOutcome ? root.unknownOutcome.txHash : "")
                         textFormat: Text.PlainText
-                        font.family: "monospace"
+                        font.family: root.monoFamily
                         color: Theme.palette.text
                         wrapMode: Text.WrapAnywhere
                         Layout.fillWidth: true
@@ -960,7 +1251,7 @@ Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: failureColumn.implicitHeight + Theme.spacing.large * 2
                 radius: Theme.spacing.radiusLarge
-                color: Theme.palette.backgroundSecondary
+                color: Theme.palette.backgroundTertiary
                 border.color: Theme.palette.error
 
                 ColumnLayout {
@@ -971,7 +1262,7 @@ Rectangle {
                     LogosText {
                         text: root.failure ? root.failure.title : ""
                         textFormat: Text.PlainText
-                        font.pixelSize: Theme.typography.titleText
+                        font.pixelSize: Theme.typography.panelTitleText
                         font.weight: Theme.typography.weightBold
                         color: Theme.palette.error
                         wrapMode: Text.WordWrap
@@ -997,7 +1288,7 @@ Rectangle {
                             && root.failure.initializationCommand !== ""
                         text: root.failure ? root.failure.initializationCommand : ""
                         textFormat: Text.PlainText
-                        font.family: "monospace"
+                        font.family: root.monoFamily
                         color: Theme.palette.text
                         wrapMode: Text.WrapAnywhere
                         Layout.fillWidth: true
@@ -1021,10 +1312,21 @@ Rectangle {
             }
 
             // -- what this app cannot do for you ----------------------------
+            //
+            // Still said in full, still unhidden — but at the weight of a
+            // footnote rather than of the receipt above it.
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.spacing.small
+                implicitHeight: 1
+                color: Theme.palette.borderSubtle
+            }
+
             LogosText {
                 text: qsTr("This app stores nothing between runs. If you quit while a claim is running it cannot reconcile that claim afterwards — check the account's balance yourself before requesting again.")
                 textFormat: Text.PlainText
-                color: Theme.palette.textSecondary
+                font.pixelSize: Theme.typography.secondaryText
+                color: Theme.palette.textTertiary
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
@@ -1033,7 +1335,9 @@ Rectangle {
                 visible: root.pool.poolAddress !== ""
                 text: qsTr("Pool account: %1").arg(root.pool.poolAddress)
                 textFormat: Text.PlainText
-                color: Theme.palette.textTertiary
+                font.family: root.monoFamily
+                font.pixelSize: Theme.typography.secondaryText
+                color: Theme.palette.textMuted
                 elide: Text.ElideMiddle
                 Layout.fillWidth: true
             }

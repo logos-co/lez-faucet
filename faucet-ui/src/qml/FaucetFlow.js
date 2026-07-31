@@ -82,6 +82,30 @@ function addDecimals(left, right) {
     return sum === "" ? "0" : sum
 }
 
+// Group a decimal string into thousands so a six-figure balance can be read at
+// a glance.
+//
+// String surgery, never arithmetic. These values are u128 in general, so the
+// obvious implementation — divide, floor, format — would round the number
+// before it ever reached the screen, and rule 1 of this file exists precisely
+// to stop that. Anything that is not a plain run of digits is handed back
+// untouched, so a malformed balance degrades to whatever the core sent rather
+// than to a plausible-looking lie.
+function groupDigits(value) {
+    var text = String(value === undefined || value === null ? "" : value)
+    if (!/^[0-9]+$/.test(text))
+        return text
+    var grouped = ""
+    var counted = 0
+    for (var index = text.length - 1; index >= 0; index -= 1) {
+        grouped = text.charAt(index) + grouped
+        counted += 1
+        if (counted % 3 === 0 && index > 0)
+            grouped = "," + grouped
+    }
+    return grouped
+}
+
 // ---- address input ---------------------------------------------------------
 
 function normalizePublicAccountId(value) {
@@ -248,6 +272,50 @@ var phaseSentences = {
 function phaseSentence(phase) {
     var key = String(phase === undefined || phase === null ? "" : phase)
     return phaseSentences[key] || "Working on your request…"
+}
+
+// The three stages a person is shown, and the phase each core phase belongs to.
+//
+// The view draws a rail of three lamps because "solve, submit, confirm" is what
+// actually happens to a claim, and because the third one can take five minutes
+// and must be visible before the button is pressed rather than after. The core
+// reports nine phases; folding them onto three is a presentation decision and
+// so it lives here with the sentences.
+//
+// An unrecognised phase maps to -1 and lights nothing. That is deliberate and
+// matches phaseSentence's fallback: a phase this build has not heard of must
+// degrade to an unlit rail, never to a confidently wrong lamp.
+var stageOfPhase = {
+    "queued": 0,
+    "validating_input": 0,
+    "verifying_programs": 0,
+    "inspecting_recipient": 0,
+    "fetching_challenge": 0,
+    "solving": 0,
+    "refreshing_challenge": 0,
+    "submitting": 1,
+    "reconciling": 2
+}
+
+function phaseStage(phase) {
+    var key = String(phase === undefined || phase === null ? "" : phase)
+    var stage = stageOfPhase[key]
+    return stage === undefined ? -1 : stage
+}
+
+// Which lamp the rail lights, for the whole life of the screen and not just the
+// part where a job is polling.
+//
+// The rail has three stories to tell and only one of them is "a claim is
+// running". Before the press it is a promise, so nothing is lit. A proven
+// credit is a finished run, so everything stays lit next to the receipt: the
+// end state is stated here rather than falling out of the poller stopping,
+// which would darken the rail at the exact moment it has the most to say. A
+// failure or an unproven outcome is not a finished run and does not earn it.
+function railStage(panel, live, phase, lampCount) {
+    if (String(panel) === "receipt")
+        return lampCount
+    return live ? phaseStage(phase) : -1
 }
 
 // ---- errors ----------------------------------------------------------------
@@ -532,7 +600,6 @@ function poolView(info) {
         poolBalance: balance,
         claimsRemaining: remaining,
         prizeAmount: normalizedDecimal(payload.prize_amount) || prizeAmount,
-        difficultyBytes: normalizedDecimal(payload.difficulty_bytes),
         difficultyBits: normalizedDecimal(payload.effective_difficulty_bits),
         poolAddress: payload.pinata_account && typeof payload.pinata_account === "object"
             ? String(payload.pinata_account.address || "") : "",
