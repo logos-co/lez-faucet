@@ -42,24 +42,40 @@
       #
       # The hashes are `fetchzip` hashes of the unpacked trees, obtained with
       # `nix-prefetch-url --unpack <url>`.
+      #
+      # The rapidsnark URLs deliberately differ per platform, because that is
+      # what rust-rapidsnark itself does. Its build script picks the asset per
+      # target triple (crates/download_rapidsnark.sh at the rev pinned in
+      # Cargo.lock, e91187f8): macOS takes the upstream iden3 release, but both
+      # Linux targets take logos-blockchain's `-pic` rebuilds, because the
+      # iden3 Linux archives are non-PIC and built against a newer glibc than
+      # the fork's glibc-2.35 rebuild. Pointing RAPIDSNARK_LIB_DIR at the iden3
+      # Linux archives would hand the build something it would never have
+      # fetched for itself. The three hashes below are exactly the
+      # x86_64-linux / aarch64-linux / aarch64-darwin entries of that repo's
+      # own nix-hashes.json, in nix32 form.
+      rapidsnarkVersion = "v0.0.8";
+      iden3Base = "https://github.com/iden3/rapidsnark/releases/download/${rapidsnarkVersion}";
+      picBase = "https://github.com/logos-blockchain/logos-blockchain-rust-rapidsnark/releases/download/rapidsnark-pic-${rapidsnarkVersion}";
+
       prebuilt = {
         aarch64-darwin = {
           circuitsPlatform = "macos-aarch64";
           circuitsHash = "0w3i0phgzjswsk1q2k6cr3001jjc55a82z79zw9w5p3x9hwaqljq";
-          rapidsnarkPlatform = "macOS-arm64";
+          rapidsnarkUrl = "${iden3Base}/rapidsnark-macOS-arm64-${rapidsnarkVersion}.zip";
           rapidsnarkHash = "1600dzr7hjg6lc5r0cdh189l7019djvy4cz2qyn75z5vrac4qs0f";
         };
         x86_64-linux = {
           circuitsPlatform = "linux-x86_64";
           circuitsHash = "1mwy3g9dyjvlwykzs62gzf79rrnm20sy7c587nv26c1y9bm71wfv";
-          rapidsnarkPlatform = "linux-x86_64";
-          rapidsnarkHash = "0zagnq7gn8nqj35prv1yv4qnhpgj3wir1h0w84sx9gk32m75f5l2";
+          rapidsnarkUrl = "${picBase}/rapidsnark-linux-x86_64-pic-${rapidsnarkVersion}.zip";
+          rapidsnarkHash = "07qdnh4lm99alkmmg3av916bma7s86s616s56y0j4q4h82897kzk";
         };
         aarch64-linux = {
           circuitsPlatform = "linux-aarch64";
           circuitsHash = "14r4vghipk66k8g22kymy2gpfa1ghwwa74v57a230yk0pm9zvgp7";
-          rapidsnarkPlatform = "linux-arm64";
-          rapidsnarkHash = "064w0wpmwzbs7hipflj42yrc4s724gb69gclnjs57c8xamis1aba";
+          rapidsnarkUrl = "${picBase}/rapidsnark-linux-aarch64-pic-${rapidsnarkVersion}.zip";
+          rapidsnarkHash = "15f4iqy2szqpp84v8584s5b86vw8rfz60wx7h7ylp34r0m7qii4i";
         };
       };
 
@@ -102,10 +118,13 @@
             sha256 = artifacts.circuitsHash;
           };
 
-          # logos-blockchain-circuits-prover enables static-rapidsnark. Point its
-          # build script at the same prebuilt archive it would otherwise download.
+          # logos-blockchain-circuits-prover enables static-rapidsnark, so
+          # rust-rapidsnark's build.rs links librapidsnark/libfr/libfq/libgmp
+          # statically out of RAPIDSNARK_LIB_DIR. Point it at the same prebuilt
+          # archive it would otherwise download for this target (see the
+          # rapidsnarkUrl note above); the sandbox has no network.
           rapidsnark = pkgs.fetchzip {
-            url = "https://github.com/iden3/rapidsnark/releases/download/v0.0.8/rapidsnark-${artifacts.rapidsnarkPlatform}-v0.0.8.zip";
+            url = artifacts.rapidsnarkUrl;
             sha256 = artifacts.rapidsnarkHash;
           };
 
