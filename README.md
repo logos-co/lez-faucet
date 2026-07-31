@@ -1,37 +1,60 @@
 # LEZ Faucet
 
-LEZ Faucet is a small Basecamp app for funding public accounts on the Logos
-Execution Zone public testnet. It supports two guided recipient flows:
+LEZ Faucet is a small Basecamp app that funds one public account on the Logos
+Execution Zone public testnet. Its entire user input is one public LEZ address,
+and its entire action is one button:
 
-1. Create a local faucet wallet, show its recovery mnemonic once, derive a
-   public account, and initialize that account on-chain; or
-2. Enter an existing, already-initialized public account ID without importing
-   its keys.
-3. Check the selected recipient and its current balance.
-4. Claim 150 testnet LEZ, once or repeatedly until a target is reached.
+```text
+Public LEZ address
+[ Request 150 LEZ ]
+```
 
-The project is intentionally not a general wallet. Existing-account funding is
-address-only: the faucet neither imports the recipient's keys nor proves or
-takes ownership of that account. Transfers, private accounts, key import,
-multiple-account management, and mainnet are outside the v0.2.0 scope.
+One press funds one eligible account by exactly 150 testnet LEZ.
 
-## Security: testnet only
+## It is a faucet client, not a wallet
 
-The pinned LEZ v0.2.0 wallet does **not encrypt its persistent storage**.
-Upstream currently ignores the password passed to wallet creation/restoration
-and serializes account key material as JSON. The password prompt must not be
-interpreted as protection for the wallet file.
+The app owns no wallet and holds no key material. It never asks for — and has
+no way to accept — a password, recovery phrase, private key, viewing key or
+signing key, and it writes no files.
 
-- Use this app only with public-testnet funds that have no monetary value.
-- Keep the storage file private and do not sync it through shared/cloud folders.
-- Do not reuse a valuable password or mnemonic from another wallet.
-- Anyone who can read the storage file may be able to control its accounts.
+That is a property of the protocol, not a feature we chose to withhold. A
+Piñata claim names both the pool and the recipient as unsigned public
+participants, so the transaction carries no signatures and no nonces. There is
+nothing to sign with, and any key material in this process would be material it
+did not need.
 
-The recovery mnemonic is returned only during wallet creation. The UI must show
-it once, require the user to acknowledge that it has been saved, then clear it
-from application state. It must never be logged or persisted by this project.
-See [Testnet and wallet safety](docs/testnet.md) for the upstream evidence and
-operational details.
+Consequences worth stating plainly:
+
+- The recipient does not authorize the claim and is never asked to.
+- The app cannot initialize an account on the owner's behalf. If an address is
+  not yet initialized, the app shows the command for its **owner** to run, and
+  needs no secret from them to do so.
+- Nothing survives a restart, because nothing is stored. If the app is quit
+  during a claim, it cannot reconcile that claim on the next launch; the
+  balance must be checked independently.
+
+### What "success" means here
+
+A receipt is shown only when the app has observed **its own** transaction
+included on chain **and** the recipient's balance up by exactly 150. Having
+submitted a transaction is never reported as success.
+
+Where that cannot be proven within the deadline, the app says the outcome is
+unknown, shows the address, the pre-claim balance and the transaction hash, and
+offers no retry — because retrying an unresolved claim is how one press becomes
+two credits.
+
+## The pool is finite and shared
+
+The Piñata pool started at 1,500,000 testnet LEZ and pays 150 per claim. It is
+**permissionless and repeatedly claimable, not unlimited**: every claim is a
+proof-of-work race against every other claimant for one global challenge, and
+the pool stops paying when it can no longer subtract 150.
+
+The deployed program enforces no cooldown, no per-address quota and no rate
+limit. This app's internal bounds are there to keep it well behaved on your
+machine and on a single shared sequencer — they are **not** abuse prevention,
+and nothing client-side could be.
 
 ## Version lock
 
@@ -52,33 +75,61 @@ transition.
 ## Project layout
 
 ```text
-lez-faucet-ffi/  Rust wallet orchestration and C ABI
+lez-faucet-ffi/  Stateless Rust faucet client and C ABI
 faucet-module/   Universal C++ Basecamp core module (`lez_faucet`)
 faucet-ui/       QML view module (`lez_faucet_ui`)
 ```
 
 The Rust layer owns the full transaction lifecycle. Each pinata claim fetches
 the current challenge, solves it, submits at most one transaction, and then
-reconciles the transaction, challenge, and account balance before another claim
-starts. Normal success proves both inclusion and an exact 150 LEZ balance
-increase. If the submission response is lost and no transaction hash is
-available, the same exact `+150` balance change together with challenge rotation
-can prove success; that receipt has a null `tx_hash`. If neither success nor a
-safe retry can be proven, the operation returns an explicit unknown outcome and
-does not resubmit. Claims cannot be precomputed or submitted concurrently
-because every successful claim rotates the challenge.
+reconciles its own transaction against the recipient's balance before any
+receipt is produced.
 
-For an existing recipient, the app first opens its local faucet wallet solely
-as the LEZ `WalletCore` client context. That local wallet does not need to own
-the recipient and does not sign on its behalf. The recipient must already be a
-public, initialized account owned by the authenticated-transfer program. Before
-enabling a claim, the app fetches and displays that account's balance and
-requires the user to confirm the checked account ID explicitly.
+The transaction hash is computed **locally, before submission** — it is a pure
+function of the transaction bytes, and the sequencer returns that same value.
+So a lost submission response costs nothing: the app can still ask whether its
+own transaction landed. There is no success case with a missing hash.
+
+A claim that loses the proof-of-work race is **not** included. The sequencer
+accepts it, but when it comes to build a block the stale solution fails
+execution and the transaction is discarded rather than sealed in. So our
+transaction appearing on chain is itself proof that it paid out, and a losing
+claim simply never appears.
+
+A second attempt is therefore made only once the app can see that its own
+transaction is absent, the balance has not moved, and another claimant has
+taken the challenge it solved for. The balance check is what makes this safe:
+the sequencer applies state before the transaction becomes findable by hash, so
+had our claim credited, the balance would already show it.
+
+The recipient must already be a public, initialized account owned by the
+authenticated-transfer program. That is this app's policy, not a rule the
+deployed program enforces — the Piñata guest does not check the recipient's
+owner at all.
+
+For an account newly created by LEZ Wallet or the wallet CLI, initialize it from
+the wallet that owns its signing key. Run the command in that owning wallet's
+context, setting `LEE_WALLET_HOME_DIR` first when it is not the CLI default:
+
+```sh
+wallet auth-transfer init --account-id Public/<account-id>
+```
+
+The app distinguishes an invalid ID, a valid-but-uninitialized account, and an
+account owned by another program. For an uninitialized account it displays this
+exact command with a **Copy command** action. The recipient's keys stay in the
+owning wallet and are never needed by the faucet.
 
 ## Development
 
-Prerequisites are Nix with flakes, Rust, and logos-scaffold 0.1.1. Apple Silicon
-macOS (`darwin-arm64`) is the only release target currently supported.
+Prerequisites are Nix with flakes, Rust, and the logos-scaffold CLI at 0.1.1
+(`lgs --version` prints `logos-scaffold 0.1.1`). Do not read the `version =
+"0.2.0"` at the top of `scaffold.toml` as a tool version: that field is the
+`scaffold.toml` schema version, and CLI 0.1.1 is what reads schema 0.2.0. The
+schema number is the one the machine checks, and it is already correct in the
+file; nothing in this repository pins the CLI, so `lgs --version` is the only
+way to know which one you have. Apple Silicon macOS (`darwin-arm64`) is the only
+release target currently supported.
 
 ```sh
 ./scripts/scaffold-setup.sh
@@ -92,8 +143,8 @@ lgs basecamp build --variant lgx --module lez_faucet_ui
 
 The filtered builds are deliberately sequential because Scaffold recreates its
 portable-artifact directory for each run. `lgs basecamp build` is the intended
-aggregate check, but logos-scaffold 0.1.1 can still fail on same-repository
-module paths during pure Nix evaluation; treat the filtered builds and direct
+aggregate check, but the 0.1.1 CLI can still fail on same-repository module
+paths during pure Nix evaluation; treat the filtered builds and direct
 `nix build ...#lgx-portable` commands as the reliable fallback while that
 upstream issue remains.
 
@@ -101,32 +152,26 @@ Scaffold localnet uses the fixed port `3040`. Run at most one localnet at a time
 across Conductor workspaces or other checkouts of this repository to avoid a
 port collision.
 
-The first opt-in public-testnet integration test creates and initializes a fresh
-account, then consumes one 150 LEZ claim:
+Read-only tests against the public testnet are safe to run at any time:
 
 ```sh
-LEZ_FAUCET_LIVE_TEST=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
+cargo test -p lez-faucet-ffi --test live_public_testnet -- --ignored --nocapture
+```
+
+There is exactly one write test. It spends 150 LEZ from a finite shared pool,
+so it runs only when a destination is named explicitly, and skips otherwise:
+
+```sh
+LEZ_FAUCET_LIVE_RECIPIENT=Public/<account-id> \
   cargo test -p lez-faucet-ffi --test live_public_testnet \
-  create_initialize_and_claim_once_on_public_testnet \
+  one_authorized_claim_credits_exactly_the_prize \
   -- --ignored --exact --nocapture
 ```
 
-It must report the initialization transaction ID, the claim transaction ID when
-available (otherwise an explicit unknown-hash marker), and balances, but never
-the mnemonic, password, or key material.
-
-The separate external-recipient proof creates two isolated wallets and proves
-that wallet A can fund wallet B's initialized public account without importing
-wallet B's key:
-
-```sh
-LEZ_FAUCET_RUN_LIVE=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
-  cargo test --release -p lez-faucet-ffi --test live_public_testnet \
-  client_wallet_funds_distinct_external_public_account_on_public_testnet \
-  -- --ignored --exact --nocapture
-```
-
-Both tests mutate the public testnet. Run only one at a time.
+It reads the pool and the recipient before and after, requires an exact `+150`,
+and then replays the same request key to prove that a repeat does not produce a
+second claim. The destination must already be initialized: the faucet will not
+initialize it, and needs no secret from its owner.
 
 ### Verify a public balance from the terminal
 
@@ -160,26 +205,51 @@ LEE_WALLET_HOME_DIR=/path/to/wallet \
 
 The CLI wallet is only the network-client context for this query and need not
 own the account being checked. Its `wallet_config.json` must point at the same
-sequencer. LEZ v0.2.0 uses `LEE_WALLET_HOME_DIR`; the older
-`NSSA_WALLET_HOME_DIR` name is not read by this pinned wallet.
+sequencer. Upstream LEZ v0.2.0 — the pinned protocol revision, not this app's
+version — uses `LEE_WALLET_HOME_DIR`; the older `NSSA_WALLET_HOME_DIR` name is
+not read by this pinned wallet.
 
 ## Install and release
 
+This tree builds **LEZ Faucet 0.3.0**: `lez_faucet` 0.3.0 and `lez_faucet_ui`
+0.3.0, per each module's `metadata.json`. Three unrelated version numbers appear
+around this app, so name the subject every time:
+
+| Subject | Version |
+| --- | --- |
+| LEZ Faucet (this repository, both packages) | 0.3.0 |
+| Logos Basecamp (the host app it installs into) | 0.2.1 |
+| Upstream LEZ (the pinned protocol revision) | `v0.2.0` |
+
+0.3.0 is a breaking release, not a patch. The core module's C++ ABI changed, the
+UI's Qt Remote Objects interface changed, and the entire wallet and key-material
+flow was removed. Under semver a 0.x breaking change bumps the minor, which is
+why this is 0.3.0 and not 0.2.1. `CHANGELOG.md` records what moved.
+
 For a new installation, install `lez_faucet_ui`; Basecamp should resolve its
 `lez_faucet` core dependency from the same catalog. When upgrading an existing
-v0.1.0 installation, upgrade or install `lez_faucet` 0.2.0 first, then
-`lez_faucet_ui` 0.2.0. The UI dependency is currently unversioned, so installing
-the new UI alone may leave an already-installed 0.1.0 core in place. The rolling
-catalog retains v0.1.0 for rollback. See
-[Community installation](docs/community-install.md).
+0.1.0 or 0.2.0 installation, upgrade or install `lez_faucet` 0.3.0 first, then
+`lez_faucet_ui` 0.3.0. The UI dependency is currently unversioned, so installing
+the new UI alone may leave an older core in place — and against 0.3.0 that is
+not a degraded app but a broken one, because the 0.2.x core does not implement
+the slots the 0.3.0 UI calls. The rolling catalog retains v0.1.0 and v0.2.0 for
+rollback. See [Community installation](docs/community-install.md).
 
-Release workflows are present for both modules, but the shared Nix release
-pipeline is currently affected by
-[`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159):
-the pinned cargo-vendor fetch receives HTTP 403 responses from crates.io. Until
-that upstream fix lands, produce the release artifacts locally and publish the
-`.lgx` plus generated `sidecar.json` as described in [Releasing](docs/releasing.md).
-The catalog index reads the published `.lgx` directly. The sidecar remains the
+Release workflows are present for both modules. The crates.io HTTP 403 that
+blocked every Nix build of the core module is fixed in this tree:
+`faucet-module/flake.nix` patches nixpkgs' cargo-vendor fetcher to send a
+descriptive User-Agent and pins the regenerated `cargoHash`, and
+`nix build ./faucet-module#lez-faucet-ffi` succeeds with that patch. The
+upstream issue
+[`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159)
+is still open; this repository carries its own workaround rather than waiting on
+it.
+
+That workaround has not been exercised by a GitHub Actions run, so treat a
+release build as unproven until both the `.lgx` and `sidecar.json` assets exist
+on the release. Producing the artifacts locally and publishing them by hand, as
+described in [Releasing](docs/releasing.md), is still the documented path. The
+catalog index reads the published `.lgx` directly. The sidecar remains the
 release's artifact metadata and is required by the release workflow's
 already-published check.
 

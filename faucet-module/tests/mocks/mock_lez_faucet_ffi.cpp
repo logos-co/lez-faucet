@@ -13,39 +13,99 @@ extern "C" {
 #include <string>
 #include <thread>
 
-struct FaucetHandle {
+struct LezFaucetClient {
     int marker;
 };
 
 namespace {
 
-FaucetHandle g_handle{42};
-std::atomic<uint64_t> g_balance{0};
-std::atomic<int> g_claimDelayMs{0};
-std::atomic<int> g_fingerprintDelayMs{0};
-std::atomic<bool> g_cancelStopsClaim{false};
-std::atomic<bool> g_claimWaitsForCancel{false};
-std::atomic<bool> g_claimWaitsForReconciliationRelease{false};
-std::atomic<bool> g_claimOutcomeUnknown{false};
-std::atomic<bool> g_cancelled{false};
-std::atomic<bool> g_claimActive{false};
-std::atomic<bool> g_destroyWhileClaimActive{false};
-std::atomic<bool> g_reconciliationReleased{false};
-std::atomic<int> g_claimCalls{0};
-std::atomic<int> g_stringFreeCalls{0};
+LezFaucetClient g_client{42};
+
+std::mutex g_mutex;
+std::condition_variable g_condition;
+
+std::atomic<bool> g_clientNewFails{false};
+std::atomic<int> g_infoDelayMs{0};
+std::atomic<int> g_inspectDelayMs{0};
+std::atomic<int> g_dropDelayMs{0};
+std::atomic<bool> g_dropWaitsForCancel{false};
+std::atomic<bool> g_dropHonoursCancel{false};
+std::atomic<bool> g_dropWaitsForRelease{false};
+std::atomic<bool> g_dropReleased{false};
+std::atomic<bool> g_dropStarted{false};
+std::atomic<bool> g_phaseBlocks{false};
+std::atomic<bool> g_phaseReleased{false};
+std::atomic<bool> g_phaseStarted{false};
+std::atomic<int> g_activeCalls{0};
+std::atomic<bool> g_destroyWhileCallActive{false};
+
+std::atomic<int> g_clientNewCalls{0};
 std::atomic<int> g_destroyCalls{0};
-std::atomic<int> g_rustClaimUntilCalls{0};
+std::atomic<int> g_stringAllocations{0};
+std::atomic<int> g_stringFreeCalls{0};
+std::atomic<int> g_infoCalls{0};
+std::atomic<int> g_inspectCalls{0};
+std::atomic<int> g_dropCalls{0};
 std::atomic<int> g_cancelCalls{0};
-std::string g_lastBalanceAccountId;
-std::string g_lastClaimAccountId;
-std::mutex g_eventMutex;
-std::condition_variable g_eventCondition;
+std::atomic<int> g_phaseCalls{0};
+std::atomic<uint64_t> g_lastDropToken{0};
+std::atomic<uint64_t> g_lastCancelToken{0};
+std::atomic<uint64_t> g_lastPhaseToken{0};
+std::atomic<uint64_t> g_cancelledToken{0};
+
+// Guarded by g_mutex.
+std::string g_lastAddress;
+std::string g_lastRequestKey;
+std::string g_lastSequencerUrl;
+std::string g_infoResponse;
+std::string g_inspectResponse;
+std::string g_dropResponse;
+std::string g_phaseResponse;
+
+constexpr const char* kDefaultInfoResponse =
+    "{\"ok\":true,\"result\":{\"network\":\"lez-public-testnet\","
+    "\"sequencer_url\":\"https://testnet.lez.logos.co/\","
+    "\"pinata_account\":{\"account_id\":\"EfQh\",\"address\":\"Public/EfQh\"},"
+    "\"prize_amount\":\"150\",\"pool_balance\":\"1500000\","
+    "\"claims_remaining\":\"10000\",\"difficulty_bytes\":3,"
+    "\"effective_difficulty_bits\":24,\"can_claim\":true,"
+    "\"program_fingerprint\":{\"authenticated_transfer\":\"aa\",\"pinata\":\"bb\"}}}";
+
+constexpr const char* kDefaultInspectResponse =
+    "{\"ok\":true,\"result\":{\"recipient\":{\"account_id\":\"CbgR\",\"address\":\"Public/CbgR\"},"
+    "\"eligibility\":\"eligible\",\"balance\":\"9007199254740993\","
+    "\"program_owner\":\"aa\"}}";
+
+constexpr const char* kDefaultPhaseResponse = "{\"ok\":true,\"result\":{\"phase\":null}}";
+
+constexpr const char* kDefaultDropResponse =
+    "{\"ok\":true,\"result\":{\"request_key\":\"3f2504e0-4f89-41d3-9a0c-0305e82c3301\","
+    "\"recipient\":{\"account_id\":\"CbgR\",\"address\":\"Public/CbgR\"},"
+    "\"amount\":\"150\",\"balance_before\":\"9007199254740993\","
+    "\"balance_after\":\"9007199254741143\",\"tx_hash\":\"0f0f\","
+    "\"stale_challenge_retries\":0}}";
 
 char* copyString(const std::string& value)
 {
+    ++g_stringAllocations;
     auto* copy = static_cast<char*>(std::malloc(value.size() + 1));
     std::memcpy(copy, value.c_str(), value.size() + 1);
     return copy;
+}
+
+/// Scope guard that records any handle destruction racing a live FFI call.
+class ActiveCall {
+public:
+    ActiveCall() { ++g_activeCalls; }
+    ~ActiveCall() { --g_activeCalls; }
+    ActiveCall(const ActiveCall&) = delete;
+    ActiveCall& operator=(const ActiveCall&) = delete;
+};
+
+std::string responseOr(const std::string& configured, const char* fallback)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return configured.empty() ? std::string(fallback) : configured;
 }
 
 } // namespace
@@ -54,97 +114,175 @@ namespace MockLezFaucetFfi {
 
 void reset()
 {
-    g_balance = 0;
-    g_claimDelayMs = 0;
-    g_fingerprintDelayMs = 0;
-    g_cancelStopsClaim = false;
-    g_claimWaitsForCancel = false;
-    g_claimWaitsForReconciliationRelease = false;
-    g_claimOutcomeUnknown = false;
-    g_cancelled = false;
-    g_claimActive = false;
-    g_destroyWhileClaimActive = false;
-    g_reconciliationReleased = false;
-    g_claimCalls = 0;
-    g_stringFreeCalls = 0;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_clientNewFails = false;
+    g_infoDelayMs = 0;
+    g_inspectDelayMs = 0;
+    g_dropDelayMs = 0;
+    g_dropWaitsForCancel = false;
+    g_dropHonoursCancel = false;
+    g_dropWaitsForRelease = false;
+    g_dropReleased = false;
+    g_dropStarted = false;
+    g_phaseBlocks = false;
+    g_phaseReleased = false;
+    g_phaseStarted = false;
+    g_activeCalls = 0;
+    g_destroyWhileCallActive = false;
+    g_clientNewCalls = 0;
     g_destroyCalls = 0;
-    g_rustClaimUntilCalls = 0;
+    g_stringAllocations = 0;
+    g_stringFreeCalls = 0;
+    g_infoCalls = 0;
+    g_inspectCalls = 0;
+    g_dropCalls = 0;
     g_cancelCalls = 0;
-    g_lastBalanceAccountId.clear();
-    g_lastClaimAccountId.clear();
+    g_phaseCalls = 0;
+    g_lastDropToken = 0;
+    g_lastCancelToken = 0;
+    g_lastPhaseToken = 0;
+    g_cancelledToken = 0;
+    g_lastAddress.clear();
+    g_lastRequestKey.clear();
+    g_lastSequencerUrl.clear();
+    g_infoResponse.clear();
+    g_inspectResponse.clear();
+    g_dropResponse.clear();
+    g_phaseResponse.clear();
 }
 
-void setBalance(uint64_t value) { g_balance = value; }
-uint64_t balance() { return g_balance.load(); }
-void setClaimDelayMs(int value) { g_claimDelayMs = value; }
-void setFingerprintDelayMs(int value) { g_fingerprintDelayMs = value; }
-void setCancelStopsClaim(bool value) { g_cancelStopsClaim = value; }
-void setClaimWaitsForCancel(bool value) { g_claimWaitsForCancel = value; }
-void setClaimWaitsForReconciliationRelease(bool value)
+void setClientNewFails(bool value) { g_clientNewFails = value; }
+void setInfoDelayMs(int value) { g_infoDelayMs = value; }
+void setInspectDelayMs(int value) { g_inspectDelayMs = value; }
+void setDropDelayMs(int value) { g_dropDelayMs = value; }
+
+void setInfoResponse(const std::string& json)
 {
-    g_claimWaitsForReconciliationRelease = value;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_infoResponse = json;
 }
-void setClaimOutcomeUnknown(bool value) { g_claimOutcomeUnknown = value; }
-bool waitForClaimStart(int timeoutMs)
+
+void setInspectResponse(const std::string& json)
 {
-    std::unique_lock<std::mutex> lock(g_eventMutex);
-    return g_eventCondition.wait_for(lock, std::chrono::milliseconds(timeoutMs), [] {
-        return g_claimActive.load();
-    });
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_inspectResponse = json;
 }
+
+void setDropResponse(const std::string& json)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_dropResponse = json;
+}
+
+void setDropWaitsForCancel(bool value) { g_dropWaitsForCancel = value; }
+void setDropHonoursCancel(bool value) { g_dropHonoursCancel = value; }
+void setDropWaitsForRelease(bool value) { g_dropWaitsForRelease = value; }
+
+void setPhaseResponse(const std::string& json)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_phaseResponse = json;
+}
+
+void setPhaseBlocks(bool value) { g_phaseBlocks = value; }
+
+void releasePhase()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_phaseReleased = true;
+    }
+    g_condition.notify_all();
+}
+
+void releaseDrop()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_dropReleased = true;
+    }
+    g_condition.notify_all();
+}
+
+bool waitForDropStart(int timeoutMs)
+{
+    std::unique_lock<std::mutex> lock(g_mutex);
+    return g_condition.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+        [] { return g_dropStarted.load(); });
+}
+
 bool waitForCancelCall(int timeoutMs)
 {
-    std::unique_lock<std::mutex> lock(g_eventMutex);
-    return g_eventCondition.wait_for(lock, std::chrono::milliseconds(timeoutMs), [] {
-        return g_cancelCalls.load() > 0;
-    });
+    std::unique_lock<std::mutex> lock(g_mutex);
+    return g_condition.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+        [] { return g_cancelCalls.load() > 0; });
 }
-void releaseClaimReconciliation()
+
+bool waitForPhaseStart(int timeoutMs)
 {
-    g_reconciliationReleased = true;
-    g_eventCondition.notify_all();
+    std::unique_lock<std::mutex> lock(g_mutex);
+    return g_condition.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+        [] { return g_phaseStarted.load(); });
 }
-int claimCalls() { return g_claimCalls.load(); }
-int stringFreeCalls() { return g_stringFreeCalls.load(); }
+
+int clientNewCalls() { return g_clientNewCalls.load(); }
 int destroyCalls() { return g_destroyCalls.load(); }
-int rustClaimUntilCalls() { return g_rustClaimUntilCalls.load(); }
+int stringAllocations() { return g_stringAllocations.load(); }
+int stringFreeCalls() { return g_stringFreeCalls.load(); }
+int infoCalls() { return g_infoCalls.load(); }
+int inspectCalls() { return g_inspectCalls.load(); }
+int dropCalls() { return g_dropCalls.load(); }
 int cancelCalls() { return g_cancelCalls.load(); }
-bool destroyWhileClaimActive() { return g_destroyWhileClaimActive.load(); }
-std::string lastBalanceAccountId()
+int phaseCalls() { return g_phaseCalls.load(); }
+uint64_t lastDropToken() { return g_lastDropToken.load(); }
+uint64_t lastCancelToken() { return g_lastCancelToken.load(); }
+uint64_t lastPhaseToken() { return g_lastPhaseToken.load(); }
+bool destroyWhileCallActive() { return g_destroyWhileCallActive.load(); }
+
+std::string lastAddress()
 {
-    std::lock_guard<std::mutex> lock(g_eventMutex);
-    return g_lastBalanceAccountId;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_lastAddress;
 }
-std::string lastClaimAccountId()
+
+std::string lastRequestKey()
 {
-    std::lock_guard<std::mutex> lock(g_eventMutex);
-    return g_lastClaimAccountId;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_lastRequestKey;
+}
+
+std::string lastSequencerUrl()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_lastSequencerUrl;
 }
 
 } // namespace MockLezFaucetFfi
 
 extern "C" {
 
-FfiCreateOutput lez_faucet_create(const char*, const char*, const char*, const char*)
+LezFaucetClientOutput lez_faucet_client_new(const char* sequencer_url)
 {
-    return FfiCreateOutput{
-        &g_handle,
-        copyString("{\"ok\":true,\"mnemonic\":\"alpha beta gamma\",\"security_warning\":\"testnet only\"}")
-    };
+    ++g_clientNewCalls;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_lastSequencerUrl = sequencer_url == nullptr ? "" : sequencer_url;
+    }
+    if (g_clientNewFails.load()) {
+        return LezFaucetClientOutput{
+            nullptr,
+            copyString("{\"ok\":false,\"error\":{\"code\":\"invalid_sequencer_url\","
+                       "\"message\":\"That sequencer is not the LEZ public testnet this app is "
+                       "built for.\",\"retryable\":false}}")
+        };
+    }
+    return LezFaucetClientOutput{&g_client, copyString("{\"ok\":true}")};
 }
 
-FfiCreateOutput lez_faucet_open(const char*, const char*, const char*)
+void lez_faucet_client_destroy(LezFaucetClient*)
 {
-    return FfiCreateOutput{
-        &g_handle,
-        copyString("{\"ok\":true,\"result\":{\"opened\":true}}")
-    };
-}
-
-void lez_faucet_destroy(FaucetHandle*)
-{
-    if (g_claimActive.load()) {
-        g_destroyWhileClaimActive = true;
+    if (g_activeCalls.load() > 0) {
+        g_destroyWhileCallActive = true;
     }
     ++g_destroyCalls;
 }
@@ -155,81 +293,89 @@ void lez_faucet_string_free(char* value)
     std::free(value);
 }
 
-void lez_faucet_cancel(FaucetHandle*)
-{
-    ++g_cancelCalls;
-    g_cancelled = true;
-    g_eventCondition.notify_all();
-}
-
-char* lez_faucet_verify_fingerprint(FaucetHandle*)
-{
-    std::this_thread::sleep_for(std::chrono::milliseconds(g_fingerprintDelayMs.load()));
-    return copyString("{\"ok\":true,\"result\":{\"pinata\":\"66f6\"}}");
-}
-
-char* lez_faucet_create_and_initialize_account(FaucetHandle*)
-{
-    return copyString("{\"ok\":true,\"result\":{\"account_id\":\"MockAccount\",\"balance\":0}}");
-}
-
-char* lez_faucet_get_balance(FaucetHandle*, const char* accountId)
+void lez_faucet_cancel(LezFaucetClient*, uint64_t operation_token)
 {
     {
-        std::lock_guard<std::mutex> lock(g_eventMutex);
-        g_lastBalanceAccountId = accountId == nullptr ? "" : accountId;
+        // Published under the same mutex the waiters use, so a notify can never
+        // slip between a waiter's predicate check and its wait.
+        std::lock_guard<std::mutex> lock(g_mutex);
+        ++g_cancelCalls;
+        g_lastCancelToken = operation_token;
+        g_cancelledToken = operation_token;
     }
-    return copyString("{\"ok\":true,\"result\":" + std::to_string(g_balance.load()) + "}");
+    g_condition.notify_all();
 }
 
-char* lez_faucet_claim_once(FaucetHandle*, const char* accountId)
+char* lez_faucet_current_phase(LezFaucetClient*, uint64_t operation_token)
 {
+    const ActiveCall active;
+    ++g_phaseCalls;
+    g_lastPhaseToken = operation_token;
     {
-        std::lock_guard<std::mutex> lock(g_eventMutex);
-        g_lastClaimAccountId = accountId == nullptr ? "" : accountId;
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_phaseStarted = true;
     }
-    g_claimActive = true;
-    ++g_claimCalls;
-    g_eventCondition.notify_all();
-    if (g_claimWaitsForCancel.load()) {
-        std::unique_lock<std::mutex> lock(g_eventMutex);
-        g_eventCondition.wait_for(lock, std::chrono::seconds(2), [] {
-            return g_cancelled.load();
-        });
+    g_condition.notify_all();
+    if (g_phaseBlocks.load()) {
+        std::unique_lock<std::mutex> lock(g_mutex);
+        g_condition.wait_for(lock, std::chrono::seconds(5), [] { return g_phaseReleased.load(); });
     }
-    if (g_claimWaitsForReconciliationRelease.load()) {
-        std::unique_lock<std::mutex> lock(g_eventMutex);
-        g_eventCondition.wait_for(lock, std::chrono::seconds(2), [] {
-            return g_reconciliationReleased.load();
-        });
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(g_claimDelayMs.load()));
-    if (g_cancelStopsClaim.load() && g_cancelled.exchange(false)) {
-        g_claimActive = false;
-        g_eventCondition.notify_all();
-        return copyString("{\"ok\":false,\"error\":\"Piñata solve cancelled\"}");
-    }
-    if (g_claimOutcomeUnknown.load()) {
-        g_claimActive = false;
-        g_eventCondition.notify_all();
-        return copyString("{\"ok\":false,\"outcome\":\"unknown\",\"tx_hash\":null,"
-            "\"error\":\"timed out reconciling claim outcome\"}");
-    }
-    const uint64_t before = g_balance.fetch_add(150);
-    const uint64_t after = before + 150;
-    g_claimActive = false;
-    g_eventCondition.notify_all();
-    return copyString("{\"ok\":true,\"result\":{\"tx_hash\":\"mock-tx-" + std::to_string(after)
-        + "\",\"balance_before\":" + std::to_string(before)
-        + ",\"balance_after\":" + std::to_string(after)
-        + ",\"stale_challenge_retries\":0}}");
+    return copyString(responseOr(g_phaseResponse, kDefaultPhaseResponse));
 }
 
-char* lez_faucet_claim_until_target(FaucetHandle*, const char*, const char*, size_t,
-                                    FfiProgressCallback, void*)
+char* lez_faucet_get_info(LezFaucetClient*)
 {
-    ++g_rustClaimUntilCalls;
-    return copyString("{\"ok\":false,\"error\":\"native module must not call Rust claim-until\"}");
+    const ActiveCall active;
+    ++g_infoCalls;
+    std::this_thread::sleep_for(std::chrono::milliseconds(g_infoDelayMs.load()));
+    return copyString(responseOr(g_infoResponse, kDefaultInfoResponse));
+}
+
+char* lez_faucet_inspect_recipient(LezFaucetClient*, const char* address)
+{
+    const ActiveCall active;
+    ++g_inspectCalls;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_lastAddress = address == nullptr ? "" : address;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(g_inspectDelayMs.load()));
+    return copyString(responseOr(g_inspectResponse, kDefaultInspectResponse));
+}
+
+char* lez_faucet_request_drop(LezFaucetClient*, const char* address, const char* request_key,
+                              uint64_t operation_token)
+{
+    const ActiveCall active;
+    ++g_dropCalls;
+    g_lastDropToken = operation_token;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_lastAddress = address == nullptr ? "" : address;
+        g_lastRequestKey = request_key == nullptr ? "" : request_key;
+        g_dropStarted = true;
+    }
+    g_condition.notify_all();
+
+    if (g_dropWaitsForCancel.load()) {
+        std::unique_lock<std::mutex> lock(g_mutex);
+        g_condition.wait_for(lock, std::chrono::seconds(2),
+            [operation_token] { return g_cancelledToken.load() == operation_token; });
+    }
+    if (g_dropWaitsForRelease.load()) {
+        std::unique_lock<std::mutex> lock(g_mutex);
+        g_condition.wait_for(lock, std::chrono::seconds(5), [] { return g_dropReleased.load(); });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(g_dropDelayMs.load()));
+
+    // Before submission a cancel is honourable, and the real client says so
+    // with a structured code.
+    if (g_dropHonoursCancel.load() && g_cancelledToken.load() == operation_token) {
+        return copyString("{\"ok\":false,\"error\":{\"code\":\"cancelled\",\"message\":\"The "
+                          "request was cancelled before anything was submitted.\","
+                          "\"retryable\":false,\"phase\":\"solving\"}}");
+    }
+    return copyString(responseOr(g_dropResponse, kDefaultDropResponse));
 }
 
 } // extern "C"

@@ -3,10 +3,17 @@
 Release the core package before the UI package. The version source of truth is
 each module's `metadata.json`.
 
-Both packages must be released at 0.2.0. Existing v0.1.0 users must upgrade or
-install `lez_faucet` 0.2.0 before `lez_faucet_ui` 0.2.0 because the UI's core
-dependency is currently unversioned; upgrading the UI alone can leave the 0.1.0
-core installed. New installations should resolve the newest core automatically.
+Both packages must be released at 0.3.0. LEZ Faucet 0.3.0 is a breaking release
+— the core module's C++ ABI changed, the UI's Qt Remote Objects interface
+changed, and the wallet and key-material flow was removed — so it is a minor
+bump under semver rather than a patch. Existing v0.1.0 and v0.2.0 users must
+upgrade or install `lez_faucet` 0.3.0 before `lez_faucet_ui` 0.3.0, because the
+UI's core dependency is currently unversioned and upgrading the UI alone can
+leave the older core installed. That combination is broken, not merely stale:
+the 0.2.x
+core does not implement the slots the 0.3.0 UI calls, so the app fails on the
+first action rather than presenting an older screen. New installations should
+resolve the newest core automatically.
 
 ## Standard workflow
 
@@ -38,9 +45,9 @@ gh workflow run release-lez-faucet-ui.yml
 gh run watch
 ```
 
-Then verify that the rolling `index` release contains both packages at 0.2.0.
-The rebuild scans every non-draft module release, so the v0.1.0 entries remain
-available for rollback.
+Then verify that the rolling `index` release contains both packages at 0.3.0.
+The rebuild scans every non-draft module release, so the v0.1.0 and v0.2.0
+entries remain available for rollback.
 
 ## Current CI blocker
 
@@ -54,11 +61,18 @@ Status code: 403
 
 The pinned `fetchCargoVendor` path uses a User-Agent that crates.io rejects.
 This is tracked in
-[`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159).
-Do not claim that a GitHub Actions release succeeded unless both the `.lgx` and
-`sidecar.json` assets actually exist. Until the upstream pin/fetcher is fixed,
-build the release artifacts locally after pre-seeding the required fixed-output
-vendor staging in the Nix store.
+[`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159),
+which is still open.
+
+This tree carries its own workaround rather than waiting on it:
+`faucet-module/flake.nix` patches nixpkgs' cargo-vendor fetcher to send a
+descriptive User-Agent and pins the regenerated `cargoHash`, and
+`nix build ./faucet-module#lez-faucet-ffi` succeeds with that patch applied.
+The workaround has not been exercised by a GitHub Actions run, so it is proven
+locally and unproven in CI. Do not claim that a GitHub Actions release
+succeeded unless both the `.lgx` and `sidecar.json` assets actually exist on
+the release. Until a dispatched run has produced both, build the release
+artifacts locally and publish them by hand as described below.
 
 ## Local artifact checks
 
@@ -73,8 +87,8 @@ Locate the `.lgx` files in the returned store paths, copy them to a temporary
 release directory, and name them from the embedded module versions, for example:
 
 ```text
-lez_faucet-0.2.0.lgx
-lez_faucet_ui-0.2.0.lgx
+lez_faucet-0.3.0.lgx
+lez_faucet_ui-0.3.0.lgx
 ```
 
 For each artifact:
@@ -115,7 +129,7 @@ the catalog index independently reads and verifies the `.lgx` asset.
 
 ```sh
 module=lez_faucet
-version=0.2.0
+version=0.3.0
 release_dir="release/core"
 artifact="${release_dir}/${module}-${version}.lgx"
 
@@ -163,16 +177,16 @@ keep the independently generated files separate.
 ## Publish the manual releases
 
 ```sh
-gh release create lez_faucet-v0.2.0 \
+gh release create lez_faucet-v0.3.0 \
   --target main \
-  --title "lez_faucet v0.2.0" \
-  release/core/lez_faucet-0.2.0.lgx \
+  --title "lez_faucet v0.3.0" \
+  release/core/lez_faucet-0.3.0.lgx \
   release/core/sidecar.json
 
-gh release create lez_faucet_ui-v0.2.0 \
+gh release create lez_faucet_ui-v0.3.0 \
   --target main \
-  --title "lez_faucet_ui v0.2.0" \
-  release/ui/lez_faucet_ui-0.2.0.lgx \
+  --title "lez_faucet_ui v0.3.0" \
+  release/ui/lez_faucet_ui-0.3.0.lgx \
   release/ui/sidecar.json
 
 gh workflow run rebuild-index.yml
@@ -189,10 +203,23 @@ curl -fsSL \
   | jq '.packages[] | {name, versions: [.versions[].manifest.version]}'
 ```
 
+Both packages must list 0.3.0, with 0.2.0 and 0.1.0 still present as the
+rollback entries.
+
 Finally, test the user journey in a fresh Basecamp profile:
 
 1. Add the raw `logos-repo.json` URL.
-2. Install `lez_faucet_ui` 0.2.0 and confirm `lez_faucet` 0.2.0 resolves with it.
-3. Create a disposable wallet and save the one-time mnemonic.
-4. Initialize a fresh account.
-5. Claim until its balance reaches at least 1,000 testnet LEZ.
+2. Install `lez_faucet_ui` 0.3.0 and confirm `lez_faucet` 0.3.0 resolves with it.
+3. Confirm the first screen has no onboarding, password, recovery phrase or
+   "create account" step.
+4. Paste an independently created, already-initialized public
+   authenticated-transfer address.
+5. Query the recipient and pool balances independently first.
+6. Press **Request 150 LEZ** exactly once.
+7. Confirm the recipient is up exactly 150 and the pool down at least 150.
+8. Confirm no wallet, config or state file was created anywhere.
+
+Test the upgrade path separately, in a profile that already has 0.2.0
+installed: upgrade `lez_faucet` to 0.3.0 first, then `lez_faucet_ui`. Upgrading
+the UI alone is the failure mode this release has to be checked against, and it
+presents as an error on the first action, not as the old screen.

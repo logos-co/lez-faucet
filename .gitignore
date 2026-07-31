@@ -12,3 +12,12 @@ target/
 faucet-module/lib/*.dylib
 faucet-module/lib/*.so
 faucet-module/lib/*.dll
+
+# CMake output from the module test harness
+faucet-module/tests/build/
+
+# Local agent tooling. .gstack/ holds terminal tokens; .context/ is a large
+# research cache. Neither belongs in a clone, and .context/ was previously
+# excluded only by .git/info/exclude, which does not travel with the repo.
+.gstack/
+.context/

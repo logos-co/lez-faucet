@@ -1,24 +1,165 @@
 #include "lez_faucet_module.h"
 
 #include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <limits>
-#include <sstream>
+#include <cstddef>
+#include <optional>
 #include <utility>
 #include <vector>
 
 namespace {
 
+/// Balances are u128 on the wire, so they are u128 here. `__int128` is a
+/// compiler extension rather than ISO C++, which `-Wpedantic` is correct to
+/// point out — hence the narrowest possible suppression, at the one
+/// declaration, instead of dropping the flag for the whole target. AppleClang
+/// accepts this silently and GCC does not, so without the pragma the module
+/// harness builds on a developer's macOS and fails on a Linux runner.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 using U128 = unsigned __int128;
-constexpr U128 kPrize = 150;
-constexpr int64_t kMaxClaimsPerJob = 100;
+#pragma GCC diagnostic pop
+
+/// Retained job records. Bounded and reapable — unlike request-key tombstones,
+/// which are a separate table and are never evicted (API_LOCK §A1.7.4).
 constexpr std::size_t kMaxRetainedJobs = 128;
 
-std::string jsonEscape(const std::string& value)
+/// Longest address accepted, after the `Public/` prefix is stripped.
+///
+/// This bound is load-bearing rather than cosmetic (API_LOCK §A1.3): the
+/// base58 decoder behind the Rust parser subtracts with overflow on 133 or
+/// more leading `1` characters, and a panic unwinding out of `extern "C"`
+/// aborts LogosBasecamp. The Rust side enforces this too; the module does not
+/// get to assume its caller is well behaved.
+constexpr std::size_t kMaxAddressLen = 64;
+
+/// `"Public/"`, the one accepted address prefix.
+constexpr const char* kPublicPrefix = "Public/";
+constexpr std::size_t kPublicPrefixLen = 7;
+
+/// A request key is a lowercase RFC 4122 UUID and nothing else.
+constexpr std::size_t kRequestKeyLen = 36;
+
+/// Longest sequencer URL we will even look at.
+constexpr std::size_t kMaxSequencerUrlLen = 2048;
+
+/// Deepest JSON nesting accepted from the FFI.
+///
+/// The parser is recursive, so an adversarial payload of a million open braces
+/// would otherwise exhaust the stack. Our own payloads nest three deep.
+constexpr int kMaxJsonDepth = 32;
+
+// ---- JSON ------------------------------------------------------------------
+//
+// A real parser, not a substring scanner. The previous implementation looked
+// for `"ok"` anywhere in the document, so an error *message* that happened to
+// contain `"ok":true` made a failed operation report success (API_LOCK
+// §A1.7.3). Every value below is located structurally.
+
+class Json {
+public:
+    enum class Kind { Null, Bool, Number, String, Array, Object };
+
+    Json() = default;
+    static Json boolean(bool value)
+    {
+        Json json;
+        json.m_kind = Kind::Bool;
+        json.m_bool = value;
+        return json;
+    }
+    /// Numbers keep their original lexeme.
+    ///
+    /// Nothing in this module does arithmetic on a JSON number, and round
+    /// tripping through `double` would silently corrupt any integer above 2^53.
+    static Json number(std::string lexeme)
+    {
+        Json json;
+        json.m_kind = Kind::Number;
+        json.m_text = std::move(lexeme);
+        return json;
+    }
+    static Json string(std::string value)
+    {
+        Json json;
+        json.m_kind = Kind::String;
+        json.m_text = std::move(value);
+        return json;
+    }
+    static Json array()
+    {
+        Json json;
+        json.m_kind = Kind::Array;
+        return json;
+    }
+    static Json object()
+    {
+        Json json;
+        json.m_kind = Kind::Object;
+        return json;
+    }
+
+    bool isNull() const { return m_kind == Kind::Null; }
+    bool isBool() const { return m_kind == Kind::Bool; }
+    bool isString() const { return m_kind == Kind::String; }
+    bool isObject() const { return m_kind == Kind::Object; }
+
+    bool boolValue() const { return m_kind == Kind::Bool && m_bool; }
+    /// The decoded text of a string, or the lexeme of a number.
+    const std::string& text() const { return m_text; }
+
+    /// Look up a member. Returns null for a non-object or a missing key, so a
+    /// caller can chain `at("error").at("code")` without checking each step.
+    const Json& at(const std::string& key) const
+    {
+        static const Json kNull;
+        if (m_kind != Kind::Object) {
+            return kNull;
+        }
+        for (const auto& member : m_members) {
+            if (member.first == key) {
+                return member.second;
+            }
+        }
+        return kNull;
+    }
+
+    /// Insert or replace a member, preserving first-insertion order so that
+    /// serialized output is deterministic and diffable.
+    void set(const std::string& key, Json value)
+    {
+        for (auto& member : m_members) {
+            if (member.first == key) {
+                member.second = std::move(value);
+                return;
+            }
+        }
+        m_members.emplace_back(key, std::move(value));
+    }
+
+    void push(Json value) { m_elements.push_back(std::move(value)); }
+
+    std::string dump() const
+    {
+        std::string out;
+        write(out);
+        return out;
+    }
+
+private:
+    friend class JsonParser;
+
+    void write(std::string& out) const;
+
+    Kind m_kind = Kind::Null;
+    bool m_bool = false;
+    std::string m_text;
+    std::vector<std::pair<std::string, Json>> m_members;
+    std::vector<Json> m_elements;
+};
+
+void encodeJsonString(const std::string& value, std::string& out)
 {
-    std::string out;
-    out.reserve(value.size() + 8);
+    out.push_back('"');
     for (const unsigned char character : value) {
         switch (character) {
         case '\\': out += "\\\\"; break;
@@ -26,6 +167,8 @@ std::string jsonEscape(const std::string& value)
         case '\n': out += "\\n"; break;
         case '\r': out += "\\r"; break;
         case '\t': out += "\\t"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
         default:
             if (character < 0x20) {
                 static constexpr char digits[] = "0123456789abcdef";
@@ -37,120 +180,378 @@ std::string jsonEscape(const std::string& value)
             }
         }
     }
-    return out;
+    out.push_back('"');
 }
 
-std::string jsonString(const std::string& value)
+void Json::write(std::string& out) const
 {
-    return "\"" + jsonEscape(value) + "\"";
-}
-
-std::string jsonValue(const std::string& document, const std::string& key)
-{
-    const std::string needle = "\"" + key + "\"";
-    std::size_t position = 0;
-    while ((position = document.find(needle, position)) != std::string::npos) {
-        std::size_t cursor = position + needle.size();
-        while (cursor < document.size() && std::isspace(static_cast<unsigned char>(document[cursor]))) {
-            ++cursor;
-        }
-        if (cursor >= document.size() || document[cursor] != ':') {
-            position += needle.size();
-            continue;
-        }
-        ++cursor;
-        while (cursor < document.size() && std::isspace(static_cast<unsigned char>(document[cursor]))) {
-            ++cursor;
-        }
-        if (cursor >= document.size()) {
-            return {};
-        }
-
-        const std::size_t start = cursor;
-        const char first = document[cursor];
-        if (first == '"') {
-            bool escaped = false;
-            for (++cursor; cursor < document.size(); ++cursor) {
-                const char current = document[cursor];
-                if (escaped) {
-                    escaped = false;
-                } else if (current == '\\') {
-                    escaped = true;
-                } else if (current == '"') {
-                    return document.substr(start, cursor - start + 1);
-                }
+    switch (m_kind) {
+    case Kind::Null:
+        out += "null";
+        break;
+    case Kind::Bool:
+        out += m_bool ? "true" : "false";
+        break;
+    case Kind::Number:
+        out += m_text;
+        break;
+    case Kind::String:
+        encodeJsonString(m_text, out);
+        break;
+    case Kind::Array: {
+        out.push_back('[');
+        bool first = true;
+        for (const Json& element : m_elements) {
+            if (!first) {
+                out.push_back(',');
             }
-            return {};
+            first = false;
+            element.write(out);
         }
-
-        if (first == '{' || first == '[') {
-            const char open = first;
-            const char close = first == '{' ? '}' : ']';
-            std::size_t depth = 0;
-            bool inString = false;
-            bool escaped = false;
-            for (; cursor < document.size(); ++cursor) {
-                const char current = document[cursor];
-                if (inString) {
-                    if (escaped) {
-                        escaped = false;
-                    } else if (current == '\\') {
-                        escaped = true;
-                    } else if (current == '"') {
-                        inString = false;
-                    }
-                } else if (current == '"') {
-                    inString = true;
-                } else if (current == open) {
-                    ++depth;
-                } else if (current == close && --depth == 0) {
-                    return document.substr(start, cursor - start + 1);
-                }
-            }
-            return {};
-        }
-
-        while (cursor < document.size() && document[cursor] != ',' && document[cursor] != '}'
-               && document[cursor] != ']' && !std::isspace(static_cast<unsigned char>(document[cursor]))) {
-            ++cursor;
-        }
-        return document.substr(start, cursor - start);
+        out.push_back(']');
+        break;
     }
-    return {};
+    case Kind::Object: {
+        out.push_back('{');
+        bool first = true;
+        for (const auto& member : m_members) {
+            if (!first) {
+                out.push_back(',');
+            }
+            first = false;
+            encodeJsonString(member.first, out);
+            out.push_back(':');
+            member.second.write(out);
+        }
+        out.push_back('}');
+        break;
+    }
+    }
 }
 
-std::string unquoteJsonString(const std::string& value)
-{
-    if (value.size() < 2 || value.front() != '"' || value.back() != '"') {
+/// A small recursive-descent parser over the JSON subset this API emits.
+///
+/// It is deliberately strict: anything it cannot prove well-formed is rejected
+/// rather than guessed at, because the alternative is deciding an operation
+/// succeeded on the strength of a coincidence in an error message.
+class JsonParser {
+public:
+    explicit JsonParser(const std::string& document)
+        : m_document(document)
+    {
+    }
+
+    std::optional<Json> parse()
+    {
+        skipWhitespace();
+        std::optional<Json> value = parseValue(0);
+        if (!value.has_value()) {
+            return std::nullopt;
+        }
+        skipWhitespace();
+        if (m_cursor != m_document.size()) {
+            return std::nullopt;
+        }
         return value;
     }
-    std::string out;
-    out.reserve(value.size() - 2);
-    bool escaped = false;
-    for (std::size_t index = 1; index + 1 < value.size(); ++index) {
-        const char current = value[index];
-        if (!escaped && current == '\\') {
-            escaped = true;
-            continue;
+
+private:
+    bool atEnd() const { return m_cursor >= m_document.size(); }
+    char peek() const { return m_document[m_cursor]; }
+
+    void skipWhitespace()
+    {
+        while (!atEnd()) {
+            const char current = peek();
+            if (current == ' ' || current == '\t' || current == '\n' || current == '\r') {
+                ++m_cursor;
+            } else {
+                break;
+            }
         }
-        if (escaped) {
-            switch (current) {
+    }
+
+    bool consumeLiteral(const char* literal)
+    {
+        const std::size_t length = std::char_traits<char>::length(literal);
+        if (m_document.compare(m_cursor, length, literal) != 0) {
+            return false;
+        }
+        m_cursor += length;
+        return true;
+    }
+
+    std::optional<Json> parseValue(int depth)
+    {
+        if (depth > kMaxJsonDepth || atEnd()) {
+            return std::nullopt;
+        }
+        switch (peek()) {
+        case '{': return parseObject(depth);
+        case '[': return parseArray(depth);
+        case '"': {
+            std::string value;
+            if (!parseString(value)) {
+                return std::nullopt;
+            }
+            return Json::string(std::move(value));
+        }
+        case 't':
+            return consumeLiteral("true") ? std::optional<Json>(Json::boolean(true)) : std::nullopt;
+        case 'f':
+            return consumeLiteral("false") ? std::optional<Json>(Json::boolean(false)) : std::nullopt;
+        case 'n':
+            return consumeLiteral("null") ? std::optional<Json>(Json()) : std::nullopt;
+        default:
+            return parseNumber();
+        }
+    }
+
+    std::optional<Json> parseObject(int depth)
+    {
+        Json object = Json::object();
+        ++m_cursor; // '{'
+        skipWhitespace();
+        if (!atEnd() && peek() == '}') {
+            ++m_cursor;
+            return object;
+        }
+        for (;;) {
+            skipWhitespace();
+            if (atEnd() || peek() != '"') {
+                return std::nullopt;
+            }
+            std::string key;
+            if (!parseString(key)) {
+                return std::nullopt;
+            }
+            skipWhitespace();
+            if (atEnd() || peek() != ':') {
+                return std::nullopt;
+            }
+            ++m_cursor;
+            skipWhitespace();
+            std::optional<Json> value = parseValue(depth + 1);
+            if (!value.has_value()) {
+                return std::nullopt;
+            }
+            object.set(key, std::move(*value));
+            skipWhitespace();
+            if (atEnd()) {
+                return std::nullopt;
+            }
+            if (peek() == ',') {
+                ++m_cursor;
+                continue;
+            }
+            if (peek() == '}') {
+                ++m_cursor;
+                return object;
+            }
+            return std::nullopt;
+        }
+    }
+
+    std::optional<Json> parseArray(int depth)
+    {
+        Json array = Json::array();
+        ++m_cursor; // '['
+        skipWhitespace();
+        if (!atEnd() && peek() == ']') {
+            ++m_cursor;
+            return array;
+        }
+        for (;;) {
+            skipWhitespace();
+            std::optional<Json> value = parseValue(depth + 1);
+            if (!value.has_value()) {
+                return std::nullopt;
+            }
+            array.push(std::move(*value));
+            skipWhitespace();
+            if (atEnd()) {
+                return std::nullopt;
+            }
+            if (peek() == ',') {
+                ++m_cursor;
+                continue;
+            }
+            if (peek() == ']') {
+                ++m_cursor;
+                return array;
+            }
+            return std::nullopt;
+        }
+    }
+
+    /// Decode one JSON string, escapes and all.
+    ///
+    /// Escapes are the whole reason a scanner cannot be trusted: `"\"ok\":true"`
+    /// inside a message is text, not structure, and only a decoder that walks
+    /// escapes can tell the two apart.
+    bool parseString(std::string& out)
+    {
+        out.clear();
+        ++m_cursor; // opening quote
+        while (!atEnd()) {
+            const unsigned char current = static_cast<unsigned char>(m_document[m_cursor]);
+            if (current == '"') {
+                ++m_cursor;
+                return true;
+            }
+            if (current < 0x20) {
+                return false; // raw control characters are not legal in a string
+            }
+            if (current != '\\') {
+                out.push_back(static_cast<char>(current));
+                ++m_cursor;
+                continue;
+            }
+            ++m_cursor;
+            if (atEnd()) {
+                return false;
+            }
+            const char escape = m_document[m_cursor++];
+            switch (escape) {
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/': out.push_back('/'); break;
+            case 'b': out.push_back('\b'); break;
+            case 'f': out.push_back('\f'); break;
             case 'n': out.push_back('\n'); break;
             case 'r': out.push_back('\r'); break;
             case 't': out.push_back('\t'); break;
-            default: out.push_back(current); break;
+            case 'u': {
+                uint32_t code = 0;
+                if (!parseHex4(code)) {
+                    return false;
+                }
+                // A high surrogate is only meaningful paired with its low half.
+                if (code >= 0xD800 && code <= 0xDBFF && m_document.compare(m_cursor, 2, "\\u") == 0) {
+                    const std::size_t mark = m_cursor;
+                    m_cursor += 2;
+                    uint32_t low = 0;
+                    if (parseHex4(low) && low >= 0xDC00 && low <= 0xDFFF) {
+                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                    } else {
+                        m_cursor = mark;
+                    }
+                }
+                appendUtf8(code, out);
+                break;
             }
-            escaped = false;
+            default:
+                return false;
+            }
+        }
+        return false;
+    }
+
+    bool parseHex4(uint32_t& out)
+    {
+        if (m_cursor + 4 > m_document.size()) {
+            return false;
+        }
+        out = 0;
+        for (int index = 0; index < 4; ++index) {
+            const char digit = m_document[m_cursor + static_cast<std::size_t>(index)];
+            uint32_t value = 0;
+            if (digit >= '0' && digit <= '9') {
+                value = static_cast<uint32_t>(digit - '0');
+            } else if (digit >= 'a' && digit <= 'f') {
+                value = static_cast<uint32_t>(digit - 'a') + 10;
+            } else if (digit >= 'A' && digit <= 'F') {
+                value = static_cast<uint32_t>(digit - 'A') + 10;
+            } else {
+                return false;
+            }
+            out = (out << 4) | value;
+        }
+        m_cursor += 4;
+        return true;
+    }
+
+    static void appendUtf8(uint32_t code, std::string& out)
+    {
+        // A lone surrogate cannot be encoded; substitute the replacement
+        // character rather than emitting invalid UTF-8 into Basecamp.
+        if (code >= 0xD800 && code <= 0xDFFF) {
+            code = 0xFFFD;
+        }
+        if (code < 0x80) {
+            out.push_back(static_cast<char>(code));
+        } else if (code < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (code >> 6)));
+            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+        } else if (code < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (code >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
         } else {
-            out.push_back(current);
+            out.push_back(static_cast<char>(0xF0 | (code >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
         }
     }
-    return out;
+
+    std::optional<Json> parseNumber()
+    {
+        const std::size_t start = m_cursor;
+        if (!atEnd() && peek() == '-') {
+            ++m_cursor;
+        }
+        const std::size_t digitsStart = m_cursor;
+        while (!atEnd() && peek() >= '0' && peek() <= '9') {
+            ++m_cursor;
+        }
+        if (m_cursor == digitsStart) {
+            return std::nullopt;
+        }
+        if (!atEnd() && peek() == '.') {
+            ++m_cursor;
+            const std::size_t fractionStart = m_cursor;
+            while (!atEnd() && peek() >= '0' && peek() <= '9') {
+                ++m_cursor;
+            }
+            if (m_cursor == fractionStart) {
+                return std::nullopt;
+            }
+        }
+        if (!atEnd() && (peek() == 'e' || peek() == 'E')) {
+            ++m_cursor;
+            if (!atEnd() && (peek() == '+' || peek() == '-')) {
+                ++m_cursor;
+            }
+            const std::size_t exponentStart = m_cursor;
+            while (!atEnd() && peek() >= '0' && peek() <= '9') {
+                ++m_cursor;
+            }
+            if (m_cursor == exponentStart) {
+                return std::nullopt;
+            }
+        }
+        return Json::number(m_document.substr(start, m_cursor - start));
+    }
+
+    const std::string& m_document;
+    std::size_t m_cursor = 0;
+};
+
+std::optional<Json> parseJson(const std::string& document)
+{
+    return JsonParser(document).parse();
 }
 
-bool parseU128(const std::string& value, U128& output)
+// ---- exact decimals --------------------------------------------------------
+
+/// Parse a canonical unsigned decimal string into a `u128`.
+///
+/// Balances cross this boundary as strings precisely so that values above
+/// JavaScript's safe-integer range stay exact; parsing one into a `double`
+/// anywhere in the chain would quietly round a user's balance.
+bool parseU128(const std::string& raw, U128& output)
 {
-    const std::string raw = unquoteJsonString(value);
     if (raw.empty()) {
         return false;
     }
@@ -177,110 +578,239 @@ std::string u128String(U128 value)
     }
     std::string out;
     while (value != 0) {
-        out.push_back(static_cast<char>('0' + value % 10));
+        out.push_back(static_cast<char>('0' + static_cast<unsigned>(value % 10)));
         value /= 10;
     }
     std::reverse(out.begin(), out.end());
     return out;
 }
 
-std::string errorObject(const std::string& code, const std::string& message)
+/// Re-render one decimal field in canonical form, or report it malformed.
+///
+/// Rust already emits canonical decimals; this re-derives them rather than
+/// trusting the claim, so a leading zero or a stray sign fails loudly at the
+/// boundary instead of reaching QML as a plausible-looking balance.
+bool normalizeDecimalField(Json& object, const std::string& key, bool required)
 {
-    return "{\"code\":" + jsonString(code) + ",\"message\":" + jsonString(message) + "}";
+    const Json& field = object.at(key);
+    if (field.isNull()) {
+        return !required;
+    }
+    if (!field.isString()) {
+        return false;
+    }
+    U128 value = 0;
+    if (!parseU128(field.text(), value)) {
+        return false;
+    }
+    object.set(key, Json::string(u128String(value)));
+    return true;
 }
 
-std::string normalizationError(const std::string& code, const std::string& message)
+// ---- envelopes -------------------------------------------------------------
+
+Json errorObject(const std::string& code, const std::string& message)
 {
-    return "{\"ok\":false,\"error\":" + errorObject(code, message) + "}";
+    Json error = Json::object();
+    error.set("code", Json::string(code));
+    error.set("message", Json::string(message));
+    error.set("retryable", Json::boolean(false));
+    return error;
 }
 
-std::string normalizeBalanceResponse(const std::string& response)
+std::string errorEnvelope(const std::string& code, const std::string& message)
 {
-    if (jsonValue(response, "ok") != "true") {
-        return response;
-    }
-    U128 balance = 0;
-    if (!parseU128(jsonValue(response, "result"), balance)) {
-        return normalizationError("invalid_balance", "balance result is not an unsigned decimal integer");
-    }
-    return "{\"ok\":true,\"result\":" + jsonString(u128String(balance)) + "}";
+    Json envelope = Json::object();
+    envelope.set("ok", Json::boolean(false));
+    envelope.set("error", errorObject(code, message));
+    return envelope.dump();
 }
 
-std::string normalizeInitializedAccountResponse(const std::string& response)
+/// The one place an FFI envelope is judged successful.
+///
+/// It reads the *structural* `ok` member of the top-level object. Nothing here
+/// looks at message text, and nothing here may be replaced by something that
+/// does.
+bool envelopeSucceeded(const Json& envelope)
 {
-    if (jsonValue(response, "ok") != "true") {
-        return response;
-    }
-    const std::string result = jsonValue(response, "result");
-    const std::string accountId = jsonValue(result, "account_id");
-    const std::string initTxHash = jsonValue(result, "init_tx_hash");
-    U128 balance = 0;
-    if (accountId.size() < 2 || accountId.front() != '"'
-        || !parseU128(jsonValue(result, "balance"), balance)) {
-        return normalizationError("invalid_initialized_account",
-            "initialized account result is missing an account ID or decimal balance");
-    }
-    return "{\"ok\":true,\"result\":{\"account_id\":" + accountId
-        + ",\"init_tx_hash\":" + (initTxHash.empty() ? "null" : initTxHash)
-        + ",\"balance\":" + jsonString(u128String(balance)) + "}}";
+    const Json& ok = envelope.at("ok");
+    return ok.isBool() && ok.boolValue();
 }
 
-std::string normalizedClaimReceipt(const std::string& response)
+/// Validate a user-supplied public address before it reaches the FFI.
+///
+/// The module does not trust QML (API_LOCK §A1.3). Rust validates too; both
+/// checks are deliberate, because either layer may be called by something that
+/// skipped the other.
+bool addressIsWellFormed(const std::string& address, std::string& reason)
 {
-    if (jsonValue(response, "ok") != "true") {
-        return {};
+    // Trim the way the Rust parser does, so both layers judge the same value.
+    const auto notSpace = [](unsigned char character) {
+        return character != ' ' && character != '\t' && character != '\n' && character != '\r';
+    };
+    std::size_t begin = 0;
+    while (begin < address.size() && !notSpace(static_cast<unsigned char>(address[begin]))) {
+        ++begin;
     }
-    const std::string result = jsonValue(response, "result");
-    const std::string txHash = jsonValue(result, "tx_hash");
-    const std::string staleRetries = jsonValue(result, "stale_challenge_retries");
-    U128 before = 0;
-    U128 after = 0;
-    if (!parseU128(jsonValue(result, "balance_before"), before)
-        || !parseU128(jsonValue(result, "balance_after"), after)) {
-        return {};
+    std::size_t end = address.size();
+    while (end > begin && !notSpace(static_cast<unsigned char>(address[end - 1]))) {
+        --end;
     }
-    return "{\"tx_hash\":" + (txHash.empty() ? "null" : txHash)
-        + ",\"balance_before\":" + jsonString(u128String(before))
-        + ",\"balance_after\":" + jsonString(u128String(after))
-        + ",\"stale_challenge_retries\":" + (staleRetries.empty() ? "0" : staleRetries) + "}";
+    const std::string trimmed = address.substr(begin, end - begin);
+
+    if (trimmed.empty()) {
+        reason = "Enter a public LEZ account address.";
+        return false;
+    }
+    // An embedded NUL would be truncated by the C string this becomes, so what
+    // Rust validated and what the caller typed would differ. Control characters
+    // mean the value was mangled in transit either way.
+    for (const unsigned char character : trimmed) {
+        if (character < 0x20 || character == 0x7F) {
+            reason = "That address contains invalid characters.";
+            return false;
+        }
+    }
+    std::string bare = trimmed;
+    const std::size_t slash = trimmed.find('/');
+    if (slash != std::string::npos) {
+        if (trimmed.compare(0, kPublicPrefixLen, kPublicPrefix) != 0 || slash != kPublicPrefixLen - 1) {
+            reason = "Only a public LEZ account address can receive a faucet drop.";
+            return false;
+        }
+        bare = trimmed.substr(kPublicPrefixLen);
+    }
+    if (bare.empty()) {
+        reason = "Enter a public LEZ account address.";
+        return false;
+    }
+    if (bare.size() > kMaxAddressLen) {
+        reason = "That address is too long to be a LEZ account ID.";
+        return false;
+    }
+    return true;
 }
 
-std::string normalizeClaimResponse(const std::string& response)
+/// The canonical bare account id for an accepted address.
+///
+/// Used only to compare a replayed request key against its original recipient.
+/// The authoritative normalization is still Rust's.
+std::string bareAccountId(const std::string& address)
 {
-    if (jsonValue(response, "ok") != "true") {
-        return response;
+    std::string trimmed = address;
+    const auto isSpace = [](char character) {
+        return character == ' ' || character == '\t' || character == '\n' || character == '\r';
+    };
+    while (!trimmed.empty() && isSpace(trimmed.front())) {
+        trimmed.erase(trimmed.begin());
     }
-    const std::string receipt = normalizedClaimReceipt(response);
-    if (receipt.empty()) {
-        return normalizationError("invalid_claim_receipt",
-            "claim receipt is missing unsigned decimal balances");
+    while (!trimmed.empty() && isSpace(trimmed.back())) {
+        trimmed.pop_back();
     }
-    return "{\"ok\":true,\"result\":" + receipt + "}";
+    if (trimmed.compare(0, kPublicPrefixLen, kPublicPrefix) == 0) {
+        return trimmed.substr(kPublicPrefixLen);
+    }
+    return trimmed;
 }
 
-void secureClear(std::string& value)
+/// A request key must be a lowercase RFC 4122 UUID (API_LOCK D6).
+bool requestKeyIsWellFormed(const std::string& key)
 {
-    volatile char* bytes = value.empty() ? nullptr : value.data();
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        bytes[index] = '\0';
+    if (key.size() != kRequestKeyLen) {
+        return false;
     }
-    value.clear();
-    value.shrink_to_fit();
+    for (std::size_t index = 0; index < key.size(); ++index) {
+        const char character = key[index];
+        const bool ok = (index == 8 || index == 13 || index == 18 || index == 23)
+            ? character == '-'
+            : ((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f'));
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool sequencerUrlIsWellFormed(const std::string& url, std::string& reason)
+{
+    if (url.empty()) {
+        reason = "A sequencer URL is required.";
+        return false;
+    }
+    if (url.size() > kMaxSequencerUrlLen) {
+        reason = "That sequencer URL is too long.";
+        return false;
+    }
+    for (const unsigned char character : url) {
+        if (character < 0x20 || character == 0x7F) {
+            reason = "That sequencer URL contains invalid characters.";
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Normalize the decimal fields of one result payload by operation.
+///
+/// A malformed decimal is a failure of the whole operation, not a field to be
+/// passed through and hoped about: every one of these values is money.
+bool normalizeResult(const std::string& operation, Json& result)
+{
+    if (!result.isObject()) {
+        return false;
+    }
+    if (operation == "faucet_info") {
+        return normalizeDecimalField(result, "prize_amount", true)
+            && normalizeDecimalField(result, "pool_balance", true)
+            && normalizeDecimalField(result, "claims_remaining", true);
+    }
+    if (operation == "inspect_recipient") {
+        return normalizeDecimalField(result, "balance", false);
+    }
+    if (operation == "request_drop") {
+        return normalizeDecimalField(result, "amount", true)
+            && normalizeDecimalField(result, "balance_before", true)
+            && normalizeDecimalField(result, "balance_after", true);
+    }
+    return true;
+}
+
+/// Map a structured error code onto a terminal job status.
+///
+/// Only the `code` field decides this. A message is for a human; classifying on
+/// its text is banned end to end (API_LOCK §9), and the specific trap it exists
+/// to stop is an `outcome_unknown` whose sentence mentions cancelling being
+/// filed as a safe `cancelled`.
+std::string terminalStatusForCode(const std::string& code)
+{
+    if (code == "cancelled") {
+        return "cancelled";
+    }
+    if (code == "outcome_unknown") {
+        return "outcome_unknown";
+    }
+    return "failed";
 }
 
 } // namespace
+
+// ---- job registry ----------------------------------------------------------
 
 struct LezFaucetModule::Job {
     mutable std::mutex mutex;
     std::string id;
     std::string operation;
+    std::string requestKey;
     std::string status = "queued";
-    std::string progressJson;
-    std::string resultJson;
-    std::string errorJson;
+    std::string phase;
+    Json result;
+    Json error;
+    bool hasResult = false;
+    bool hasError = false;
+    bool mutating = false;
     bool cancelRequested = false;
-    bool sensitiveResult = false;
     bool workerFinished = false;
+    uint64_t operationToken = 0;
     std::thread worker;
 };
 
@@ -288,51 +818,21 @@ LezFaucetModule::LezFaucetModule() = default;
 
 LezFaucetModule::~LezFaucetModule()
 {
-    m_stopping.store(true);
-    bool interruptActiveClaim = false;
-    {
-        std::lock_guard<std::mutex> jobsLock(m_jobsMutex);
-        for (const auto& entry : m_jobs) {
-            std::lock_guard<std::mutex> jobLock(entry.second->mutex);
-            interruptActiveClaim = interruptActiveClaim
-                || (entry.second->status == "running"
-                    && (entry.second->operation == "claim_once"
-                        || entry.second->operation == "claim_until_target"));
-            entry.second->cancelRequested = true;
-        }
-    }
-    // A running claim holds m_operationMutex, so no queued destroy job can
-    // free this handle while Rust observes the cooperative cancellation.
-    // Queued claims see m_stopping and never enter the FFI.
-    if (interruptActiveClaim) {
-        if (FaucetHandle* handle = m_handle.load(); handle != nullptr) {
-            lez_faucet_cancel(handle);
-        }
-    }
-    std::vector<JobPtr> jobs;
-    {
-        std::lock_guard<std::mutex> jobsLock(m_jobsMutex);
-        jobs.reserve(m_jobs.size());
-        for (const auto& entry : m_jobs) {
-            jobs.push_back(entry.second);
-        }
-    }
-    std::vector<std::thread> workers;
-    workers.reserve(jobs.size());
-    for (const JobPtr& job : jobs) {
-        std::lock_guard<std::mutex> jobLock(job->mutex);
-        if (job->worker.joinable()) {
-            workers.emplace_back(std::move(job->worker));
-        }
-    }
-    for (std::thread& worker : workers) {
-        if (worker.joinable()) {
-            worker.join();
-        }
-    }
+    // Ordering here is the whole safety argument (API_LOCK §A1.7.1):
+    //
+    //   1. mark stopping, so no new job enters the FFI;
+    //   2. flag every live job cancelled and ask Rust to abandon the active
+    //      operation token;
+    //   3. JOIN every worker, so no thread is inside an FFI call any more;
+    //   4. only then destroy the client handle.
+    //
+    // Destroying the handle before the join is a use-after-free: a worker
+    // blocked in `lez_faucet_request_drop` would keep using the client the
+    // destructor had already freed. Do not reorder these steps.
+    joinAllWorkers();
 
-    if (FaucetHandle* handle = m_handle.exchange(nullptr); handle != nullptr) {
-        lez_faucet_destroy(handle);
+    if (LezFaucetClient* client = m_client.exchange(nullptr); client != nullptr) {
+        lez_faucet_client_destroy(client);
     }
 }
 
@@ -343,117 +843,211 @@ std::string LezFaucetModule::name() const
 
 std::string LezFaucetModule::version() const
 {
-    return "0.2.0";
+    // Kept in step with faucet-module/metadata.json by hand; the two are
+    // independent copies and drift silently if only one is bumped.
+    return "0.3.0";
 }
 
-std::string LezFaucetModule::create(const std::string& configPath, const std::string& storagePath,
-                                    const std::string& sequencerUrl, const std::string& password)
+// ---- public API ------------------------------------------------------------
+
+std::string LezFaucetModule::configure(const std::string& sequencerUrl)
 {
-    return startJob("create", [this, configPath, storagePath, sequencerUrl,
-                                passwordCopy = std::string(password)](const JobPtr& job) mutable {
-        const std::string result = runCreate(configPath, storagePath, sequencerUrl, passwordCopy);
-        secureClear(passwordCopy);
-        if (ffiSucceeded(result)) {
-            std::lock_guard<std::mutex> lock(job->mutex);
-            job->sensitiveResult = true;
+    reapFinishedWorkers();
+    if (m_stopping.load()) {
+        return structuredError("module_stopping", "The faucet module is shutting down.");
+    }
+
+    std::string reason;
+    if (!sequencerUrlIsWellFormed(sequencerUrl, reason)) {
+        return structuredError("invalid_sequencer_url", reason);
+    }
+
+    // Reconfiguration while a job is live would swap the client out from under
+    // a worker that is inside an FFI call with the old handle.
+    {
+        std::lock_guard<std::mutex> lock(m_jobsMutex);
+        for (const auto& entry : m_jobs) {
+            std::lock_guard<std::mutex> jobLock(entry.second->mutex);
+            if (!isTerminal(entry.second->status)) {
+                return structuredError("drop_in_progress",
+                    "Wait for the running faucet operation to finish before reconfiguring.");
+            }
         }
-        return result;
-    });
-}
+    }
 
-std::string LezFaucetModule::open(const std::string& configPath, const std::string& storagePath,
-                                  const std::string& sequencerUrl)
-{
-    return startJob("open", [this, configPath, storagePath, sequencerUrl](const JobPtr&) {
-        return runOpen(configPath, storagePath, sequencerUrl);
-    });
-}
-
-std::string LezFaucetModule::destroy()
-{
-    return startJob("destroy", [this](const JobPtr&) {
-        FaucetHandle* handle = m_handle.exchange(nullptr);
-        const bool existed = handle != nullptr;
-        if (handle != nullptr) {
-            lez_faucet_destroy(handle);
+    LezFaucetClientOutput output = lez_faucet_client_new(sequencerUrl.c_str());
+    const std::string raw = takeFfiString(output.result_json);
+    const std::optional<Json> parsed = parseJson(raw);
+    if (!parsed.has_value() || !envelopeSucceeded(*parsed)) {
+        if (output.client != nullptr) {
+            // A handle returned alongside a failure is still ours to free.
+            lez_faucet_client_destroy(output.client);
         }
-        return std::string{"{\"ok\":true,\"result\":{\"destroyed\":"}
-            + (existed ? "true" : "false") + "}}";
+        // Re-serialize rather than echoing the FFI text: what leaves this module
+        // is always a document this module has parsed and understood.
+        if (parsed.has_value() && parsed->at("error").at("code").isString()) {
+            Json envelope = Json::object();
+            envelope.set("ok", Json::boolean(false));
+            envelope.set("error", parsed->at("error"));
+            return envelope.dump();
+        }
+        return structuredError("invalid_sequencer_url",
+            "The faucet could not be configured for that sequencer URL.");
+    }
+    if (output.client == nullptr) {
+        return structuredError("internal_error",
+            "The faucet reported success without returning a client.");
+    }
+
+    if (LezFaucetClient* previous = m_client.exchange(output.client); previous != nullptr) {
+        // Safe: every job is terminal, so no worker is inside the FFI.
+        lez_faucet_client_destroy(previous);
+    }
+
+    Json result = Json::object();
+    result.set("configured", Json::boolean(true));
+    result.set("sequencer_url", Json::string(sequencerUrl));
+    Json envelope = Json::object();
+    envelope.set("ok", Json::boolean(true));
+    envelope.set("result", std::move(result));
+    return envelope.dump();
+}
+
+std::string LezFaucetModule::getFaucetInfo()
+{
+    // No mutating-job permit is taken here, by design: a read must stay
+    // answerable during a 300 s reconciliation (API_LOCK §A1.7.2).
+    return startJob("faucet_info", {}, false, [this](const JobPtr&) {
+        return runFfiCall([](LezFaucetClient* client) { return lez_faucet_get_info(client); });
     });
 }
 
-std::string LezFaucetModule::verifyFingerprint()
+std::string LezFaucetModule::inspectRecipient(const std::string& address)
 {
-    return startJob("verify_fingerprint", [this](const JobPtr&) {
-        return runHandleCall("verify_fingerprint", [](FaucetHandle* handle) {
-            return lez_faucet_verify_fingerprint(handle);
+    std::string reason;
+    if (!addressIsWellFormed(address, reason)) {
+        return structuredError("invalid_public_account_id", reason);
+    }
+    return startJob("inspect_recipient", {}, false, [this, address](const JobPtr&) {
+        return runFfiCall([&address](LezFaucetClient* client) {
+            return lez_faucet_inspect_recipient(client, address.c_str());
         });
     });
 }
 
-std::string LezFaucetModule::createAndInitializeAccount()
+std::string LezFaucetModule::requestDrop(const std::string& address, const std::string& requestKey)
 {
-    return startJob("create_and_initialize_account", [this](const JobPtr&) {
-        return normalizeInitializedAccountResponse(runHandleCall(
-            "create_and_initialize_account", [](FaucetHandle* handle) {
-            return lez_faucet_create_and_initialize_account(handle);
-        }));
-    });
-}
+    reapFinishedWorkers();
+    if (m_stopping.load()) {
+        return structuredError("module_stopping", "The faucet module is shutting down.");
+    }
+    if (!requestKeyIsWellFormed(requestKey)) {
+        return structuredError("invalid_request_key", "The request key must be a lowercase UUID.");
+    }
+    std::string reason;
+    if (!addressIsWellFormed(address, reason)) {
+        return structuredError("invalid_public_account_id", reason);
+    }
+    if (m_client.load() == nullptr) {
+        return structuredError("not_configured", "The faucet client is not configured.");
+    }
 
-std::string LezFaucetModule::balance(const std::string& accountId)
-{
-    return startJob("balance", [this, accountId](const JobPtr&) {
-        return normalizeBalanceResponse(runHandleCall(
-            "balance", [&accountId](FaucetHandle* handle) {
-            return lez_faucet_get_balance(handle, accountId.c_str());
-        }));
-    });
-}
+    const std::string accountId = bareAccountId(address);
 
-std::string LezFaucetModule::claimOnce(const std::string& accountId)
-{
-    return startJob("claim_once", [this, accountId](const JobPtr&) {
-        return normalizeClaimResponse(runHandleCall(
-            "claim_once", [&accountId](FaucetHandle* handle) {
-            return lez_faucet_claim_once(handle, accountId.c_str());
-        }));
-    });
-}
+    // Claim the key first, under one lock, so two callers racing with the same
+    // key cannot both get past this point and start two drops.
+    std::string replayJobId;
+    std::string replayStatus;
+    {
+        std::lock_guard<std::mutex> lock(m_tombstonesMutex);
+        const auto found = m_tombstones.find(requestKey);
+        if (found != m_tombstones.end()) {
+            if (found->second.accountId != accountId) {
+                return structuredError("idempotency_conflict",
+                    "That request key was already used for a different address.");
+            }
+            if (found->second.jobId.empty()) {
+                // Reserved microseconds ago by a concurrent duplicate that has
+                // not published its job id yet.
+                return structuredError("drop_in_progress", "That request is already running.");
+            }
+            replayJobId = found->second.jobId;
+            replayStatus = found->second.status;
+        } else {
+            m_tombstones.emplace(requestKey, Tombstone{accountId, std::string(), "queued"});
+        }
+    }
 
-std::string LezFaucetModule::claimUntilTarget(const std::string& accountId, const std::string& target,
-                                              int64_t maxClaims)
-{
-    return startJob("claim_until_target", [this, accountId, target, maxClaims](const JobPtr& job) {
-        return runClaimUntil(job, accountId, target, maxClaims);
-    });
+    // A repeated key replays the ORIGINAL job envelope, job id included, and
+    // starts nothing. Losing the job id here would strand the caller's only
+    // handle on a claim that may already be on chain.
+    if (!replayJobId.empty()) {
+        if (const JobPtr job = findJob(replayJobId); job) {
+            return startedJson(job);
+        }
+        // The job record was acknowledged and reaped; the tombstone outlives it.
+        Json envelope = Json::object();
+        envelope.set("ok", Json::boolean(true));
+        envelope.set("job_id", Json::string(replayJobId));
+        envelope.set("request_key", Json::string(requestKey));
+        envelope.set("status", Json::string(replayStatus));
+        return envelope.dump();
+    }
+
+    const auto abandonReservation = [this, &requestKey]() {
+        // Removing a reservation that never started a job cannot resurrect a
+        // claim: no operation ran, so no transaction can exist. Only a key that
+        // reached a worker becomes a permanent tombstone.
+        std::lock_guard<std::mutex> lock(m_tombstonesMutex);
+        const auto found = m_tombstones.find(requestKey);
+        if (found != m_tombstones.end() && found->second.jobId.empty()) {
+            m_tombstones.erase(found);
+        }
+    };
+
+    if (!reserveDropSlot()) {
+        abandonReservation();
+        return structuredError("drop_in_progress",
+            "A faucet request is already running. Wait for it to finish.");
+    }
+
+    const std::string started = startJob("request_drop", requestKey, true,
+        [this, address, requestKey](const JobPtr& job) {
+            return runDrop(job, address, requestKey);
+        });
+
+    const std::optional<Json> parsed = parseJson(started);
+    if (!parsed.has_value() || !envelopeSucceeded(*parsed)) {
+        releaseDropSlot();
+        abandonReservation();
+        return started;
+    }
+    rememberRequestKey(requestKey, accountId, parsed->at("job_id").text());
+    return started;
 }
 
 std::string LezFaucetModule::cancel(const std::string& jobId)
 {
     reapFinishedWorkers();
-    JobPtr job;
-    {
-        std::lock_guard<std::mutex> lock(m_jobsMutex);
-        const auto found = m_jobs.find(jobId);
-        if (found == m_jobs.end()) {
-            return structuredError("unknown_job", "unknown job_id");
-        }
-        job = found->second;
+    const JobPtr job = findJob(jobId);
+    if (!job) {
+        return structuredError("unknown_job", "No job with that id.");
     }
+
+    uint64_t token = 0;
     {
         std::lock_guard<std::mutex> lock(job->mutex);
         if (!isTerminal(job->status)) {
-            const bool wasRunning = job->status == "running";
             job->cancelRequested = true;
+            token = job->operationToken;
             job->status = "cancelling";
-            const bool canInterrupt = job->operation == "claim_once"
-                || job->operation == "claim_until_target";
-            if (wasRunning && canInterrupt) {
-                if (FaucetHandle* handle = m_handle.load(); handle != nullptr) {
-                    lez_faucet_cancel(handle);
-                }
-            }
+        }
+    }
+    // Scoped by the operation token allocated for this job, so a cancel that
+    // arrives after its drop finished cannot stop a later one.
+    if (token != 0) {
+        if (LezFaucetClient* client = m_client.load(); client != nullptr) {
+            lez_faucet_cancel(client, token);
         }
     }
     return jobJson(job);
@@ -462,15 +1056,11 @@ std::string LezFaucetModule::cancel(const std::string& jobId)
 std::string LezFaucetModule::jobStatus(const std::string& jobId)
 {
     reapFinishedWorkers();
-    JobPtr job;
-    {
-        std::lock_guard<std::mutex> lock(m_jobsMutex);
-        const auto found = m_jobs.find(jobId);
-        if (found == m_jobs.end()) {
-            return structuredError("unknown_job", "unknown job_id");
-        }
-        job = found->second;
+    const JobPtr job = findJob(jobId);
+    if (!job) {
+        return structuredError("unknown_job", "No job with that id.");
     }
+    refreshJobPhase(job);
     return jobJson(job);
 }
 
@@ -483,15 +1073,14 @@ std::string LezFaucetModule::jobResultAck(const std::string& jobId)
         std::lock_guard<std::mutex> lock(m_jobsMutex);
         const auto found = m_jobs.find(jobId);
         if (found == m_jobs.end()) {
-            return structuredError("unknown_job", "unknown job_id");
+            return structuredError("unknown_job", "No job with that id.");
         }
         job = found->second;
         std::lock_guard<std::mutex> jobLock(job->mutex);
         if (!isTerminal(job->status)) {
-            return structuredError("job_not_terminal", "job result cannot be acknowledged before completion");
+            return structuredError("job_not_terminal",
+                "That job has not finished, so its result cannot be acknowledged.");
         }
-        secureClear(job->resultJson);
-        job->sensitiveResult = false;
         if (job->worker.joinable()) {
             worker = std::move(job->worker);
         }
@@ -500,70 +1089,162 @@ std::string LezFaucetModule::jobResultAck(const std::string& jobId)
     if (worker.joinable()) {
         worker.join();
     }
-    return "{\"ok\":true,\"job_id\":" + jsonString(jobId)
-        + ",\"acknowledged\":true,\"reaped\":true}";
+    // The request-key tombstone deliberately survives this. Releasing the
+    // payload is not the same as forgetting that the key was used, and
+    // forgetting it would let a bridge retry become a second claim
+    // (API_LOCK §6, §A1.7.4).
+    Json envelope = Json::object();
+    envelope.set("ok", Json::boolean(true));
+    envelope.set("job_id", Json::string(jobId));
+    envelope.set("acknowledged", Json::boolean(true));
+    envelope.set("reaped", Json::boolean(true));
+    return envelope.dump();
 }
 
-std::string LezFaucetModule::startJob(const std::string& operation,
-                                      std::function<std::string(const JobPtr&)> work)
+std::string LezFaucetModule::shutdown()
+{
+    const bool alreadyStopping = m_stopping.load();
+    // Same ordering as the destructor, and for the same reason: every worker
+    // must be out of the FFI before the handle it is using is freed.
+    joinAllWorkers();
+    LezFaucetClient* client = m_client.exchange(nullptr);
+    if (client != nullptr) {
+        lez_faucet_client_destroy(client);
+    }
+
+    Json result = Json::object();
+    result.set("stopped", Json::boolean(true));
+    result.set("client_destroyed", Json::boolean(client != nullptr));
+    result.set("already_stopping", Json::boolean(alreadyStopping));
+    Json envelope = Json::object();
+    envelope.set("ok", Json::boolean(true));
+    envelope.set("result", std::move(result));
+    return envelope.dump();
+}
+
+// ---- job machinery ---------------------------------------------------------
+
+std::string LezFaucetModule::startJob(const std::string& operation, const std::string& requestKey,
+                                      bool mutating, std::function<std::string(const JobPtr&)> work)
 {
     reapFinishedWorkers();
     if (m_stopping.load()) {
-        return structuredError("module_stopping", "module is shutting down");
+        return structuredError("module_stopping", "The faucet module is shutting down.");
+    }
+    if (m_client.load() == nullptr) {
+        return structuredError("not_configured", "The faucet client is not configured.");
     }
 
     auto job = std::make_shared<Job>();
     job->id = operation + "-" + std::to_string(m_nextJobId.fetch_add(1));
     job->operation = operation;
+    job->requestKey = requestKey;
+    job->mutating = mutating;
+    // Tokens are allocated here, strictly increasing and never 0 (API_LOCK
+    // §A1.7.5): 0 is the Rust "no operation" sentinel, and a reused token would
+    // let a stale cancel abort somebody else's drop. Reads get no token because
+    // no read FFI entry point is cancellable.
+    if (mutating) {
+        job->operationToken = m_nextOperationToken.fetch_add(1);
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_jobsMutex);
         if (m_jobs.size() >= kMaxRetainedJobs) {
             return structuredError("job_limit_reached",
-                "too many unacknowledged jobs; acknowledge terminal results before starting more work");
+                "Too many unacknowledged jobs. Acknowledge finished results before starting more.");
         }
         m_jobs.emplace(job->id, job);
     }
 
-    std::thread worker([this, job, work = std::move(work)]() {
-        std::unique_lock<std::mutex> operationLock(m_operationMutex);
-        {
-            std::lock_guard<std::mutex> lock(job->mutex);
-            if (job->cancelRequested || m_stopping.load()) {
-                job->status = "cancelled";
-                job->errorJson = errorObject("cancelled", "job cancelled before it started");
-                job->workerFinished = true;
-                return;
-            }
-            job->status = "running";
-        }
-
-        const std::string result = work(job);
+    // The thread handle must be in place before the worker can possibly finish.
+    //
+    // Holding job->mutex across both the spawn and the assignment is what
+    // guarantees that: the worker's first act is to lock the same mutex, so it
+    // blocks until the handle is stored. Spawning outside the lock instead
+    // would let a worker that finished early be observed by a concurrent reap
+    // or join as a default-constructed, non-joinable job->worker and skipped —
+    // and the joinable handle assigned a moment later would then be destroyed
+    // by ~Job with nothing having joined it, which calls std::terminate() and
+    // takes the whole host application down with it.
+    {
         std::lock_guard<std::mutex> lock(job->mutex);
-        if (job->status != "cancelled") {
-            if (ffiSucceeded(result)) {
-                job->status = "completed";
-                job->resultJson = ffiResultPayload(result);
-                job->errorJson.clear();
-            } else {
-                job->status = "failed";
-                const std::string error = jsonValue(result, "error");
-                const std::string errorMessage = unquoteJsonString(error);
-                if (job->cancelRequested && errorMessage.find("cancel") != std::string::npos) {
-                    job->status = "cancelled";
-                    job->errorJson = errorObject("cancelled", errorMessage);
-                } else {
-                    job->errorJson = ffiErrorPayload(result);
+        job->worker = std::thread([this, job, work = std::move(work)]() {
+            bool ran = false;
+            {
+                std::lock_guard<std::mutex> workerLock(job->mutex);
+                // A cancel that lands before the worker starts is honoured
+                // without ever entering the FFI, which is what makes a
+                // pre-submit cancellation provably free of any submitted
+                // transaction.
+                if (!job->cancelRequested && !m_stopping.load()) {
+                    job->status = "running";
+                    ran = true;
                 }
+            }
+            settleJob(job, ran, ran ? work(job) : std::string());
+        });
+    }
+    return startedJson(job);
+}
+
+void LezFaucetModule::settleJob(const JobPtr& job, bool ran, const std::string& raw)
+{
+    std::string finalStatus;
+    {
+        std::lock_guard<std::mutex> lock(job->mutex);
+        if (!ran) {
+            job->status = "cancelled";
+            job->error = errorObject("cancelled",
+                "The request was cancelled before anything was submitted.");
+            job->hasError = true;
+        } else if (const std::optional<Json> parsed = parseJson(raw); !parsed.has_value()) {
+            job->status = "failed";
+            job->error = errorObject("internal_error",
+                "The faucet returned a result this app could not read.");
+            job->hasError = true;
+        } else if (envelopeSucceeded(*parsed)) {
+            Json result = parsed->at("result");
+            if (!normalizeResult(job->operation, result)) {
+                job->status = "failed";
+                job->error = errorObject("internal_error",
+                    "The faucet returned an amount this app could not verify.");
+                job->hasError = true;
+            } else {
+                // A cancel that arrives after the work succeeded is not a
+                // cancellation: reporting one would hide a claim that is on
+                // chain (API_LOCK §5).
+                job->status = "succeeded";
+                job->result = std::move(result);
+                job->hasResult = true;
+            }
+        } else {
+            const Json& error = parsed->at("error");
+            if (!error.at("code").isString()) {
+                job->status = "failed";
+                job->error = errorObject("internal_error",
+                    "The faucet reported a failure without a code.");
+                job->hasError = true;
+            } else {
+                // The status comes from the structured code and from nothing
+                // else. In particular an `outcome_unknown` whose message
+                // mentions cancelling stays `outcome_unknown`.
+                job->status = terminalStatusForCode(error.at("code").text());
+                if (error.at("phase").isString()) {
+                    job->phase = error.at("phase").text();
+                }
+                job->error = error;
+                job->hasError = true;
             }
         }
         job->workerFinished = true;
-    });
-
-    {
-        std::lock_guard<std::mutex> lock(job->mutex);
-        job->worker = std::move(worker);
+        finalStatus = job->status;
     }
-    return jobJson(job);
+
+    if (job->mutating) {
+        releaseDropSlot();
+        recordTombstoneStatus(job->requestKey, finalStatus);
+    }
 }
 
 void LezFaucetModule::reapFinishedWorkers()
@@ -589,169 +1270,173 @@ void LezFaucetModule::reapFinishedWorkers()
     }
 }
 
-std::string LezFaucetModule::runCreate(const std::string& configPath, const std::string& storagePath,
-                                       const std::string& sequencerUrl, const std::string& password)
+void LezFaucetModule::joinAllWorkers()
 {
-    if (m_handle.load() != nullptr) {
-        return structuredError("wallet_already_open", "destroy the current wallet before creating another");
+    // Step 1: no new job may enter the FFI from here on.
+    m_stopping.store(true);
+
+    // Step 2: flag every live job cancelled, and collect the operation tokens
+    // that Rust can actually act on.
+    std::vector<JobPtr> jobs;
+    std::vector<uint64_t> tokens;
+    {
+        std::lock_guard<std::mutex> lock(m_jobsMutex);
+        jobs.reserve(m_jobs.size());
+        for (const auto& entry : m_jobs) {
+            jobs.push_back(entry.second);
+        }
     }
-    FfiCreateOutput output = lez_faucet_create(
-        configPath.c_str(), storagePath.c_str(), sequencerUrl.c_str(), password.c_str());
-    const std::string result = takeFfiString(output.result_json);
-    if (output.handle == nullptr) {
-        return result.empty()
-            ? structuredError("create_failed", "wallet creation failed without an FFI result")
-            : result;
+    for (const JobPtr& job : jobs) {
+        std::lock_guard<std::mutex> lock(job->mutex);
+        if (!isTerminal(job->status)) {
+            job->cancelRequested = true;
+            if (job->operationToken != 0) {
+                tokens.push_back(job->operationToken);
+            }
+        }
     }
-    if (!ffiSucceeded(result)) {
-        lez_faucet_destroy(output.handle);
-        return result.empty()
-            ? structuredError("create_failed", "wallet creation returned an invalid result")
-            : result;
+
+    // Step 3: ask Rust to abandon them. A drop that has already submitted keeps
+    // reconciling to its bound rather than pretending it was cancelled, so this
+    // shortens shutdown where it honestly can and waits where it cannot.
+    if (LezFaucetClient* client = m_client.load(); client != nullptr) {
+        for (const uint64_t token : tokens) {
+            lez_faucet_cancel(client, token);
+        }
     }
-    m_handle.store(output.handle);
-    return result;
+
+    // Step 4: join every worker. After this loop no thread is inside an FFI
+    // call, which is the precondition the caller needs before destroying the
+    // client handle.
+    std::vector<std::thread> workers;
+    workers.reserve(jobs.size());
+    for (const JobPtr& job : jobs) {
+        std::lock_guard<std::mutex> lock(job->mutex);
+        if (job->worker.joinable()) {
+            workers.emplace_back(std::move(job->worker));
+        }
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
 }
 
-std::string LezFaucetModule::runOpen(const std::string& configPath, const std::string& storagePath,
-                                     const std::string& sequencerUrl)
+std::string LezFaucetModule::runFfiCall(const std::function<char*(LezFaucetClient*)>& call)
 {
-    if (m_handle.load() != nullptr) {
-        return structuredError("wallet_already_open", "destroy the current wallet before opening another");
+    LezFaucetClient* client = m_client.load();
+    if (client == nullptr) {
+        return errorEnvelope("not_configured", "The faucet client is not configured.");
     }
-    FfiCreateOutput output = lez_faucet_open(
-        configPath.c_str(), storagePath.c_str(), sequencerUrl.c_str());
-    const std::string result = takeFfiString(output.result_json);
-    if (output.handle == nullptr) {
-        return result.empty()
-            ? structuredError("open_failed", "wallet open failed without an FFI result")
-            : result;
-    }
-    if (!ffiSucceeded(result)) {
-        lez_faucet_destroy(output.handle);
-        return result.empty()
-            ? structuredError("open_failed", "wallet open returned an invalid result")
-            : result;
-    }
-    m_handle.store(output.handle);
-    return result;
-}
-
-std::string LezFaucetModule::runHandleCall(const std::string& operation,
-                                           const std::function<char*(FaucetHandle*)>& call)
-{
-    FaucetHandle* handle = m_handle.load();
-    if (handle == nullptr) {
-        return structuredError("wallet_not_open", operation + " requires an open wallet");
-    }
-    const std::string result = takeFfiString(call(handle));
+    const std::string result = takeFfiString(call(client));
     return result.empty()
-        ? structuredError("invalid_ffi_result", operation + " returned a null or empty result")
+        ? errorEnvelope("internal_error", "The faucet returned no result.")
         : result;
 }
 
-std::string LezFaucetModule::runClaimUntil(const JobPtr& job, const std::string& accountId,
-                                           const std::string& target, int64_t maxClaims)
+std::string LezFaucetModule::runDrop(const JobPtr& job, const std::string& address,
+                                     const std::string& requestKey)
 {
-    FaucetHandle* handle = m_handle.load();
-    if (handle == nullptr) {
-        return structuredError("wallet_not_open", "claim_until_target requires an open wallet");
-    }
-    if (maxClaims < 0 || maxClaims > kMaxClaimsPerJob) {
-        return structuredError("invalid_max_claims", "maxClaims must be between 0 and 100");
-    }
-
-    U128 targetValue = 0;
-    if (!parseU128(target, targetValue)) {
-        return structuredError("invalid_target", "target must be an unsigned decimal integer");
-    }
-
-    const std::string balanceResponse = takeFfiString(lez_faucet_get_balance(handle, accountId.c_str()));
-    if (!ffiSucceeded(balanceResponse)) {
-        return balanceResponse.empty()
-            ? structuredError("invalid_ffi_result", "get_balance returned a null or empty result")
-            : balanceResponse;
-    }
-    U128 initialBalance = 0;
-    if (!parseU128(jsonValue(balanceResponse, "result"), initialBalance)) {
-        return structuredError("invalid_balance", "get_balance returned a non-decimal balance");
-    }
-
-    const U128 missing = initialBalance >= targetValue ? 0 : targetValue - initialBalance;
-    const U128 requiredU128 = missing / kPrize + (missing % kPrize == 0 ? 0 : 1);
-    if (requiredU128 > static_cast<U128>(std::numeric_limits<int64_t>::max())
-        || requiredU128 > static_cast<U128>(maxClaims)) {
-        return structuredError("claim_limit_exceeded",
-            "target requires more claims than the explicit maxClaims limit");
-    }
-    const int64_t requiredClaims = static_cast<int64_t>(requiredU128);
-
-    U128 balance = initialBalance;
-    int64_t completedClaims = 0;
+    uint64_t token = 0;
     {
-        std::ostringstream progress;
-        progress << "{\"completed_claims\":0"
-                 << ",\"required_claims\":" << requiredClaims
-                 << ",\"target\":" << jsonString(u128String(targetValue))
-                 << ",\"balance\":" << jsonString(u128String(balance))
-                 << ",\"receipt\":null}";
         std::lock_guard<std::mutex> lock(job->mutex);
-        job->progressJson = progress.str();
+        if (job->cancelRequested || m_stopping.load()) {
+            return errorEnvelope("cancelled",
+                "The request was cancelled before anything was submitted.");
+        }
+        token = job->operationToken;
     }
-    while (balance < targetValue) {
-        {
-            std::lock_guard<std::mutex> lock(job->mutex);
-            if (job->cancelRequested || m_stopping.load()) {
-                job->status = "cancelled";
-                job->errorJson = errorObject("cancelled",
-                    "claim loop cancelled between confirmed claims; no in-flight claim was abandoned");
-                return structuredError("cancelled", "claim loop cancelled between confirmed claims");
-            }
-        }
+    return runFfiCall([&address, &requestKey, token](LezFaucetClient* client) {
+        return lez_faucet_request_drop(client, address.c_str(), requestKey.c_str(), token);
+    });
+}
 
-        const std::string claimResponse = takeFfiString(lez_faucet_claim_once(handle, accountId.c_str()));
-        if (!ffiSucceeded(claimResponse)) {
-            return claimResponse.empty()
-                ? structuredError("invalid_ffi_result", "claim_once returned a null or empty result")
-                : claimResponse;
+void LezFaucetModule::refreshJobPhase(const JobPtr& job)
+{
+    // Snapshot the token under the job lock, then RELEASE it before the FFI
+    // call. The Rust side only reads two atomics, but holding job->mutex
+    // across any FFI call would let one slow poll stall every other reader of
+    // this job — and the worker's own settle — behind it.
+    uint64_t token = 0;
+    {
+        std::lock_guard<std::mutex> lock(job->mutex);
+        // Only a live drop has a phase to poll. A terminal job keeps the last
+        // phase it recorded, and a read job never has an operation token.
+        if (!job->mutating || job->operationToken == 0 || isTerminal(job->status)) {
+            return;
         }
-
-        U128 before = 0;
-        U128 after = 0;
-        if (!parseU128(jsonValue(claimResponse, "balance_before"), before)
-            || !parseU128(jsonValue(claimResponse, "balance_after"), after)) {
-            return structuredError("invalid_claim_receipt", "claim receipt is missing decimal balances");
-        }
-        constexpr U128 maxBalance = ~static_cast<U128>(0);
-        if (before != balance || before > maxBalance - kPrize || after != before + kPrize) {
-            return structuredError("invalid_claim_delta", "claim receipt did not prove an exact +150 credit");
-        }
-
-        balance = after;
-        ++completedClaims;
-        const std::string receipt = normalizedClaimReceipt(claimResponse);
-        if (receipt.empty()) {
-            return structuredError("invalid_claim_receipt",
-                "claim receipt could not be normalized to exact decimal strings");
-        }
-        std::ostringstream progress;
-        progress << "{\"completed_claims\":" << completedClaims
-                 << ",\"required_claims\":" << requiredClaims
-                 << ",\"target\":" << jsonString(u128String(targetValue))
-                 << ",\"balance\":" << jsonString(u128String(balance))
-                 << ",\"receipt\":" << (receipt.empty() ? "null" : receipt) << "}";
-        {
-            std::lock_guard<std::mutex> lock(job->mutex);
-            job->progressJson = progress.str();
-        }
+        token = job->operationToken;
     }
+    LezFaucetClient* client = m_client.load();
+    if (client == nullptr) {
+        return;
+    }
+    const std::string raw = takeFfiString(lez_faucet_current_phase(client, token));
+    const std::optional<Json> parsed = parseJson(raw);
+    if (!parsed.has_value() || !envelopeSucceeded(*parsed)) {
+        // A phase is a courtesy, never a verdict: an unreadable poll changes
+        // nothing about the job.
+        return;
+    }
+    const Json& phase = parsed->at("result").at("phase");
+    if (!phase.isString()) {
+        // A null phase means "no live phase" — the drop has not started or has
+        // just finished. Keep the last phase rather than blanking it, so the
+        // envelope never moves backwards while the worker settles.
+        return;
+    }
+    std::lock_guard<std::mutex> lock(job->mutex);
+    // The worker may have settled while the poll was in flight. A terminal
+    // job's phase belongs to its outcome; a stale poll must not overwrite it.
+    if (!isTerminal(job->status)) {
+        job->phase = phase.text();
+    }
+}
 
-    std::ostringstream result;
-    result << "{\"ok\":true,\"result\":{\"target\":" << jsonString(u128String(targetValue))
-           << ",\"initial_balance\":" << jsonString(u128String(initialBalance))
-           << ",\"final_balance\":" << jsonString(u128String(balance))
-           << ",\"completed_claims\":" << completedClaims << "}}";
-    return result.str();
+bool LezFaucetModule::reserveDropSlot()
+{
+    std::lock_guard<std::mutex> lock(m_dropMutex);
+    if (m_dropActive) {
+        return false;
+    }
+    m_dropActive = true;
+    return true;
+}
+
+void LezFaucetModule::releaseDropSlot()
+{
+    std::lock_guard<std::mutex> lock(m_dropMutex);
+    m_dropActive = false;
+}
+
+LezFaucetModule::JobPtr LezFaucetModule::findJob(const std::string& jobId) const
+{
+    std::lock_guard<std::mutex> lock(m_jobsMutex);
+    const auto found = m_jobs.find(jobId);
+    return found == m_jobs.end() ? JobPtr() : found->second;
+}
+
+void LezFaucetModule::rememberRequestKey(const std::string& requestKey, const std::string& address,
+                                         const std::string& jobId)
+{
+    std::lock_guard<std::mutex> lock(m_tombstonesMutex);
+    Tombstone& tombstone = m_tombstones[requestKey];
+    tombstone.accountId = address;
+    tombstone.jobId = jobId;
+    if (tombstone.status.empty()) {
+        tombstone.status = "queued";
+    }
+}
+
+void LezFaucetModule::recordTombstoneStatus(const std::string& requestKey, const std::string& status)
+{
+    if (requestKey.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_tombstonesMutex);
+    const auto found = m_tombstones.find(requestKey);
+    if (found != m_tombstones.end()) {
+        found->second.status = status;
+    }
 }
 
 std::string LezFaucetModule::takeFfiString(char* value)
@@ -759,6 +1444,8 @@ std::string LezFaucetModule::takeFfiString(char* value)
     if (value == nullptr) {
         return {};
     }
+    // Every string this library hands out is freed exactly once, here, whatever
+    // the caller does with the copy.
     std::string result(value);
     lez_faucet_string_free(value);
     return result;
@@ -766,76 +1453,48 @@ std::string LezFaucetModule::takeFfiString(char* value)
 
 std::string LezFaucetModule::structuredError(const std::string& code, const std::string& message)
 {
-    return "{\"ok\":false,\"error\":" + errorObject(code, message) + "}";
+    return errorEnvelope(code, message);
 }
 
 std::string LezFaucetModule::jobJson(const JobPtr& job)
 {
     std::lock_guard<std::mutex> lock(job->mutex);
-    const std::string result = job->resultJson.empty() ? "null" : job->resultJson;
-    std::ostringstream out;
-    out << "{\"ok\":true"
-        << ",\"job_id\":" << jsonString(job->id)
-        << ",\"operation\":" << jsonString(job->operation)
-        << ",\"status\":" << jsonString(job->status)
-        << ",\"cancel_requested\":" << (job->cancelRequested ? "true" : "false")
-        << ",\"progress\":" << (job->progressJson.empty() ? "null" : job->progressJson)
-        << ",\"result\":" << result
-        << ",\"error\":" << (job->errorJson.empty() ? "null" : job->errorJson)
-        << "}";
+    Json envelope = Json::object();
+    envelope.set("ok", Json::boolean(true));
+    envelope.set("job_id", Json::string(job->id));
+    envelope.set("operation", Json::string(job->operation));
+    if (!job->requestKey.empty()) {
+        envelope.set("request_key", Json::string(job->requestKey));
+    }
+    envelope.set("status", Json::string(job->status));
+    if (!job->phase.empty()) {
+        envelope.set("phase", Json::string(job->phase));
+    }
+    envelope.set("cancel_requested", Json::boolean(job->cancelRequested));
+    if (job->hasResult) {
+        envelope.set("result", job->result);
+    }
+    if (job->hasError) {
+        envelope.set("error", job->error);
+    }
+    return envelope.dump();
+}
 
-    return out.str();
+std::string LezFaucetModule::startedJson(const JobPtr& job)
+{
+    std::lock_guard<std::mutex> lock(job->mutex);
+    Json envelope = Json::object();
+    envelope.set("ok", Json::boolean(true));
+    envelope.set("job_id", Json::string(job->id));
+    if (!job->requestKey.empty()) {
+        envelope.set("request_key", Json::string(job->requestKey));
+    }
+    envelope.set("status", Json::string(job->status));
+    return envelope.dump();
 }
 
 bool LezFaucetModule::isTerminal(const std::string& status)
 {
-    return status == "completed" || status == "failed" || status == "cancelled";
-}
-
-std::string LezFaucetModule::ffiResultPayload(const std::string& json)
-{
-    const std::string result = jsonValue(json, "result");
-    if (!result.empty()) {
-        return result;
-    }
-
-    // Wallet creation intentionally returns the one-time recovery fields at
-    // the top level instead of under `result`.
-    const std::string mnemonic = jsonValue(json, "mnemonic");
-    const std::string warning = jsonValue(json, "security_warning");
-    if (!mnemonic.empty() && !warning.empty()) {
-        return "{\"mnemonic\":" + mnemonic + ",\"security_warning\":" + warning + "}";
-    }
-    return "null";
-}
-
-std::string LezFaucetModule::ffiErrorPayload(const std::string& json)
-{
-    const std::string error = jsonValue(json, "error");
-    if (error.empty()) {
-        return errorObject("operation_failed", "operation returned an invalid error");
-    }
-    if (error.front() != '"') {
-        return error;
-    }
-
-    const std::string outcome = jsonValue(json, "outcome");
-    const std::string txHash = jsonValue(json, "tx_hash");
-    const bool outcomeUnknown = outcome == "\"unknown\"";
-    std::string structured = "{\"code\":"
-        + jsonString(outcomeUnknown ? "outcome_unknown" : "ffi_error")
-        + ",\"message\":" + jsonString(unquoteJsonString(error));
-    if (!outcome.empty()) {
-        structured += ",\"outcome\":" + outcome;
-    }
-    if (!txHash.empty()) {
-        structured += ",\"tx_hash\":" + txHash;
-    }
-    structured += "}";
-    return structured;
-}
-
-bool LezFaucetModule::ffiSucceeded(const std::string& json)
-{
-    return jsonValue(json, "ok") == "true";
+    return status == "succeeded" || status == "failed" || status == "cancelled"
+        || status == "outcome_unknown";
 }

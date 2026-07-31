@@ -30,7 +30,29 @@
     let
       lib = nixpkgs.lib;
       system = "aarch64-darwin";
-      pkgs = import nixpkgs {
+      # crates.io refuses requests whose User-Agent is a bare tool name: an
+      # unset UA or a descriptive one returns 200, while `python-requests/*`
+      # and `curl/*` both return 403. nixpkgs' cargo-vendor fetcher builds its
+      # `requests.Session` without setting one, so every crate download fails
+      # with a 403 that reads like a network fault rather than a policy one.
+      #
+      # The fetcher is written inline by `writers.writePython3Bin` inside
+      # `fetch-cargo-vendor.nix`, so it is not a package an overlay can reach.
+      # Patch the nixpkgs source itself, which is the only seam available.
+      # This is the local half of logos-module-builder#159.
+      bootstrapPkgs = import nixpkgs { inherit system; };
+      patchedNixpkgs = bootstrapPkgs.applyPatches {
+        name = "nixpkgs-crates-io-user-agent";
+        src = nixpkgs;
+        postPatch = ''
+          substituteInPlace pkgs/build-support/rust/fetch-cargo-vendor-util.py \
+            --replace-fail \
+              'session.get(url, stream=True)' \
+              'session.get(url, stream=True, headers={"User-Agent": "lez-faucet-nix-build (+https://github.com/logos-co/lez-faucet)"})'
+        '';
+      };
+
+      pkgs = import patchedNixpkgs {
         inherit system;
         overlays = [ (import rust-overlay) ];
       };
@@ -73,9 +95,12 @@
 
       faucetFfi = rustPlatform.buildRustPackage {
         pname = "lez-faucet-ffi";
-        version = "0.2.0";
+        version = "0.3.0";
         src = faucetFfiSource;
-        cargoHash = "sha256-bynsEIeov27VyVr8NdHVcpPwEQr8Kbmd93o+B61XWEM=";
+        # Regenerated for vNext: dropping the `wallet`, `zeroize` and
+        # `tempfile` dependencies changed the vendored set, so the 0.2.0 hash
+        # no longer applies.
+        cargoHash = "sha256-g1kXxMjVbalceSm51CebyMqOBORi25Xg+BokvTLkJhw=";
         cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
         doCheck = false;
 

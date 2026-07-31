@@ -1,42 +1,38 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 #include "FaucetBackend.h"
 
-#include <QDir>
-#include <QFileInfo>
+#include <QChar>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonValue>
-#include <QStandardPaths>
-#include <QtGlobal>
 
 #include "logos_sdk.h"
 
 namespace {
-constexpr auto DEFAULT_SEQUENCER_URL = "https://testnet.lez.logos.co";
-constexpr int MAX_CLAIMS_PER_RUN = 100;
-}
+
+// The one host this build talks to.
+//
+// There is deliberately no environment variable, no settings entry and no UI
+// control that can move it. A redirectable sequencer is not a convenience: it
+// lets someone else fabricate the pool balance, the program fingerprint and the
+// success receipt, and collect every address typed into this window. The core
+// pins the same host independently, so an override here would only ever be
+// rejected there.
+constexpr auto SEQUENCER_URL = "https://testnet.lez.logos.co";
+
+// A public account id is 32 bytes of base58, so it never exceeds 64
+// characters. The bound is applied before the string reaches the decoder.
+constexpr int MAX_ACCOUNT_ID_LENGTH = 64;
+
+} // namespace
 
 FaucetBackend::FaucetBackend(QObject* parent)
     : FaucetBackendSimpleSource(parent)
 {
-    const QString dataRoot = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-        + QStringLiteral("/lez-faucet");
-    m_configPath = dataRoot + QStringLiteral("/wallet_config.json");
-    m_storagePath = dataRoot + QStringLiteral("/wallet.json");
-
-    setWalletExists(QFileInfo::exists(m_storagePath));
     setBusy(false);
-    setAccountId(QString());
-    setBalance(QString());
-    setLastTxHash(QString());
-    QString configuredSequencer = qEnvironmentVariable("LEZ_FAUCET_SEQUENCER_URL").trimmed();
-    if (configuredSequencer.isEmpty())
-        configuredSequencer = QString::fromLatin1(DEFAULT_SEQUENCER_URL);
-    setSequencerUrl(configuredSequencer);
-    // The current pinned Rust surface has no mnemonic-restoration function.
-    setRecoverySupported(false);
     setActiveJobId(QString());
-    setActiveJobKind(QString());
-    setActiveRecipientId(QString());
+    setSequencerUrl(QString::fromLatin1(SEQUENCER_URL));
 }
 
 FaucetBackend::~FaucetBackend()
@@ -45,14 +41,22 @@ FaucetBackend::~FaucetBackend()
     for (const QString& jobId : terminalJobIds)
         clearTerminalResponse(jobId);
     if (isContextReady())
-        invokeCore(QStringLiteral("destroy"));
+        invokeCore(QStringLiteral("shutdown"));
 }
 
-QString FaucetBackend::localError(const QString& message)
+QString FaucetBackend::localError(const QString& code, const QString& message)
 {
+    // Locally generated failures use the same shape as the core's so the view
+    // has exactly one error contract to dispatch on, and dispatches on the
+    // code rather than on the sentence.
+    QJsonObject error;
+    error.insert(QStringLiteral("code"), code);
+    error.insert(QStringLiteral("message"), message);
+    error.insert(QStringLiteral("retryable"), false);
+
     QJsonObject object;
     object.insert(QStringLiteral("ok"), false);
-    object.insert(QStringLiteral("error"), message);
+    object.insert(QStringLiteral("error"), error);
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
@@ -65,59 +69,55 @@ QString FaucetBackend::localSuccess(const QJsonObject& fields)
 
 QString FaucetBackend::bootstrap()
 {
-    QJsonObject object;
-    object.insert(QStringLiteral("ok"), true);
-    object.insert(QStringLiteral("wallet_exists"), walletExists());
-    object.insert(QStringLiteral("account_id"), accountId());
-    object.insert(QStringLiteral("recovery_supported"), recoverySupported());
-    object.insert(QStringLiteral("sequencer_url"), sequencerUrl());
-    object.insert(QStringLiteral("active_job_id"), activeJobId());
-    object.insert(QStringLiteral("active_job_kind"), activeJobKind());
-    object.insert(QStringLiteral("active_recipient_id"), activeRecipientId());
-    return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+    if (!m_configured) {
+        const QString response = invokeCore(QStringLiteral("configure"), {sequencerUrl()});
+        if (!succeeded(parseObject(response)))
+            return response;
+        m_configured = true;
+    }
+
+    QJsonObject fields;
+    fields.insert(QStringLiteral("sequencer_url"), sequencerUrl());
+    // A reloaded view rejoins a live request through this id and recovers its
+    // request key from the job envelope. It never mints a new one.
+    fields.insert(QStringLiteral("active_job_id"), activeJobId());
+    return localSuccess(fields);
 }
 
 QString FaucetBackend::invokeCore(const QString& method, const QVariantList& arguments)
 {
     if (!isContextReady())
-        return localError(QStringLiteral("Logos bridge is not available"));
+        return localError(QStringLiteral("internal_error"),
+                          QStringLiteral("The Logos bridge is not available."));
 
-    // Never log method arguments or raw results: create carries a password in,
-    // and its one-shot result carries the mnemonic out.
+    // Arguments are never logged. An address is the user's data even though it
+    // is public, and the raw envelopes are noise rather than diagnostics.
     logos::CallError error;
     auto& core = modules().lez_faucet;
     QString result;
-    if (method == QStringLiteral("create") && arguments.size() == 4) {
-        result = core.create(arguments[0].toString(), arguments[1].toString(),
-                             arguments[2].toString(), arguments[3].toString(), &error);
-    } else if (method == QStringLiteral("open") && arguments.size() == 3) {
-        result = core.open(arguments[0].toString(), arguments[1].toString(),
-                           arguments[2].toString(), &error);
-    } else if (method == QStringLiteral("destroy") && arguments.isEmpty()) {
-        result = core.destroy(&error);
-    } else if (method == QStringLiteral("verifyFingerprint") && arguments.isEmpty()) {
-        result = core.verifyFingerprint(&error);
-    } else if (method == QStringLiteral("createAndInitializeAccount") && arguments.isEmpty()) {
-        result = core.createAndInitializeAccount(&error);
-    } else if (method == QStringLiteral("balance") && arguments.size() == 1) {
-        result = core.balance(arguments[0].toString(), &error);
-    } else if (method == QStringLiteral("claimOnce") && arguments.size() == 1) {
-        result = core.claimOnce(arguments[0].toString(), &error);
-    } else if (method == QStringLiteral("claimUntilTarget") && arguments.size() == 3) {
-        result = core.claimUntilTarget(arguments[0].toString(), arguments[1].toString(),
-                                       arguments[2].toInt(), &error);
+    if (method == QStringLiteral("configure") && arguments.size() == 1) {
+        result = core.configure(arguments[0].toString(), &error);
+    } else if (method == QStringLiteral("getFaucetInfo") && arguments.isEmpty()) {
+        result = core.getFaucetInfo(&error);
+    } else if (method == QStringLiteral("inspectRecipient") && arguments.size() == 1) {
+        result = core.inspectRecipient(arguments[0].toString(), &error);
+    } else if (method == QStringLiteral("requestDrop") && arguments.size() == 2) {
+        result = core.requestDrop(arguments[0].toString(), arguments[1].toString(), &error);
     } else if (method == QStringLiteral("cancel") && arguments.size() == 1) {
         result = core.cancel(arguments[0].toString(), &error);
     } else if (method == QStringLiteral("jobStatus") && arguments.size() == 1) {
         result = core.jobStatus(arguments[0].toString(), &error);
     } else if (method == QStringLiteral("jobResultAck") && arguments.size() == 1) {
         result = core.jobResultAck(arguments[0].toString(), &error);
+    } else if (method == QStringLiteral("shutdown") && arguments.isEmpty()) {
+        result = core.shutdown(&error);
     } else {
-        return localError(QStringLiteral("Unsupported core method invocation"));
+        return localError(QStringLiteral("internal_error"),
+                          QStringLiteral("Unsupported core method invocation."));
     }
 
     if (!error.ok())
-        return localError(QString::fromStdString(error.message));
+        return localError(QStringLiteral("internal_error"), QString::fromStdString(error.message));
     return result;
 }
 
@@ -126,9 +126,13 @@ QString FaucetBackend::startCoreJob(
     const QString& method,
     const QVariantList& arguments)
 {
-    if (!activeJobId().isEmpty()) {
-        return localError(QStringLiteral("Another faucet operation is still active: %1")
-                              .arg(activeJobId()));
+    // Only a credit request occupies the single mutating slot. Pool status and
+    // recipient inspection are reads and must never queue behind one, or the
+    // window looks frozen for the length of a reconciliation and the user
+    // force-quits in the middle of a claim.
+    if (kind == QStringLiteral("drop") && !activeJobId().isEmpty()) {
+        return localError(QStringLiteral("drop_in_progress"),
+                          QStringLiteral("A faucet request is already running."));
     }
 
     const QString response = invokeCore(method, arguments);
@@ -136,22 +140,27 @@ QString FaucetBackend::startCoreJob(
     if (!succeeded(envelope))
         return response;
 
-    const QJsonObject result = resultObject(envelope);
-    QString jobId = envelope.value(QStringLiteral("job_id")).toString();
-    if (jobId.isEmpty())
-        jobId = result.value(QStringLiteral("job_id")).toString();
-    if (jobId.isEmpty())
-        return localError(QStringLiteral("Core operation did not return a job ID"));
+    const QString jobId = jobIdOf(envelope);
+    if (jobId.isEmpty()) {
+        // Reported verbatim so the view can decide what to do. For a credit
+        // request that decision is to re-call with the *same* request key: a
+        // missing id says nothing about whether the job started.
+        return localError(QStringLiteral("internal_error"),
+                          QStringLiteral("The faucet core did not return a job identifier."));
+    }
 
     m_jobKinds.insert(jobId, kind);
-    setActiveJobId(jobId);
-    setActiveJobKind(kind);
-    setBusy(true);
+    if (kind == QStringLiteral("drop")) {
+        setActiveJobId(jobId);
+        setBusy(true);
+    }
     return response;
 }
 
 QJsonObject FaucetBackend::parseObject(const QString& json)
 {
+    // Real JSON parsing, never a substring scan: an error message that merely
+    // contains the characters "ok":true must not read as a success.
     const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8());
     return document.isObject() ? document.object() : QJsonObject();
 }
@@ -167,147 +176,56 @@ QJsonObject FaucetBackend::resultObject(const QJsonObject& object)
     return result.isObject() ? result.toObject() : object;
 }
 
-QJsonObject FaucetBackend::statusPayload(const QJsonObject& object)
+QString FaucetBackend::jobIdOf(const QJsonObject& envelope)
 {
-    return object;
+    const QString jobId = envelope.value(QStringLiteral("job_id")).toString();
+    if (!jobId.isEmpty())
+        return jobId;
+    return resultObject(envelope).value(QStringLiteral("job_id")).toString();
 }
 
-QJsonValue FaucetBackend::completedResult(const QJsonObject& object)
+QString FaucetBackend::boundedAddress(const QString& address)
 {
-    const QJsonValue nativeResult = object.value(QStringLiteral("result"));
-    if (!nativeResult.isObject())
-        return nativeResult;
+    const QString prefix = QStringLiteral("Public/");
+    QString candidate = address.trimmed();
+    if (candidate.startsWith(prefix))
+        candidate.remove(0, prefix.size());
+    else if (candidate.contains(QChar(u'/')))
+        return {}; // An explicit prefix check, so Private/... is refused by design.
 
-    const QJsonObject wrapper = nativeResult.toObject();
-    const QJsonValue operationResult = wrapper.value(QStringLiteral("result"));
-    if (wrapper.value(QStringLiteral("ok")).toBool(false) && !operationResult.isUndefined())
-        return operationResult;
-    return nativeResult;
-}
-
-QString FaucetBackend::scalarString(const QJsonValue& value)
-{
-    if (value.isString())
-        return value.toString();
-    return QString();
-}
-
-QString FaucetBackend::normalizedPublicAccountId(const QString& accountId)
-{
-    QString normalized = accountId.trimmed();
-    if (normalized.startsWith(QStringLiteral("Public/")))
-        normalized.remove(0, 7);
-    else if (normalized.contains(QChar(u'/')))
+    candidate = candidate.trimmed();
+    if (candidate.isEmpty() || candidate.size() > MAX_ACCOUNT_ID_LENGTH)
         return {};
-    return normalized.trimmed();
+    for (const QChar character : candidate) {
+        // NUL and control characters have no place in an account id and are a
+        // way to smuggle a truncated string across the C boundary.
+        if (character.unicode() < 0x20 || character.unicode() == 0x7F || character.isSpace())
+            return {};
+    }
+    return candidate;
 }
 
-QString FaucetBackend::startedJobId(const QString& response)
+bool FaucetBackend::isRequestKey(const QString& requestKey)
 {
-    const QJsonObject envelope = parseObject(response);
-    if (!succeeded(envelope))
-        return {};
-    QString jobId = envelope.value(QStringLiteral("job_id")).toString();
-    if (jobId.isEmpty())
-        jobId = resultObject(envelope).value(QStringLiteral("job_id")).toString();
-    return jobId;
-}
-
-QString FaucetBackend::startExternalJob(
-    const QString& kind,
-    const QString& method,
-    const QString& accountId,
-    const QVariantList& remainingArguments)
-{
-    if (!m_externalRecipients.canStartExternalOperation()) {
-        return localError(QStringLiteral(
-            "Open or create the local faucet wallet before funding an existing account"));
+    // Mirrors the core's validator exactly: a lowercase RFC 4122 UUID. Keeping
+    // the two in step means a malformed key is refused before it can occupy an
+    // idempotency slot.
+    if (requestKey.size() != 36)
+        return false;
+    for (int index = 0; index < requestKey.size(); ++index) {
+        const QChar character = requestKey.at(index);
+        const bool separator = index == 8 || index == 13 || index == 18 || index == 23;
+        if (separator) {
+            if (character != QChar(u'-'))
+                return false;
+            continue;
+        }
+        const char16_t code = character.unicode();
+        const bool hexadecimal = (code >= u'0' && code <= u'9') || (code >= u'a' && code <= u'f');
+        if (!hexadecimal)
+            return false;
     }
-    const QString normalized = normalizedPublicAccountId(accountId);
-    if (normalized.isEmpty()) {
-        return localError(QStringLiteral(
-            "Enter a public account ID as Public/<account-id> or a bare account ID"));
-    }
-
-    QVariantList arguments{normalized};
-    arguments.append(remainingArguments);
-    const QString response = startCoreJob(kind, method, arguments);
-    const QString jobId = startedJobId(response);
-    if (!jobId.isEmpty()) {
-        m_externalRecipients.recordJob(jobId.toStdString(), normalized.toStdString());
-        setActiveRecipientId(normalized);
-    }
-    return response;
-}
-
-void FaucetBackend::applyTerminalResult(const QString& kind, const QJsonObject& status)
-{
-    const QJsonValue resultValue = completedResult(status);
-    const QJsonObject result = resultValue.isObject() ? resultValue.toObject() : QJsonObject();
-
-    if (kind == QStringLiteral("create")) {
-        m_externalRecipients.markClientOpen();
-        setWalletExists(true);
-        setAccountId(QString());
-        setBalance(QString());
-        return;
-    }
-
-    if (kind == QStringLiteral("open")) {
-        m_externalRecipients.markClientOpen();
-        return;
-    }
-
-    if (kind == QStringLiteral("initialize")) {
-        const QString nextAccountId = result.value(QStringLiteral("account_id")).toString();
-        if (!nextAccountId.isEmpty())
-            setAccountId(nextAccountId);
-        const QString nextBalance = scalarString(result.value(QStringLiteral("balance")));
-        if (!nextBalance.isEmpty())
-            setBalance(nextBalance);
-        const QString txHash = result.value(QStringLiteral("init_tx_hash")).toString();
-        if (!txHash.isEmpty())
-            setLastTxHash(txHash);
-        return;
-    }
-
-    if (kind == QStringLiteral("balance")) {
-        const QString nextBalance = scalarString(resultValue);
-        if (!nextBalance.isEmpty())
-            setBalance(nextBalance);
-        return;
-    }
-
-    if (kind == QStringLiteral("claim_once")) {
-        const QString nextBalance = scalarString(result.value(QStringLiteral("balance_after")));
-        if (!nextBalance.isEmpty())
-            setBalance(nextBalance);
-        const QString txHash = result.value(QStringLiteral("tx_hash")).toString();
-        if (!txHash.isEmpty())
-            setLastTxHash(txHash);
-        return;
-    }
-
-    if (kind == QStringLiteral("claim_target")) {
-        const QString nextBalance = scalarString(result.value(QStringLiteral("final_balance")));
-        if (!nextBalance.isEmpty())
-            setBalance(nextBalance);
-    }
-}
-
-void FaucetBackend::applyProgress(const QString& kind, const QJsonObject& status)
-{
-    if (kind != QStringLiteral("claim_target"))
-        return;
-
-    const QJsonObject progress = status.value(QStringLiteral("progress")).toObject();
-    const QString nextBalance = scalarString(progress.value(QStringLiteral("balance")));
-    if (!nextBalance.isEmpty())
-        setBalance(nextBalance);
-    const QString txHash = progress.value(QStringLiteral("receipt")).toObject()
-                               .value(QStringLiteral("tx_hash")).toString();
-    if (!txHash.isEmpty())
-        setLastTxHash(txHash);
+    return true;
 }
 
 void FaucetBackend::clearTerminalResponse(const QString& jobId)
@@ -315,136 +233,75 @@ void FaucetBackend::clearTerminalResponse(const QString& jobId)
     auto terminal = m_terminalResponses.find(jobId);
     if (terminal == m_terminalResponses.end())
         return;
-    terminal.value().fill(QChar(u'\0'));
     m_terminalResponses.erase(terminal);
 }
 
-QString FaucetBackend::startCreate(QString password)
+QString FaucetBackend::startFaucetInfo()
 {
-    if (password.isEmpty())
-        return localError(QStringLiteral("Wallet password cannot be empty"));
-
-    QDir().mkpath(QFileInfo(m_storagePath).absolutePath());
-    const QString result = startCoreJob(
-        QStringLiteral("create"),
-        QStringLiteral("create"),
-        {m_configPath, m_storagePath, sequencerUrl(), password});
-    password.fill(QChar(u'\0'));
-    return result;
+    return startCoreJob(QStringLiteral("info"), QStringLiteral("getFaucetInfo"));
 }
 
-QString FaucetBackend::startOpen()
+QString FaucetBackend::startInspectRecipient(QString address)
 {
-    if (!QFileInfo::exists(m_storagePath))
-        return localError(QStringLiteral("Wallet file does not exist"));
-
-    return startCoreJob(
-        QStringLiteral("open"),
-        QStringLiteral("open"),
-        {m_configPath, m_storagePath, sequencerUrl()});
-}
-
-QString FaucetBackend::startVerifyFingerprint()
-{
-    return startCoreJob(
-        QStringLiteral("verify"),
-        QStringLiteral("verifyFingerprint"));
-}
-
-QString FaucetBackend::startInitializeAccount()
-{
-    return startCoreJob(
-        QStringLiteral("initialize"),
-        QStringLiteral("createAndInitializeAccount"));
-}
-
-QString FaucetBackend::startBalance()
-{
-    if (accountId().isEmpty())
-        return localError(QStringLiteral("No initialized public account is selected"));
-
-    return startCoreJob(
-        QStringLiteral("balance"),
-        QStringLiteral("balance"),
-        {accountId()});
-}
-
-QString FaucetBackend::startClaimOnce()
-{
-    if (accountId().isEmpty())
-        return localError(QStringLiteral("No initialized public account is selected"));
-
-    return startCoreJob(
-        QStringLiteral("claim_once"),
-        QStringLiteral("claimOnce"),
-        {accountId()});
-}
-
-QString FaucetBackend::startClaimUntilTarget(QString target)
-{
-    if (accountId().isEmpty())
-        return localError(QStringLiteral("No initialized public account is selected"));
-
-    return startCoreJob(
-        QStringLiteral("claim_target"),
-        QStringLiteral("claimUntilTarget"),
-        {accountId(), target, MAX_CLAIMS_PER_RUN});
-}
-
-QString FaucetBackend::startExternalBalance(QString accountId)
-{
-    m_externalRecipients.beginPreflight();
-    if (!activeJobId().isEmpty()) {
-        return localError(QStringLiteral("Another faucet operation is still active: %1")
-                              .arg(activeJobId()));
+    const QString bounded = boundedAddress(address);
+    if (bounded.isEmpty()) {
+        // The rejected text is never quoted back. It is the user's input, and
+        // an error message is not a place to reflect it.
+        return localError(QStringLiteral("invalid_public_account_id"),
+                          QStringLiteral("Enter a public LEZ account ID."));
     }
-    return startExternalJob(
-        QStringLiteral("external_balance"),
-        QStringLiteral("balance"),
-        accountId);
+    return startCoreJob(QStringLiteral("inspect"), QStringLiteral("inspectRecipient"), {bounded});
 }
 
-QString FaucetBackend::startExternalClaimOnce(QString accountId)
+QString FaucetBackend::startRequestDrop(QString address, QString requestKey)
 {
-    const QString normalized = normalizedPublicAccountId(accountId);
-    if (normalized.isEmpty()
-        || !m_externalRecipients.consumePreflightForClaim(normalized.toStdString())) {
-        return localError(QStringLiteral(
-            "Check this public account and its balance before claiming"));
+    const QString bounded = boundedAddress(address);
+    if (bounded.isEmpty()) {
+        return localError(QStringLiteral("invalid_public_account_id"),
+                          QStringLiteral("Enter a public LEZ account ID."));
     }
-    return startExternalJob(
-        QStringLiteral("external_claim_once"),
-        QStringLiteral("claimOnce"),
-        normalized);
+    if (!isRequestKey(requestKey)) {
+        return localError(QStringLiteral("invalid_request_key"),
+                          QStringLiteral("The request identifier is malformed."));
+    }
+    return startCoreJob(QStringLiteral("drop"), QStringLiteral("requestDrop"),
+                        {bounded, requestKey});
 }
 
-QString FaucetBackend::startExternalClaimUntilTarget(QString accountId, QString target)
+QString FaucetBackend::copyText(QString text)
 {
-    const QString normalized = normalizedPublicAccountId(accountId);
-    if (normalized.isEmpty()
-        || !m_externalRecipients.consumePreflightForClaim(normalized.toStdString())) {
-        return localError(QStringLiteral(
-            "Check this public account and its balance before claiming"));
+    if (text.isEmpty()) {
+        return localError(QStringLiteral("internal_error"),
+                          QStringLiteral("There is no text to copy."));
     }
-    return startExternalJob(
-        QStringLiteral("external_claim_target"),
-        QStringLiteral("claimUntilTarget"),
-        normalized,
-        {target, MAX_CLAIMS_PER_RUN});
+    QClipboard* clipboard = QGuiApplication::clipboard();
+    if (clipboard == nullptr) {
+        return localError(QStringLiteral("internal_error"),
+                          QStringLiteral("The system clipboard is not available."));
+    }
+    clipboard->setText(text);
+    return localSuccess();
 }
 
 QString FaucetBackend::cancelJob(QString jobId)
 {
-    if (jobId.isEmpty())
-        return localError(QStringLiteral("Job ID cannot be empty"));
+    if (jobId.isEmpty()) {
+        return localError(QStringLiteral("unknown_job"),
+                          QStringLiteral("There is no job to cancel."));
+    }
     return invokeCore(QStringLiteral("cancel"), {jobId});
 }
 
 QString FaucetBackend::jobStatus(QString jobId)
 {
-    if (jobId.isEmpty())
-        return localError(QStringLiteral("Job ID cannot be empty"));
+    if (jobId.isEmpty()) {
+        return localError(QStringLiteral("unknown_job"),
+                          QStringLiteral("There is no job to report on."));
+    }
 
+    // A terminal envelope is replayed from here until the view acknowledges it,
+    // so a connection lost between "succeeded" and the receipt does not lose
+    // the proof that the credit landed.
     const auto cached = m_terminalResponses.constFind(jobId);
     if (cached != m_terminalResponses.constEnd())
         return cached.value();
@@ -454,51 +311,45 @@ QString FaucetBackend::jobStatus(QString jobId)
     if (!succeeded(envelope))
         return response;
 
-    const QJsonObject payload = statusPayload(envelope);
-    const QString state = payload.value(QStringLiteral("status")).toString().toLower();
-    const QString kind = m_jobKinds.value(jobId);
-    applyProgress(kind, envelope);
-    const bool terminal = state == QStringLiteral("completed")
-        || state == QStringLiteral("failed")
-        || state == QStringLiteral("cancelled");
-    if (terminal) {
-        if (state == QStringLiteral("completed")) {
-            applyTerminalResult(kind, envelope);
-            if (kind == QStringLiteral("external_balance"))
-                m_externalRecipients.completePreflight(jobId.toStdString());
-        }
+    const QString status = envelope.value(QStringLiteral("status")).toString();
+    const bool terminal = status == QStringLiteral("succeeded")
+        || status == QStringLiteral("failed")
+        || status == QStringLiteral("cancelled")
+        || status == QStringLiteral("outcome_unknown");
+    if (terminal)
         m_terminalResponses.insert(jobId, response);
-    }
 
     return response;
 }
 
 QString FaucetBackend::acknowledgeJob(QString jobId)
 {
-    if (jobId.isEmpty())
-        return localError(QStringLiteral("Job ID cannot be empty"));
+    if (jobId.isEmpty()) {
+        return localError(QStringLiteral("unknown_job"),
+                          QStringLiteral("There is no job to acknowledge."));
+    }
 
-    // The core owns the authoritative sensitive result. It must acknowledge
-    // and clear that result before this UI-side replay cache can be discarded.
+    // The core owns the authoritative result and must release it before this
+    // replay copy is discarded, or a failed acknowledgement would leave the
+    // view with nothing to show.
     const QString coreResponse = invokeCore(QStringLiteral("jobResultAck"), {jobId});
     const QJsonObject coreEnvelope = parseObject(coreResponse);
     const bool locallyTerminal = m_terminalResponses.contains(jobId);
     const QString coreErrorCode = coreEnvelope.value(QStringLiteral("error")).toObject()
                                       .value(QStringLiteral("code")).toString();
+    // A job record the core has already reaped is still an acknowledgement.
+    // The request-key tombstone behind it is permanent either way.
     const bool alreadyReaped = locallyTerminal && coreErrorCode == QStringLiteral("unknown_job");
     if (!succeeded(coreEnvelope) && !alreadyReaped)
         return coreResponse;
 
-    const bool known = m_jobKinds.contains(jobId) || m_terminalResponses.contains(jobId);
+    const bool known = m_jobKinds.contains(jobId) || locallyTerminal;
     clearTerminalResponse(jobId);
     m_jobKinds.remove(jobId);
-    m_externalRecipients.acknowledge(jobId.toStdString());
     if (activeJobId() == jobId) {
         setActiveJobId(QString());
-        setActiveJobKind(QString());
-        setActiveRecipientId(QString());
+        setBusy(false);
     }
-    setBusy(!activeJobId().isEmpty());
 
     QJsonObject fields;
     fields.insert(QStringLiteral("job_id"), jobId);

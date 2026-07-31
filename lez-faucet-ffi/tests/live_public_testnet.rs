@@ -1,261 +1,215 @@
-use std::path::Path;
+//! Live public-testnet tests.
+//!
+//! These talk to the real LEZ public testnet, so they are `#[ignore]`d and are
+//! never part of a normal `cargo test` run.
+//!
+//! The read-only tests are safe to run at any time. The single write test
+//! spends 150 LEZ from a finite community pool and is additionally gated on an
+//! explicit destination address supplied through the environment, so that no
+//! transaction can be submitted without someone naming the recipient on
+//! purpose.
 
-use anyhow::{ensure, Context as _};
-use common::HashType;
-use lee::AccountId;
-use lez_faucet_ffi::{CreatedWallet, FaucetClient, PINATA_PRIZE};
-use sequencer_service_rpc::{RpcClient as _, SequencerClientBuilder};
-use zeroize::Zeroize as _;
+use lez_faucet_ffi::{
+    client::{Eligibility, FaucetClient},
+    error::ErrorCode,
+};
 
-const LIVE_CONFIRMATION: &str = "I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ";
-const PUBLIC_TESTNET: &str = "https://testnet.lez.logos.co";
-const SAFE_PINATA_DIFFICULTY: u8 = 3;
+const SEQUENCER: &str = "https://testnet.lez.logos.co";
 
-async fn create_isolated_wallet(root: &Path, sequencer_url: &str) -> anyhow::Result<FaucetClient> {
-    let CreatedWallet {
-        client,
-        mut mnemonic,
-        ..
-    } = FaucetClient::create(
-        root.join("config.json"),
-        root.join("storage.json"),
-        sequencer_url,
-        "testnet-only",
-    )
-    .await?;
-    mnemonic.zeroize();
-    drop(mnemonic);
-    Ok(client)
+/// Pinned at the revision this client is built against.
+const PINATA_ACCOUNT: &str = "EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7";
+const PRIZE: u128 = 150;
+
+fn client() -> FaucetClient {
+    FaucetClient::new(SEQUENCER).expect("the pinned sequencer URL must be accepted")
 }
 
-fn public_sequencer_url() -> String {
-    std::env::var("LEZ_FAUCET_SEQUENCER_URL").unwrap_or_else(|_| PUBLIC_TESTNET.to_owned())
+fn decimal(value: &str) -> u128 {
+    value
+        .parse()
+        .expect("balances are canonical decimal strings")
 }
 
-fn require_external_funding_live_gate() {
+#[tokio::test]
+#[ignore = "talks to the live public testnet"]
+async fn faucet_info_matches_the_pinned_protocol() {
+    let info = client().get_info().await.expect("faucet info");
+
+    assert_eq!(info.network, "lez-public-testnet");
+    assert_eq!(info.prize_amount, "150");
+    assert_eq!(info.pinata_account.account_id, PINATA_ACCOUNT);
     assert_eq!(
-        std::env::var("LEZ_FAUCET_RUN_LIVE").as_deref(),
-        Ok(LIVE_CONFIRMATION),
-        "set LEZ_FAUCET_RUN_LIVE={LIVE_CONFIRMATION} in addition to passing --ignored"
+        info.pinata_account.address,
+        format!("Public/{PINATA_ACCOUNT}")
+    );
+
+    // The fingerprint gate passed, which is the whole point of calling this
+    // before anything is ever submitted.
+    assert_eq!(info.program_fingerprint.pinata.len(), 64);
+    assert_eq!(info.program_fingerprint.authenticated_transfer.len(), 64);
+
+    // Genesis difficulty is 3. A different value is not necessarily wrong, but
+    // it is a protocol change we want to notice rather than mine through.
+    assert_eq!(
+        info.difficulty_bytes, 3,
+        "difficulty changed from the pinned genesis value"
+    );
+    assert_eq!(info.effective_difficulty_bits, 24);
+
+    // The pool only ever moves in multiples of the prize.
+    let pool = decimal(&info.pool_balance);
+    assert_eq!(
+        pool % PRIZE,
+        0,
+        "pool balance is not a multiple of the prize"
+    );
+    assert_eq!(info.claims_remaining, (pool / PRIZE).to_string());
+    assert_eq!(
+        info.can_claim,
+        pool >= PRIZE && info.blocked_reason.is_none()
+    );
+
+    println!(
+        "pool={pool} claims_remaining={} difficulty={}",
+        info.claims_remaining, info.difficulty_bytes
     );
 }
 
 #[tokio::test]
-#[ignore = "mutates the public LEZ testnet and consumes one 150 LEZ Piñata claim"]
-async fn create_initialize_and_claim_once_on_public_testnet() {
-    assert_eq!(
-        std::env::var("LEZ_FAUCET_LIVE_TEST").as_deref(),
-        Ok(LIVE_CONFIRMATION),
-        "set LEZ_FAUCET_LIVE_TEST={LIVE_CONFIRMATION} in addition to passing --ignored"
-    );
+#[ignore = "talks to the live public testnet"]
+async fn recipient_states_are_distinguished_against_live_accounts() {
+    let client = client();
 
-    let temp = tempfile::tempdir().expect("temporary wallet directory");
-    let config = temp.path().join("wallet/config.json");
-    let storage = temp.path().join("wallet/storage.json");
-    let created = FaucetClient::create(config, storage, PUBLIC_TESTNET, "testnet-only")
+    // The Piñata account itself exists but is owned by the Piñata program, so
+    // it is a real, live example of a wrong-owner recipient.
+    let pinata = client
+        .inspect_recipient(PINATA_ACCOUNT)
         .await
-        .expect("create wallet");
-    let mut client = created.client;
-    // Never print the mnemonic; remove the extra in-memory copy immediately.
-    drop(created.mnemonic);
-
-    let fingerprint = client
-        .verify_program_fingerprint()
-        .await
-        .expect("v0.2.0 fingerprint");
-    assert_eq!(
-        fingerprint.pinata,
-        "66f6a58d92c159c3c13ea54d1e37a68a814f0fd3b8fd44b7d35c0617ac4456f8"
-    );
-
-    let initialized = client
-        .create_and_initialize_public_account()
-        .await
-        .expect("signed account initialization");
-    assert_eq!(initialized.balance, 0);
-    let account_id = initialized.account_id.parse().expect("account ID");
-
-    let receipt = client
-        .claim_once(account_id)
-        .await
-        .expect("unsigned Piñata claim");
-    assert_eq!(receipt.balance_before, 0);
-    assert_eq!(receipt.balance_after, PINATA_PRIZE);
-
-    eprintln!(
-        "live LEZ faucet proof: account={} init_tx={} claim_tx={} balance={}",
-        initialized.account_id,
-        initialized
-            .init_tx_hash
-            .as_deref()
-            .unwrap_or("already-initialized"),
-        receipt.tx_hash.as_deref().unwrap_or("unknown"),
-        receipt.balance_after
-    );
+        .expect("inspection should succeed even for an ineligible account");
+    assert_eq!(pinata.eligibility, Eligibility::WrongOwner);
+    assert!(pinata.balance.is_none());
 }
 
-/// Run only as an optimized binary so difficulty-3 proof of work stays within
-/// the same 60-second solver limit used by the product:
+#[tokio::test]
+#[ignore = "talks to the live public testnet"]
+async fn malformed_and_private_addresses_never_reach_the_network() {
+    let client = client();
+    let bomb = "1".repeat(133);
+    for bad in [
+        "Private/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
+        "not-an-account",
+        "",
+        // The input that panics the pinned base58 decoder.
+        bomb.as_str(),
+    ] {
+        let error = client
+            .inspect_recipient(bad)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{bad:?} must be rejected"));
+        assert_eq!(error.code, ErrorCode::InvalidPublicAccountId, "{bad:?}");
+    }
+}
+
+/// The one authorized write test.
 ///
-/// ```text
-/// LEZ_FAUCET_RUN_LIVE=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
-/// cargo test --release -p lez-faucet-ffi --test live_public_testnet \
-/// client_wallet_funds_distinct_external_public_account_on_public_testnet \
-/// -- --ignored --exact --nocapture
-/// ```
+/// Requires `LEZ_FAUCET_LIVE_RECIPIENT` to name the destination explicitly.
+/// Without it the test reports that it did nothing and passes, so it can never
+/// spend a claim by accident.
 #[tokio::test]
-#[ignore = "run with cargo test --release; initializes two public accounts and consumes one 150 LEZ Piñata claim"]
-async fn client_wallet_funds_distinct_external_public_account_on_public_testnet(
-) -> anyhow::Result<()> {
-    require_external_funding_live_gate();
+#[ignore = "submits a real transaction and spends 150 LEZ from a finite pool"]
+async fn one_authorized_claim_credits_exactly_the_prize() {
+    let Ok(recipient) = std::env::var("LEZ_FAUCET_LIVE_RECIPIENT") else {
+        println!(
+            "skipped: set LEZ_FAUCET_LIVE_RECIPIENT to the approved destination address to run this"
+        );
+        return;
+    };
 
-    let sequencer_url = public_sequencer_url();
-    let temp = tempfile::tempdir().context("temporary live-test wallet root")?;
+    let client = client();
 
-    // Wallet A is only the faucet client context. Its recovery phrase is
-    // zeroized before any network mutation or account initialization.
-    let mut client_a = create_isolated_wallet(&temp.path().join("wallet-a"), &sequencer_url)
+    // Independent pre-state, read before anything is built.
+    let info_before = client.get_info().await.expect("faucet info");
+    let inspection = client
+        .inspect_recipient(&recipient)
         .await
-        .context("create isolated faucet client wallet A")?;
-    client_a
-        .verify_program_fingerprint()
-        .await
-        .context("public testnet program fingerprint preflight")?;
+        .expect("recipient inspection");
+    assert_eq!(
+        inspection.eligibility,
+        Eligibility::Eligible,
+        "the destination must already be an initialized authenticated-transfer account; \
+         the faucet must never initialize it on the owner's behalf"
+    );
+    let balance_before = decimal(
+        &inspection
+            .balance
+            .clone()
+            .expect("eligible accounts report a balance"),
+    );
+    let pool_before = decimal(&info_before.pool_balance);
 
-    // Abort before account initialization if the public Piñata pool or
-    // challenge is not healthy enough for one bounded claim.
-    let rpc = SequencerClientBuilder::default()
-        .build(&sequencer_url)
-        .context("connect public sequencer for live preflight")?;
-    let pinata_id = system_accounts::pinata_account_id();
-    let pinata = rpc
-        .get_account(pinata_id)
-        .await
-        .context("fetch public Piñata pool")?;
-    ensure!(
-        pinata.program_owner == programs::pinata().id(),
-        "public Piñata pool has an unexpected program owner"
-    );
-    ensure!(
-        pinata.balance >= PINATA_PRIZE,
-        "public Piñata pool cannot fund one {PINATA_PRIZE} LEZ claim"
-    );
-    let challenge = pinata.data.as_ref();
-    ensure!(
-        challenge.len() == 33,
-        "public Piñata challenge must be 33 bytes"
-    );
-    ensure!(
-        challenge[0] <= SAFE_PINATA_DIFFICULTY,
-        "public Piñata difficulty {} exceeds live-test safety limit {SAFE_PINATA_DIFFICULTY}",
-        challenge[0]
-    );
+    println!("before: recipient={balance_before} pool={pool_before}");
 
-    let mut client_b = create_isolated_wallet(&temp.path().join("wallet-b"), &sequencer_url)
+    let request_key = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+    let receipt = client
+        .request_drop(&recipient, request_key, 1)
         .await
-        .context("create isolated recipient wallet B")?;
-    let account_a = client_a
-        .create_and_initialize_public_account()
-        .await
-        .context("initialize wallet A public account")?;
-    let account_b = client_b
-        .create_and_initialize_public_account()
-        .await
-        .context("initialize wallet B public recipient")?;
-    ensure!(
-        account_a.account_id != account_b.account_id,
-        "wallet A and wallet B unexpectedly derived the same public account"
+        .expect("the claim should succeed");
+
+    // The receipt must prove the credit, not merely the submission.
+    assert_eq!(receipt.amount, "150");
+    assert_eq!(receipt.request_key, request_key);
+    assert_eq!(
+        receipt.recipient.account_id,
+        inspection.recipient.account_id
+    );
+    assert_eq!(decimal(&receipt.balance_before), balance_before);
+    assert_eq!(decimal(&receipt.balance_after), balance_before + PRIZE);
+    assert_eq!(
+        receipt.tx_hash.len(),
+        64,
+        "a receipt always carries its transaction hash"
+    );
+    println!(
+        "receipt: tx={} retries={}",
+        receipt.tx_hash, receipt.stale_challenge_retries
     );
 
-    let account_a_id: AccountId = account_a
-        .account_id
-        .parse()
-        .context("wallet A account ID")?;
-    let account_b_id: AccountId = account_b
-        .account_id
-        .parse()
-        .context("wallet B account ID")?;
-
-    // This balance lookup is also the production preflight: it proves wallet
-    // B's recipient is initialized and owned by authenticated-transfer.
-    let balance_before = client_a
-        .balance(account_b_id)
+    // Verify independently rather than trusting the receipt we just produced.
+    let after = client
+        .inspect_recipient(&recipient)
         .await
-        .context("wallet A preflight for wallet B recipient")?;
-    ensure!(
-        balance_before == account_b.balance,
-        "wallet A and wallet B disagree on recipient balance before claim"
+        .expect("recipient re-inspection");
+    let balance_after = decimal(&after.balance.expect("eligible accounts report a balance"));
+    assert_eq!(
+        balance_after,
+        balance_before + PRIZE,
+        "the recipient must have gained exactly the prize"
     );
 
-    // Invoke exactly once. FaucetClient reconciles a known/unknown submission
-    // outcome internally and never retries an ambiguous outcome.
-    let receipt = client_a
-        .claim_once(account_b_id)
+    let info_after = client.get_info().await.expect("faucet info");
+    let pool_after = decimal(&info_after.pool_balance);
+    assert!(
+        pool_before - pool_after >= PRIZE,
+        "the pool must have paid at least the prize (before {pool_before}, after {pool_after})"
+    );
+
+    println!("after: recipient={balance_after} pool={pool_after}");
+
+    // Replaying the same key must not produce a second claim.
+    let replayed = client
+        .request_drop(&recipient, request_key, 2)
         .await
-        .context("wallet A claim for wallet B recipient")?;
-    let expected_balance = balance_before
-        .checked_add(PINATA_PRIZE)
-        .context("recipient balance overflow")?;
-    ensure!(
-        receipt.balance_before == balance_before,
-        "claim receipt has an unexpected starting balance"
-    );
-    ensure!(
-        receipt.balance_after == expected_balance,
-        "wallet B recipient did not increase by exactly {PINATA_PRIZE} LEZ"
-    );
-    ensure!(
-        client_a.balance(account_b_id).await? == expected_balance,
-        "wallet A does not observe the exact post-claim recipient balance"
-    );
-    ensure!(
-        client_b.balance(account_b_id).await? == expected_balance,
-        "wallet B does not observe the exact post-claim recipient balance"
-    );
+        .expect("a replayed key returns the original receipt");
+    assert_eq!(replayed.tx_hash, receipt.tx_hash);
 
-    let claim_tx_hash = receipt
-        .tx_hash
-        .as_deref()
-        .context("confirmed live claim did not return a transaction hash")?;
-    let claim_hash: HashType = claim_tx_hash.parse().context("claim transaction hash")?;
-    let claim_tx = rpc
-        .get_transaction(claim_hash)
+    let unchanged = client
+        .inspect_recipient(&recipient)
         .await
-        .context("resolve confirmed claim transaction")?
-        .context("confirmed claim transaction is missing from the sequencer")?;
-    ensure!(
-        claim_tx.hash() == claim_hash,
-        "resolved claim transaction hash does not match its receipt"
+        .expect("recipient re-inspection");
+    assert_eq!(
+        decimal(&unchanged.balance.expect("balance")),
+        balance_after,
+        "replaying a request key must not move the balance again"
     );
-    let affected_accounts = claim_tx.affected_public_account_ids();
-    ensure!(
-        affected_accounts.contains(&account_b_id),
-        "resolved claim transaction does not target wallet B's recipient"
-    );
-    ensure!(
-        !affected_accounts.contains(&account_a_id),
-        "resolved claim transaction unexpectedly targets wallet A"
-    );
-
-    eprintln!(
-        "live external funding proof: client_account={} recipient_account={} client_init_tx={} recipient_init_tx={} claim_tx={} balance_before={} balance_after={}",
-        account_a.account_id,
-        account_b.account_id,
-        account_a
-            .init_tx_hash
-            .as_deref()
-            .unwrap_or("already-initialized"),
-        account_b
-            .init_tx_hash
-            .as_deref()
-            .unwrap_or("already-initialized"),
-        claim_tx_hash,
-        balance_before,
-        receipt.balance_after
-    );
-
-    drop(client_a);
-    drop(client_b);
-    temp.close().context("remove isolated live-test wallets")?;
-    Ok(())
 }

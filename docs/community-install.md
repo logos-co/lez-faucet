@@ -5,9 +5,17 @@ not currently part of the built-in Logos module catalog.
 
 ## Requirements
 
-- Logos Basecamp 0.2.1
+- **LEZ Faucet 0.3.0** is the version documented here, for both packages
+  (`lez_faucet` and `lez_faucet_ui`).
+- Requires **Logos Basecamp 0.2.1**. That 0.2.1 is the host application's
+  version, not the faucet's. The two numbers are unrelated and are not meant to
+  match.
 - Apple Silicon macOS (`darwin-arm64`)
 - Public-testnet use only
+
+Version numbers in these docs always name their subject. Where you see LEZ
+`v0.2.0`, that is the pinned upstream protocol revision this client is built
+against, and it is a third independent number.
 
 Linux and Intel macOS packages are not published yet because the required
 circuit and rapidsnark fixed-output artifacts have only been validated for
@@ -22,8 +30,8 @@ https://raw.githubusercontent.com/logos-co/lez-faucet/main/logos-repo.json
 ```
 
 The repository descriptor points Basecamp at the rolling catalog index hosted
-in this repository's `index` GitHub release. The index retains both v0.2.0 and
-v0.1.0 packages so users can roll back when necessary.
+in this repository's `index` GitHub release. The index retains the v0.2.0 and
+v0.1.0 packages alongside 0.3.0 so users can roll back when necessary.
 
 ## Install the app
 
@@ -31,29 +39,19 @@ For a new installation, install **`lez_faucet_ui`** from the package browser. It
 declares **`lez_faucet`** as a dependency, so Basecamp should install the newest
 core module automatically from the same catalog.
 
-For an existing v0.1.0 installation, upgrade or install **`lez_faucet` 0.2.0
-first**, then upgrade **`lez_faucet_ui` to 0.2.0**. The UI dependency is
-currently unversioned, so upgrading the UI alone may treat an installed 0.1.0
+For an existing 0.1.0 or 0.2.0 installation, upgrade or install **`lez_faucet`
+0.3.0 first**, then upgrade **`lez_faucet_ui` to 0.3.0**. The UI dependency is
+currently unversioned, so upgrading the UI alone may treat an installed older
 core as sufficient and leave it in place. If automatic dependency resolution
 is unavailable, use this same core-then-UI order for a new installation.
 
+Get that order wrong and the app does not merely look old: 0.3.0 removed the
+wallet flow and changed the core module's interface, so a 0.3.0 UI calls slots a
+0.2.x core does not have. Expect errors on the first action rather than a
+working, older screen.
+
 Installing only `lez_faucet` does not add a visible panel; the UI package is the
 app entry point. Restart Basecamp if a newly installed view does not appear.
-
-## Create and fund a local account
-
-1. Leave the sequencer set to `https://testnet.lez.logos.co` unless you are
-   deliberately using a compatible localnet.
-2. Read and accept the plaintext-wallet warning.
-3. Create the wallet. LEZ Faucet stores its config, plaintext wallet, and faucet
-   state under Basecamp's application-data directory; v0.2.0 does not expose a
-   custom path chooser.
-4. Save the recovery mnemonic from the one-time recovery screen. It cannot be
-   shown again by the app.
-5. Create and initialize the public account. Wait for the initialization
-   transaction to be confirmed.
-6. Use **Claim 150** for one claim, or enter a target and use **Claim until
-   target**. The app confirms each claim before starting the next one.
 
 ## Fund an existing public account
 
@@ -67,35 +65,56 @@ The recipient must already:
 - be initialized on the same sequencer; and
 - be owned by the authenticated-transfer program.
 
+New public accounts start uninitialized. Initialization claims the account for
+the authenticated-transfer program and must be authorized by the wallet that
+owns the account's signing key. The faucet cannot do this from an address alone,
+and it must never be given the recipient mnemonic or private key.
+
 If necessary, initialize the account from the LEZ wallet that actually owns its
-signing key before opening the faucet:
+signing key:
 
 ```sh
-LEE_WALLET_HOME_DIR=/path/to/owning-wallet \
-  wallet auth-transfer init --account-id Public/<account-id>
+wallet auth-transfer init --account-id Public/<account-id>
 ```
 
-Then fund it in Basecamp:
+Run this in the owning wallet's context. When using a non-default wallet home,
+set that wallet's `LEE_WALLET_HOME_DIR` environment variable before the
+command; a different wallet home cannot authorize initialization.
 
-1. Create or open the app's local faucet wallet. The Rust client currently
-   requires this local wallet as its LEZ `WalletCore` network context, but it
-   does not use it to own or sign for the external recipient. On first use,
-   follow the plaintext-storage warning and save the local wallet's one-time
-   mnemonic.
-2. Choose **Fund an existing public account instead** during initialization, or
-   enable **Fund an existing public account** on the ready screen.
-3. Paste `Public/<account-id>` or the bare base58 account ID.
-4. Select **Check account and balance**. This preflight rejects an uninitialized
-   account or one not owned by the authenticated-transfer program.
-5. Review the normalized account ID and fetched balance, then select the
-   explicit confirmation that this is the account you intend to fund.
-6. Use **Claim 150 LEZ** or **Claim until target**. Changing the recipient text
-   clears the preflight and confirmation, so the new value must be checked
-   again.
+Then fund it in Basecamp. This is the 0.3.0 screen: one address field and one
+button. If you see a password or recovery-phrase step instead, you are running
+0.2.0 and the core-then-UI upgrade above did not complete.
+
+1. Open the LEZ Faucet app. There is no onboarding: no account to create, no
+   password, no recovery phrase.
+2. Paste `Public/<account-id>` or the bare 32-byte base58 account ID. Private
+   account IDs are not accepted.
+3. The app reports malformed IDs, valid-but-uninitialized accounts, and
+   accounts owned by another program as separate states. For an uninitialized
+   account it shows the exact command for **you** to run in the owning wallet.
+4. Press **Request 150 LEZ** once.
+5. Watch the phases. Before the transaction is sent you can cancel; after it is
+   sent the app can only reconcile it, so cancelling then reports the real
+   outcome rather than pretending nothing happened.
+6. A receipt appears only when the app has seen its own transaction included
+   *and* your balance up by exactly 150. If it cannot prove that in time it
+   says so, shows the transaction hash, and offers no retry — re-check the
+   balance yourself before trying again.
 
 Funding is a public credit and does not require the faucet to possess the
 recipient's signing key. The recipient remains controlled only by its original
 wallet.
+
+Only public authenticated-transfer accounts are supported. A
+`Private/<account-id>` is not enough to fund a private account: private
+recipient handling additionally needs privacy public keys, synchronized private
+state, and proof/decryption support. LEZ Faucet 0.3.0 collects no key material
+of any kind and has no surface that could accept it.
+
+Attribute that to 0.3.0 and no earlier. The shipped 0.2.0 screen did ask for a
+"Wallet password", which the pinned wallet API accepted and then ignored; see
+`docs/screenshots/README.md`. 0.3.0 removed that field rather than relabelling
+it, which is exactly why this release is a breaking one.
 
 The public testnet can take tens of seconds to include a transaction. Do not
 close Basecamp while an initialization or claim is pending. Normal claim
@@ -142,34 +161,42 @@ LEE_WALLET_HOME_DIR=/path/to/wallet \
 The CLI wallet home is used only as the network-client context and does not need
 to own the account being checked. It must already contain `wallet_config.json`
 and `storage.json`, and its configuration must point at the intended sequencer.
-Use `LEE_WALLET_HOME_DIR` with LEZ v0.2.0, not the older
-`NSSA_WALLET_HOME_DIR` name.
+Use `LEE_WALLET_HOME_DIR` with the pinned upstream LEZ v0.2.0 wallet CLI, not
+the older `NSSA_WALLET_HOME_DIR` name.
 
-## Security warning
+## What this app does and does not do
 
-The exact v0.2.0 wallet dependency used by this release ignores the wallet
-password and stores its keychain data as plaintext JSON. The password field is
-not encryption.
+- It funds one public, already-initialized account by exactly 150 testnet LEZ
+  per press.
+- It never asks for a password, recovery phrase or private key, and it has no
+  way to accept one.
+- It writes no files and remembers nothing after you quit.
+- It cannot initialize an account for you. If yours is not initialized, the app
+  shows the command for **you** to run in your own wallet.
 
-- Use a disposable testnet-only wallet.
-- Do not put the storage file in iCloud Drive, Dropbox, a shared repository, or
-  another automatically synchronized location.
-- Do not use a mnemonic or password associated with real assets.
-- Remove the local wallet files when you no longer need the test account.
+The Piñata pool is finite and shared: it started at 1,500,000 testnet LEZ, pays
+150 per claim, and every claim is a proof-of-work race against everyone else
+for one global challenge. It is permissionless and repeatedly claimable, but it
+is not unlimited and it will run out. The deployed program has no cooldown and
+no per-address quota; this app's internal limits keep it well behaved on your
+machine and on a shared sequencer, and are not abuse prevention.
 
-Testnet LEZ has no monetary value. This app must not be used for mainnet funds.
+Testnet LEZ has no monetary value.
+
+If you quit the app while a claim is running, it cannot tell you afterwards
+whether that claim went through. Check the balance independently.
 
 ## Troubleshooting
 
 - **Network version mismatch:** the sequencer fingerprint differs from the
-  compiled v0.2.0 program IDs. Stop; the client must be upgraded to the exact
-  testnet revision before transacting.
-- **Account is uninitialized:** wait for the initialization transaction, then
-  retry only after the account state is visible from the sequencer. For an
-  existing recipient, initialize it from the wallet that owns its signing key;
-  the faucet does not import or initialize that account.
+  program IDs compiled from the pinned upstream LEZ v0.2.0 revision. Stop; the
+  client must be upgraded to the exact testnet revision before transacting.
+- **Account is uninitialized:** use **Copy command**, run it from the wallet
+  that owns the account, wait for the initialization transaction to be visible
+  from the sequencer, then use **Re-check account**. The faucet does not import
+  or initialize that account and never needs its mnemonic or private key.
 - **Existing recipient has the wrong owner:** only a public account owned by the
-  authenticated-transfer program can receive a v0.2.0 faucet claim.
+  authenticated-transfer program can receive a faucet claim.
 - **Claim solution rejected:** refresh the pinata challenge. Another successful
   claim changes the challenge seed.
 - **Claim outcome unknown:** do not immediately claim again. Reconnect and

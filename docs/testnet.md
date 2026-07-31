@@ -38,36 +38,25 @@ Do not update these values independently. A testnet upgrade requires updating
 the LEZ git pin, rebuilding the embedded programs, refreshing the expected
 fingerprint, and rerunning the complete account-init/claim test.
 
-## Wallet creation and the plaintext-storage risk
+## No wallet, no key material
 
-At v0.2.0, upstream `wallet::Storage::new` and `Storage::restore` explicitly
-discard the password argument. `Storage::save_to_path` serializes its persistent
-keychain data directly to JSON. Consequently:
+vNext holds no wallet and no key material, so the plaintext-storage risk that
+applied to earlier releases no longer applies to this app.
 
-- The password entered in the app does not encrypt the wallet file.
-- File permissions and local machine security are the only protection.
-- The wallet must be treated as disposable public-testnet state.
-- The app must never describe the stored wallet as encrypted or password-protected.
+A Piñata claim names the pool and the recipient as `PublicNoSign`, so the
+transaction carries no signatures and no nonces. At the pinned revision this is
+verifiable in three places: the facade builds both accounts as `PublicNoSign`
+(`lez/wallet/src/program_facades/pinata.rs`); the `PublicNoSign` arm of
+`AccountManager` sets `sk = None` (`lez/wallet/src/account_manager.rs:213-223`),
+so `sign_message` and `public_account_nonces` both return empty; and the
+state machine only requires that the nonce and signature lists have equal
+length (`lee/state_machine/src/validated_state_diff.rs`). An empty witness set
+is an ordinary, exercised shape upstream — the per-block clock transaction is
+built exactly the same way.
 
-This project keeps the password field because it is part of the upstream API
-and future versions may implement encryption. Until the exact pinned dependency
-changes and is audited, the UI must display the plaintext-storage warning next
-to wallet creation.
-
-## One-time mnemonic contract
-
-Wallet creation returns a BIP-39 recovery mnemonic. LEZ Faucet applies this
-handling contract:
-
-1. Receive it from the Rust wallet creation call.
-2. Show it only on the recovery screen.
-3. Require explicit confirmation that the user saved it.
-4. Clear backend and QML copies when leaving that screen.
-5. Never write it to logs, settings, telemetry, error messages, screenshots, or
-   test output.
-
-The app cannot reveal the same mnemonic later. Losing both the mnemonic and the
-plaintext wallet file means losing control of the derived account.
+The app therefore never accepts a password, recovery phrase or private key, and
+writes no files. Earlier releases asked for a password that the pinned wallet
+API accepted and ignored; that surface has been removed rather than relabelled.
 
 ## Transaction sequence
 
@@ -80,57 +69,62 @@ these operations in order:
 4. Poll the transaction until it is included; surface rejection or timeout.
 5. Confirm the account is no longer the default uninitialized state.
 6. Fetch the current pinata challenge and compute its solution.
-7. Submit one unsigned public pinata claim.
-8. Reconcile the transaction, current challenge, and account balance. Normal
-   success proves inclusion and an exact balance increase of 150. If the
-   submission response was lost and no transaction hash is available, that
-   exact balance increase together with challenge rotation proves success with
-   a null `tx_hash`. If the evidence remains ambiguous, return an explicit
-   unknown outcome and do not resubmit.
+7. Compute the transaction hash locally, then submit one unsigned public
+   pinata claim. The hash is a pure function of the transaction bytes and is
+   the same value the sequencer returns, so a lost submission response never
+   leaves the client unable to identify its own transaction.
+8. Reconcile. Success requires the client's own transaction observed included
+   **and** the recipient at exactly `balance_before + 150`.
 
-For “claim until target,” repeat steps 6–8 sequentially. The pinata program
-hashes its seed after each successful claim, so an old solution cannot safely be
-reused and concurrent claims would race the same challenge.
+A losing claim never reaches a block. The guest returns without calling
+`ProgramOutput::write`, so it commits an empty journal; decoding that fails as
+`ProgramExecutionFailed`; and `build_block_from_mempool` logs and skips such a
+transaction instead of sealing it in. Inclusion is therefore itself proof of
+payout.
+
+A second attempt is made only once the client's own transaction is absent, the
+recipient balance is unchanged, and the challenge has rotated. The balance
+check carries the safety: `apply_state_diff` runs while the block is still
+being assembled and the block is stored afterwards, so a credit is visible in
+the balance no later than the transaction is visible by hash. Rotation alone is
+never evidence — every claimant races the same challenge.
+
+The pinata program hashes its seed after each successful claim, so an old
+solution cannot be reused and all claimants race one global challenge.
 
 ## Live verification
 
-Both network-writing integration tests are ignored by default and require
-distinct explicit acknowledgement values.
-
-The local-account flow creates and initializes a fresh account, then funds it:
+Read-only checks against the public testnet are safe at any time:
 
 ```sh
-LEZ_FAUCET_LIVE_TEST=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
+cargo test -p lez-faucet-ffi --test live_public_testnet -- --ignored --nocapture
+```
+
+They assert the pinned program fingerprint matches the deployed one, that the
+pool balance is a whole multiple of the 150 prize, that `claims_remaining` is
+`floor(pool / 150)`, and that malformed, oversized and `Private/` addresses are
+refused before any network call.
+
+There is exactly one write test. It spends 150 LEZ from a finite shared pool, so
+it requires the destination to be named explicitly and skips otherwise:
+
+```sh
+LEZ_FAUCET_LIVE_RECIPIENT=Public/<account-id> \
   cargo test -p lez-faucet-ffi --test live_public_testnet \
-  create_initialize_and_claim_once_on_public_testnet \
+  one_authorized_claim_credits_exactly_the_prize \
   -- --ignored --exact --nocapture
 ```
 
-Its success evidence must include:
+It reads the pool and the recipient independently before and after, requires an
+exact `+150`, and then replays the same request key to prove a repeat produces
+no second claim.
 
-- the new public account ID;
-- initialization transaction ID;
-- claim transaction ID when available, otherwise an explicit unknown-hash
-  marker backed by the exact balance/challenge reconciliation;
-- balance before and after the claim;
-- an assertion that `after == before + 150`.
+The destination must already be initialized under authenticated-transfer. A
+public account ID alone cannot authorize initialization; the owner runs
+`wallet auth-transfer init --account-id Public/<account-id>` in their own wallet
+context. The faucet copies that command for them and never requests a recovery
+phrase or private key. Private account IDs are not accepted: private funding
+would additionally require privacy keys, synchronized private state and proof
+handling.
 
-The external-recipient flow creates two isolated wallets and proves that wallet
-A can fund wallet B's initialized public account without importing wallet B's
-key. Run it as an optimized binary so proof of work stays within the product's
-solver deadline:
-
-```sh
-LEZ_FAUCET_RUN_LIVE=I_UNDERSTAND_THIS_SPENDS_150_TESTNET_LEZ \
-  cargo test --release -p lez-faucet-ffi --test live_public_testnet \
-  client_wallet_funds_distinct_external_public_account_on_public_testnet \
-  -- --ignored --exact --nocapture
-```
-
-Its success evidence must additionally prove that the two accounts are distinct,
-the exact `+150` credit reaches wallet B, and the confirmed transaction affects
-wallet B rather than wallet A.
-
-Both tests must use fresh temporary local storage and must not print their
-mnemonics, passwords, or keys. They mutate the same public Piñata state, so run
-only one at a time.
+The write test mutates shared public Piñata state. Run only one at a time.
