@@ -1,0 +1,26 @@
+# Keeps the SHA-pinned actions in .github/workflows/ current.
+#
+# The pins in those workflows are commit SHAs rather than tags, which is what
+# stops a third-party action from changing under us between runs. The cost of
+# that is real: a pinned SHA never picks up a security fix on its own. This file
+# is the other half of the trade — Dependabot raises a PR when an action moves,
+# updating both the SHA and the version comment beside it, and CI has to pass
+# before it can land.
+#
+# Only github-actions is watched here. The Rust dependencies are pinned through
+# Cargo.lock and the Nix flake, where an automated bump would need a regenerated
+# cargoHash to be meaningful, so those stay manual.
+
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Enough to be visible, not so many that they queue up unread.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
