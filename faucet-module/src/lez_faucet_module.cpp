@@ -8,7 +8,16 @@
 
 namespace {
 
+/// Balances are u128 on the wire, so they are u128 here. `__int128` is a
+/// compiler extension rather than ISO C++, which `-Wpedantic` is correct to
+/// point out — hence the narrowest possible suppression, at the one
+/// declaration, instead of dropping the flag for the whole target. AppleClang
+/// accepts this silently and GCC does not, so without the pragma the module
+/// harness builds on a developer's macOS and fails on a Linux runner.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 using U128 = unsigned __int128;
+#pragma GCC diagnostic pop
 
 /// Retained job records. Bounded and reapable — unlike request-key tombstones,
 /// which are a separate table and are never evicted (API_LOCK §A1.7.4).
