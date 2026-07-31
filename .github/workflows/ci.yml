@@ -206,8 +206,16 @@ jobs:
           lgx=$(find "$out" -maxdepth 2 -name '*.lgx' | head -n1)
           if [[ -z "$lgx" ]]; then echo "::error::nix build produced no .lgx"; exit 1; fi
           echo "built $(basename "$lgx") ($(du -h "$lgx" | cut -f1)) for ${{ matrix.variant }}"
-          # Which variant directories the bundle actually carries. A build
-          # that succeeds on a Linux runner but packages darwin-arm64 would
-          # otherwise pass silently. Best-effort: the .lgx container format is
-          # the packaging tool's business, not this workflow's.
-          unzip -Z1 "$lgx" 2>/dev/null | grep -o 'variants/[^/]*' | sort -u || true
+          # Which variant directory the bundle actually carries, and a hard
+          # check that it is the one this runner is supposed to produce. A
+          # build that succeeds on a Linux runner but packages darwin-arm64
+          # would otherwise pass silently — and "the flake builds on Linux" is
+          # exactly the claim under test, so it is worth asserting rather than
+          # printing. A .lgx is a gzipped tar (nix-bundle-lgx/bundle.sh writes
+          # it with `tarfile.open(..., 'w:gz')`).
+          got=$(tar tzf "$lgx" | grep -o 'variants/[^/]*' | sort -u | sed 's|variants/||')
+          echo "variants in bundle: ${got:-<none>}"
+          if [[ "$got" != "${{ matrix.variant }}" ]]; then
+            echo "::error::expected variant ${{ matrix.variant }}, bundle carries '${got:-<none>}'"
+            exit 1
+          fi
