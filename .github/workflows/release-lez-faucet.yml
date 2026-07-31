@@ -10,4 +10,8 @@ jobs:
     uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
     with:
       module_path: faucet-module
-      variants: "darwin-arm64"
+      # No `variants` override: the shared workflow already defaults to
+      # darwin-arm64, linux-amd64, linux-arm64, which is exactly the set
+      # faucet-module/flake.nix exposes. The flake stays the single source of
+      # truth for what is buildable; restating the list here would only let the
+      # two drift.

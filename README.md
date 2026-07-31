@@ -128,8 +128,12 @@ Prerequisites are Nix with flakes, Rust, and the logos-scaffold CLI at 0.1.1
 `scaffold.toml` schema version, and CLI 0.1.1 is what reads schema 0.2.0. The
 schema number is the one the machine checks, and it is already correct in the
 file; nothing in this repository pins the CLI, so `lgs --version` is the only
-way to know which one you have. Apple Silicon macOS (`darwin-arm64`) is the only
-release target currently supported.
+way to know which one you have.
+
+Releases carry three variants: `darwin-arm64`, `linux-amd64`, and `linux-arm64`.
+Intel macOS is not one of them, and not by omission: logos-blockchain-circuits
+v0.5.3 publishes no macOS x86_64 archive, so the module has nothing to link
+against there. Both flakes expose exactly the three systems they can build.
 
 ```sh
 ./scripts/scaffold-setup.sh

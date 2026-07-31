@@ -23,10 +23,24 @@ The repository contains three manually dispatchable workflows:
 - `release-lez-faucet-ui.yml` builds and publishes `faucet-ui/`.
 - `rebuild-index.yml` regenerates the rolling catalog index.
 
-They call `logos-co/logos-modules-release-action@v1` and deliberately request
-only `darwin-arm64`. The reusable release workflow builds `.#lgx-portable`,
-verifies the package, creates a sidecar from the embedded manifest, publishes a
-`<module>-v<version>` GitHub release, and asks the index workflow to run.
+They call `logos-co/logos-modules-release-action@v1` and pass no `variants`
+input, so its default applies: `darwin-arm64`, `linux-amd64`, `linux-arm64`.
+Those are exactly the systems `faucet-module/flake.nix` exposes, and the flake
+is the single source of truth for what is buildable — restating the list in the
+workflow would only let the two drift. The reusable release workflow builds
+`.#lgx-portable` once per variant on its matching runner, merges the results
+into one multi-variant `.lgx`, verifies the package, creates a sidecar from the
+embedded manifest, publishes a `<module>-v<version>` GitHub release, and asks
+the index workflow to run.
+
+The matrix is `fail-fast: false` and the merge tolerates a partial result, so a
+variant that fails to build costs that variant, not the release. The sidecar's
+`builtVariants` and `missingVariants` record which is which. A release that is
+short a variant is a bug to investigate, not a normal outcome.
+
+Intel macOS is not requested and cannot be. logos-blockchain-circuits v0.5.3
+publishes no macOS x86_64 archive, so `LBC_ROOT_DIR` has nothing to point at;
+the flake omits `x86_64-darwin` rather than exposing an output that would fail.
 
 The current v1 index workflow enumerates `.lgx` download URLs from every
 non-draft module release, verifies each package, and builds `index.json` from
@@ -76,6 +90,11 @@ artifacts locally and publish them by hand as described below.
 
 ## Local artifact checks
 
+A local build produces one variant: the host's. Everything below therefore
+describes a single-variant package and, as written, assumes an Apple Silicon
+macOS host. Only the CI path produces the merged three-variant `.lgx`; do not
+publish a locally built package as though it covered Linux.
+
 Build portable packages, not development packages:
 
 ```sh
@@ -105,7 +124,7 @@ Check that:
 - the core manifest name is `lez_faucet`;
 - the UI manifest name is `lez_faucet_ui`;
 - the UI dependency list includes `lez_faucet`;
-- the only built variant is `darwin-arm64`;
+- the only built variant is the host's — `darwin-arm64` on this machine;
 - every bundled Mach-O library has no `/nix/store` load command; bundled
   dylibs use `@loader_path`, while Qt frameworks use `@rpath`;
 - a read-only sequencer RPC succeeds with Nix and SSL-related environment
@@ -127,6 +146,11 @@ or timestamps from another build. This file accompanies the release as
 artifact metadata and satisfies the release workflow's already-published gate;
 the catalog index independently reads and verifies the `.lgx` asset.
 
+Read the variant list out of the package rather than typing it. The manifest's
+`main` field maps each built variant to its plugin filename, so its keys are
+the variants the artifact actually contains — a locally built package will
+report `["darwin-arm64"]` and be two short of the requested three.
+
 ```sh
 module=lez_faucet
 version=0.3.0
@@ -137,6 +161,9 @@ manifest=$(lgx manifest "$artifact" --json)
 sha256=$(shasum -a 256 "$artifact" | awk '{print $1}')
 size=$(stat -f%z "$artifact")
 root_hash=$(jq -r '.hashes.root' <<<"$manifest")
+built=$(jq -c '.main | keys' <<<"$manifest")
+missing=$(jq -cn --argjson b "$built" \
+  '["darwin-arm64","linux-amd64","linux-arm64"] - $b')
 
 jq -n \
   --arg publisherRef "${module}-v${version}" \
@@ -145,14 +172,16 @@ jq -n \
   --argjson size "$size" \
   --arg rootHash "$root_hash" \
   --argjson manifest "$manifest" \
+  --argjson builtVariants "$built" \
+  --argjson missingVariants "$missing" \
   '{
     publisherRef: $publisherRef,
     releasedAt: $releasedAt,
     sha256: $sha256,
     size: $size,
     rootHash: $rootHash,
-    builtVariants: ["darwin-arm64"],
-    missingVariants: [],
+    builtVariants: $builtVariants,
+    missingVariants: $missingVariants,
     manifest: $manifest
   }' > "${release_dir}/sidecar.json"
 ```
@@ -166,9 +195,14 @@ jq -e \
   '.publisherRef == ($module + "-v" + $version)
    and .manifest.name == $module
    and .manifest.version == $version
-   and .builtVariants == ["darwin-arm64"]' \
+   and (.builtVariants | length) > 0
+   and (.builtVariants + .missingVariants | sort)
+       == ["darwin-arm64","linux-amd64","linux-arm64"]' \
   "${release_dir}/sidecar.json"
 ```
+
+A non-empty `missingVariants` here is expected for the local fallback and is
+the record that the published package is partial. Say so in the release notes.
 
 Repeat with `module=lez_faucet_ui` and `release_dir=release/ui`; both GitHub
 releases receive an asset named `sidecar.json`, while the local directories

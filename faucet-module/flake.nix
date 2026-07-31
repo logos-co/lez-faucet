@@ -29,53 +29,41 @@
   }:
     let
       lib = nixpkgs.lib;
-      system = "aarch64-darwin";
-      # crates.io refuses requests whose User-Agent is a bare tool name: an
-      # unset UA or a descriptive one returns 200, while `python-requests/*`
-      # and `curl/*` both return 403. nixpkgs' cargo-vendor fetcher builds its
-      # `requests.Session` without setting one, so every crate download fails
-      # with a 403 that reads like a network fault rather than a policy one.
+
+      # The LEZ client stack links prebuilt, per-platform circuit and rapidsnark
+      # archives, so this module can only be built for a system where upstream
+      # publishes both. That is what this table records: it is the definition of
+      # "supported", not a preference.
       #
-      # The fetcher is written inline by `writers.writePython3Bin` inside
-      # `fetch-cargo-vendor.nix`, so it is not a package an overlay can reach.
-      # Patch the nixpkgs source itself, which is the only seam available.
-      # This is the local half of logos-module-builder#159.
-      bootstrapPkgs = import nixpkgs { inherit system; };
-      patchedNixpkgs = bootstrapPkgs.applyPatches {
-        name = "nixpkgs-crates-io-user-agent";
-        src = nixpkgs;
-        postPatch = ''
-          substituteInPlace pkgs/build-support/rust/fetch-cargo-vendor-util.py \
-            --replace-fail \
-              'session.get(url, stream=True)' \
-              'session.get(url, stream=True, headers={"User-Agent": "lez-faucet-nix-build (+https://github.com/logos-co/lez-faucet)"})'
-        '';
+      # x86_64-darwin is absent on purpose. rapidsnark v0.0.8 ships a macOS
+      # x86_64 archive but logos-blockchain-circuits v0.5.3 does not, so there
+      # is nothing to point LBC_ROOT_DIR at. The three entries below are exactly
+      # the release variants darwin-arm64, linux-amd64, and linux-arm64.
+      #
+      # The hashes are `fetchzip` hashes of the unpacked trees, obtained with
+      # `nix-prefetch-url --unpack <url>`.
+      prebuilt = {
+        aarch64-darwin = {
+          circuitsPlatform = "macos-aarch64";
+          circuitsHash = "0w3i0phgzjswsk1q2k6cr3001jjc55a82z79zw9w5p3x9hwaqljq";
+          rapidsnarkPlatform = "macOS-arm64";
+          rapidsnarkHash = "1600dzr7hjg6lc5r0cdh189l7019djvy4cz2qyn75z5vrac4qs0f";
+        };
+        x86_64-linux = {
+          circuitsPlatform = "linux-x86_64";
+          circuitsHash = "1mwy3g9dyjvlwykzs62gzf79rrnm20sy7c587nv26c1y9bm71wfv";
+          rapidsnarkPlatform = "linux-x86_64";
+          rapidsnarkHash = "0zagnq7gn8nqj35prv1yv4qnhpgj3wir1h0w84sx9gk32m75f5l2";
+        };
+        aarch64-linux = {
+          circuitsPlatform = "linux-aarch64";
+          circuitsHash = "14r4vghipk66k8g22kymy2gpfa1ghwwa74v57a230yk0pm9zvgp7";
+          rapidsnarkPlatform = "linux-arm64";
+          rapidsnarkHash = "064w0wpmwzbs7hipflj42yrc4s724gb69gclnjs57c8xamis1aba";
+        };
       };
 
-      pkgs = import patchedNixpkgs {
-        inherit system;
-        overlays = [ (import rust-overlay) ];
-      };
-      rustToolchain = pkgs.rust-bin.stable."1.93.0".default;
-      rustPlatform = pkgs.makeRustPlatform {
-        cargo = rustToolchain;
-        rustc = rustToolchain;
-      };
-
-      # v0.2.0 locks logos-blockchain-circuits at v0.5.3. Its build scripts
-      # consume this prebuilt tree through LBC_ROOT_DIR and cannot download it
-      # from inside a pure Nix build.
-      circuits = pkgs.fetchzip {
-        url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.5.3/logos-blockchain-circuits-v0.5.3-macos-aarch64.tar.gz";
-        sha256 = "0w3i0phgzjswsk1q2k6cr3001jjc55a82z79zw9w5p3x9hwaqljq";
-      };
-
-      # logos-blockchain-circuits-prover enables static-rapidsnark. Point its
-      # build script at the same prebuilt archive it would otherwise download.
-      rapidsnark = pkgs.fetchzip {
-        url = "https://github.com/iden3/rapidsnark/releases/download/v0.0.8/rapidsnark-macOS-arm64-v0.0.8.zip";
-        sha256 = "1600dzr7hjg6lc5r0cdh189l7019djvy4cz2qyn75z5vrac4qs0f";
-      };
+      systems = builtins.attrNames prebuilt;
 
       # Keep the Rust derivation independent of concurrent UI/module work in
       # the repository that provides faucet-source.
@@ -93,51 +81,93 @@
           || lib.hasInfix "/lez-faucet-ffi/" sourcePath;
       };
 
-      faucetFfi = rustPlatform.buildRustPackage {
-        pname = "lez-faucet-ffi";
-        version = "0.3.0";
-        src = faucetFfiSource;
-        # Regenerated for vNext: dropping the `wallet`, `zeroize` and
-        # `tempfile` dependencies changed the vendored set, so the 0.2.0 hash
-        # no longer applies.
-        cargoHash = "sha256-g1kXxMjVbalceSm51CebyMqOBORi25Xg+BokvTLkJhw=";
-        cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
-        doCheck = false;
+      faucetFfiFor = system:
+        let
+          artifacts = prebuilt.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ (import rust-overlay) ];
+          };
+          rustToolchain = pkgs.rust-bin.stable."1.93.0".default;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
 
-        # pyo3-ffi performs a python3 probe during its build.
-        nativeBuildInputs = [ pkgs.python3 ];
-        LBC_ROOT_DIR = circuits;
-        RAPIDSNARK_LIB_DIR = "${rapidsnark}/lib";
+          # This tree's Cargo.lock pins logos-blockchain-circuits at v0.5.3.
+          # Its build scripts consume this prebuilt tree through LBC_ROOT_DIR
+          # and cannot download it from inside a pure Nix build.
+          circuits = pkgs.fetchzip {
+            url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.5.3/logos-blockchain-circuits-v0.5.3-${artifacts.circuitsPlatform}.tar.gz";
+            sha256 = artifacts.circuitsHash;
+          };
 
-        # build_utils resolves ../artifacts relative to its vendored manifest,
-        # so stage the exact v0.2.0 builtin-program artifacts beside it.
-        postPatch = ''
-          cp -R ${logos-execution-zone}/artifacts "$cargoDepsCopy/artifacts"
-        '';
+          # logos-blockchain-circuits-prover enables static-rapidsnark. Point its
+          # build script at the same prebuilt archive it would otherwise download.
+          rapidsnark = pkgs.fetchzip {
+            url = "https://github.com/iden3/rapidsnark/releases/download/v0.0.8/rapidsnark-${artifacts.rapidsnarkPlatform}-v0.0.8.zip";
+            sha256 = artifacts.rapidsnarkHash;
+          };
 
-        installPhase = ''
-          runHook preInstall
+          # Mach-O and ELF disagree only on the suffix; the install is otherwise
+          # identical. `logos_module(... EXTERNAL_LIBS ...)` searches for both.
+          libFile = "liblez_faucet_ffi${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
+        in
+        rustPlatform.buildRustPackage {
+          pname = "lez-faucet-ffi";
+          version = "0.3.0";
+          src = faucetFfiSource;
+          # Regenerated for vNext: dropping the `wallet`, `zeroize` and
+          # `tempfile` dependencies changed the vendored set, so the 0.2.0 hash
+          # no longer applies. The vendor step reads Cargo.lock and nothing
+          # else, so this hash is the same on every system.
+          cargoHash = "sha256-g1kXxMjVbalceSm51CebyMqOBORi25Xg+BokvTLkJhw=";
+          cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
+          doCheck = false;
 
-          mkdir -p $out/lib $out/include
-          ffi_lib=$(find target -name liblez_faucet_ffi.dylib -print -quit)
-          if [ -z "$ffi_lib" ]; then
-            echo "lez-faucet-ffi build did not produce liblez_faucet_ffi.dylib" >&2
-            exit 1
-          fi
-          cp "$ffi_lib" $out/lib/liblez_faucet_ffi.dylib
-          cp lez-faucet-ffi/lez_faucet_ffi.h $out/include/lez_faucet_ffi.h
+          # pyo3-ffi performs a python3 probe during its build.
+          nativeBuildInputs = [ pkgs.python3 ];
+          LBC_ROOT_DIR = circuits;
+          RAPIDSNARK_LIB_DIR = "${rapidsnark}/lib";
 
-          runHook postInstall
-        '';
+          # build_utils resolves ../artifacts relative to its vendored manifest,
+          # so stage the builtin-program artifacts from the pinned upstream LEZ
+          # v0.2.0 revision beside it.
+          postPatch = ''
+            cp -R ${logos-execution-zone}/artifacts "$cargoDepsCopy/artifacts"
+          '';
 
-        postFixup = ''
-          install_name_tool -id @rpath/liblez_faucet_ffi.dylib \
-            $out/lib/liblez_faucet_ffi.dylib || true
-        '';
-      };
+          installPhase = ''
+            runHook preInstall
+
+            mkdir -p $out/lib $out/include
+            ffi_lib=$(find target -name ${libFile} -print -quit)
+            if [ -z "$ffi_lib" ]; then
+              echo "lez-faucet-ffi build did not produce ${libFile}" >&2
+              exit 1
+            fi
+            cp "$ffi_lib" $out/lib/${libFile}
+            cp lez-faucet-ffi/lez_faucet_ffi.h $out/include/lez_faucet_ffi.h
+
+            runHook postInstall
+          '';
+
+          # mkExternalLib uses an already-resolved derivation as-is and does not
+          # apply its own install-name fixup, so record the relocatable name here
+          # instead. Otherwise the packaged plugin would carry this store path.
+          postFixup =
+            if pkgs.stdenv.hostPlatform.isDarwin then ''
+              install_name_tool -id @rpath/${libFile} \
+                $out/lib/${libFile} || true
+            '' else ''
+              patchelf --set-soname ${libFile} $out/lib/${libFile} || true
+            '';
+        };
+
+      faucetFfi = lib.genAttrs systems faucetFfiFor;
 
       faucetFfiInput = {
-        packages.${system}.default = faucetFfi;
+        packages = lib.mapAttrs (_system: drv: { default = drv; }) faucetFfi;
       };
 
       base = logos-module-builder.lib.mkLogosModule {
@@ -152,8 +182,18 @@
       };
     in
     base // {
-      packages.${system} = (base.packages.${system} or {}) // {
-        lez-faucet-ffi = faucetFfi;
-      };
+      # The builder emits outputs for every system it knows about, x86_64-darwin
+      # included, and both `packages` and the `unit-tests` check reach into the
+      # external-lib input for whichever system they are asked about. Publish
+      # only the systems the table above can satisfy, so an unsupported
+      # attribute is absent rather than present and broken — and
+      # `nix flake check --all-systems` passes rather than failing on a platform
+      # this module never claimed.
+      packages = lib.genAttrs systems (system:
+        (base.packages.${system} or {}) // {
+          lez-faucet-ffi = faucetFfi.${system};
+        });
+    } // lib.optionalAttrs (base ? checks) {
+      checks = lib.genAttrs systems (system: base.checks.${system} or {});
     };
 }
