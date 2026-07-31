@@ -213,7 +213,10 @@ jobs:
           # exactly the claim under test, so it is worth asserting rather than
           # printing. A .lgx is a gzipped tar (nix-bundle-lgx/bundle.sh writes
           # it with `tarfile.open(..., 'w:gz')`).
-          got=$(tar tzf "$lgx" | grep -o 'variants/[^/]*' | sort -u | sed 's|variants/||')
+          # `[^/]+`, not `[^/]*`: the tar carries a bare `variants/` directory
+          # entry alongside `variants/<name>/…`, and `*` matches it with zero
+          # characters, so the name list comes back with a leading empty line.
+          got=$(tar tzf "$lgx" | grep -oE 'variants/[^/]+' | sort -u | sed 's|variants/||')
           echo "variants in bundle: ${got:-<none>}"
           if [[ "$got" != "${{ matrix.variant }}" ]]; then
             echo "::error::expected variant ${{ matrix.variant }}, bundle carries '${got:-<none>}'"
