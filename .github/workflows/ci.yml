@@ -2,12 +2,19 @@
 #
 # Until this existed, all three workflows in this directory were
 # workflow_dispatch/schedule only, so a merge was unconditionally green while
-# four working suites went unrun.
+# four working suites went unrun — and nothing ever built either module on
+# Linux at all.
+#
+# The fast suites (`rust`, `ui`, `module`) answer within minutes. The `build`
+# matrix is the slow one: it runs the exact `#lgx-portable` build the release
+# workflow runs, for both modules, on all three release runners, so a green
+# tick here is evidence about a release rather than only about the sources.
 #
 # What this does NOT cover, so nobody reads a green tick as more than it is:
 #
-#   - The Nix module build (`lgs basecamp build`, `#lgx-portable`). Too slow for
-#     PR feedback, and it is what the release workflows already do.
+#   - `lgs basecamp build`. The `build` matrix calls `nix build .#lgx-portable`
+#     per module directly, which is what the release workflow does; the
+#     Scaffold aggregate wrapper is not exercised here.
 #   - faucet-ui/tests/smoke.mjs. Needs the Qt MCP harness from a Nix build
 #     (LOGOS_QT_MCP), which is not available here.
 #   - The four #[ignore]d live-testnet tests in lez-faucet-ffi. They spend real
@@ -15,6 +22,7 @@
 #   - Rendering FaucetView.qml in a real QML engine. qml-load.test.mjs skips
 #     itself without Qt and the Logos Design System; the "report skipped tests"
 #     step below makes that visible instead of silently green.
+#   - x86_64-darwin. Neither flake exposes it; see faucet-module/flake.nix.
 
 name: CI
 
@@ -22,6 +30,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The `build` matrix is expensive enough to be worth re-running by hand
+  # after a runner-side failure without pushing an empty commit.
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -129,3 +140,74 @@ jobs:
 
       - name: Test
         run: ctest --test-dir faucet-module/tests/build --output-on-failure
+
+  build:
+    name: ${{ matrix.module }} (${{ matrix.variant }})
+    strategy:
+      # One leg failing must not cancel the others. The whole point of this
+      # job is a per-platform answer: "linux-arm64 fails and linux-amd64
+      # passes" is the finding, and fail-fast would hide it.
+      fail-fast: false
+      matrix:
+        # Both modules, because the variant change affects both. faucet-module
+        # is the one whose flake changed; faucet-ui only lost its `variants`
+        # pin, but that pin was the only thing that had ever kept its Linux
+        # outputs from being asked for, so it is equally unproven.
+        module: [faucet-module, faucet-ui]
+        # Variant names, and the runner each maps to, are copied from the
+        # shared release workflow's build matrix
+        # (logos-co/logos-modules-release-action@v1, .github/workflows/release.yml)
+        # so that a green CI leg means the corresponding release leg builds.
+        variant: [darwin-arm64, linux-amd64, linux-arm64]
+        include:
+          - variant: darwin-arm64
+            runs-on: macos-latest          # Apple silicon
+          - variant: linux-amd64
+            runs-on: ubuntu-latest         # x86_64
+          - variant: linux-arm64
+            runs-on: ubuntu-24.04-arm      # Public GitHub arm64 runner
+    runs-on: ${{ matrix.runs-on }}
+    # Well under the 6h GitHub default, and deliberately so. There is no
+    # binary cache for this stack beyond cache.nixos.org, so a cold runner can
+    # compile the LEZ client, risc0 and Qt from source; 90 minutes is a
+    # generous ceiling for that on a 4-core runner while still failing inside
+    # a useful feedback window. A job that burns six hours and then dies tells
+    # us less, later, than one that dies at ninety minutes. Revisit once a
+    # green build gives real numbers — this ceiling is a judgement call, not a
+    # measurement.
+    timeout-minutes: 90
+    steps:
+      # fetch-depth: 0 matches the release workflow. Nix resolves `.` inside a
+      # git worktree to `git+file://…?dir=<module>`, and flake inputs that
+      # reference the working tree (this repo's `faucet-source = path:..`)
+      # are unhappy with a shallow clone.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # Same installer, same pinned SHA, same extra-conf as the shared release
+      # workflow. Matching it is the point: CI is only evidence about releases
+      # if it installs Nix the way releases do.
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+      - name: nix build .#lgx-portable
+        working-directory: ${{ matrix.module }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The same attribute the release workflow builds: the portable
+          # bundle, not the dev one. `--print-build-logs` is the only
+          # deviation — without it Nix collapses builder output to a progress
+          # line, and a CI job whose failure text is "builder failed" is not
+          # worth running.
+          nix build .#lgx-portable --no-link --print-out-paths --print-build-logs > .lgx-out
+          out=$(cat .lgx-out)
+          lgx=$(find "$out" -maxdepth 2 -name '*.lgx' | head -n1)
+          if [[ -z "$lgx" ]]; then echo "::error::nix build produced no .lgx"; exit 1; fi
+          echo "built $(basename "$lgx") ($(du -h "$lgx" | cut -f1)) for ${{ matrix.variant }}"
+          # Which variant directories the bundle actually carries. A build
+          # that succeeds on a Linux runner but packages darwin-arm64 would
+          # otherwise pass silently. Best-effort: the .lgx container format is
+          # the packaging tool's business, not this workflow's.
+          unzip -Z1 "$lgx" 2>/dev/null | grep -o 'variants/[^/]*' | sort -u || true
