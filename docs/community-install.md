@@ -10,16 +10,21 @@ not currently part of the built-in Logos module catalog.
 - Requires **Logos Basecamp 0.2.1**. That 0.2.1 is the host application's
   version, not the faucet's. The two numbers are unrelated and are not meant to
   match.
-- Apple Silicon macOS (`darwin-arm64`)
+- Apple Silicon macOS (`darwin-arm64`), x86-64 Linux (`linux-amd64`), or ARM64
+  Linux (`linux-arm64`)
 - Public-testnet use only
 
 Version numbers in these docs always name their subject. Where you see LEZ
 `v0.2.0`, that is the pinned upstream protocol revision this client is built
 against, and it is a third independent number.
 
-Linux and Intel macOS packages are not published yet because the required
-circuit and rapidsnark fixed-output artifacts have only been validated for
-Apple Silicon.
+Intel macOS is not published. The required circuit artifacts
+(logos-blockchain-circuits v0.5.3) exist for Apple Silicon and for both Linux
+architectures, but not for macOS x86_64, so there is nothing to build against.
+
+The already-published 0.1.0 and 0.2.0 packages predate Linux support and carry
+`darwin-arm64` only. A package's variants are recorded in its release notes and
+in the `sidecar.json` asset beside it; check them rather than assuming.
 
 ## Add the catalog
 

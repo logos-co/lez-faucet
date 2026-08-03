@@ -23,10 +23,24 @@ The repository contains three manually dispatchable workflows:
 - `release-lez-faucet-ui.yml` builds and publishes `faucet-ui/`.
 - `rebuild-index.yml` regenerates the rolling catalog index.
 
-They call `logos-co/logos-modules-release-action@v1` and deliberately request
-only `darwin-arm64`. The reusable release workflow builds `.#lgx-portable`,
-verifies the package, creates a sidecar from the embedded manifest, publishes a
-`<module>-v<version>` GitHub release, and asks the index workflow to run.
+They call `logos-co/logos-modules-release-action@v1` and pass no `variants`
+input, so its default applies: `darwin-arm64`, `linux-amd64`, `linux-arm64`.
+Those are exactly the systems `faucet-module/flake.nix` exposes, and the flake
+is the single source of truth for what is buildable — restating the list in the
+workflow would only let the two drift. The reusable release workflow builds
+`.#lgx-portable` once per variant on its matching runner, merges the results
+into one multi-variant `.lgx`, verifies the package, creates a sidecar from the
+embedded manifest, publishes a `<module>-v<version>` GitHub release, and asks
+the index workflow to run.
+
+The matrix is `fail-fast: false` and the merge tolerates a partial result, so a
+variant that fails to build costs that variant, not the release. The sidecar's
+`builtVariants` and `missingVariants` record which is which. A release that is
+short a variant is a bug to investigate, not a normal outcome.
+
+Intel macOS is not requested and cannot be. logos-blockchain-circuits v0.5.3
+publishes no macOS x86_64 archive, so `LBC_ROOT_DIR` has nothing to point at;
+the flake omits `x86_64-darwin` rather than exposing an output that would fail.
 
 The current v1 index workflow enumerates `.lgx` download URLs from every
 non-draft module release, verifies each package, and builds `index.json` from
@@ -49,10 +63,10 @@ Then verify that the rolling `index` release contains both packages at 0.3.0.
 The rebuild scans every non-draft module release, so the v0.1.0 and v0.2.0
 entries remain available for rollback.
 
-## Current CI blocker
+## The crates.io vendoring workaround
 
 As verified during the initial v0.1.0 bootstrap on 2026-07-23, the shared Nix
-release path can fail while staging Cargo dependencies:
+release path failed while staging Cargo dependencies:
 
 ```text
 Failed to fetch file from https://crates.io/api/v1/crates/.../download.
@@ -64,17 +78,36 @@ This is tracked in
 [`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159),
 which is still open.
 
-This tree carries its own workaround rather than waiting on it:
-`faucet-module/flake.nix` patches nixpkgs' cargo-vendor fetcher to send a
-descriptive User-Agent and pins the regenerated `cargoHash`, and
-`nix build ./faucet-module#lez-faucet-ffi` succeeds with that patch applied.
-The workaround has not been exercised by a GitHub Actions run, so it is proven
-locally and unproven in CI. Do not claim that a GitHub Actions release
-succeeded unless both the `.lgx` and `sidecar.json` assets actually exist on
-the release. Until a dispatched run has produced both, build the release
-artifacts locally and publish them by hand as described below.
+This tree carries its own workaround rather than waiting on it.
+`faucet-module/flake.nix` re-expresses nixpkgs' `fetch-cargo-vendor.nix` as a
+private `fetchCargoVendorPatched`, used only by `lez-faucet-ffi`, with three
+substitutions applied to the fetch script: a descriptive User-Agent, a retry
+policy that includes HTTP 429, and crate tarballs downloaded from
+`static.crates.io` instead of the `crates.io/api/v1` endpoint. The scoping
+matters. Patching the shared `fetch-cargo-vendor-util` through `applyPatches`
+also fixes the 403, but it moves the `outPath` of every Rust package in
+nixpkgs — `qt6.qtdeclarative` and `python3Packages.cryptography` included — and
+so throws away the binary-cache hits that keep a cold CI runner from rebuilding
+Qt. If you change this code, keep it scoped, and keep exactly one patched
+fetcher.
+
+`cargoDeps.hash` is unaffected by all three substitutions: it covers the
+checksum-verified vendor-staging tree, so it tracks `Cargo.lock` and not the
+host that served the tarballs.
+
+The workaround is exercised on every pull request by `.github/workflows/ci.yml`,
+which runs the same `nix build .#lgx-portable` on the same three runner types
+the release workflow uses. That is evidence about the build, not about a
+release: do not claim that a GitHub Actions release succeeded unless both the
+`.lgx` and `sidecar.json` assets actually exist on the release. Until a
+dispatched run has produced both, the local path below remains the fallback.
 
 ## Local artifact checks
+
+A local build produces one variant: the host's. Everything below therefore
+describes a single-variant package and, as written, assumes an Apple Silicon
+macOS host. Only the CI path produces the merged three-variant `.lgx`; do not
+publish a locally built package as though it covered Linux.
 
 Build portable packages, not development packages:
 
@@ -105,7 +138,7 @@ Check that:
 - the core manifest name is `lez_faucet`;
 - the UI manifest name is `lez_faucet_ui`;
 - the UI dependency list includes `lez_faucet`;
-- the only built variant is `darwin-arm64`;
+- the only built variant is the host's — `darwin-arm64` on this machine;
 - every bundled Mach-O library has no `/nix/store` load command; bundled
   dylibs use `@loader_path`, while Qt frameworks use `@rpath`;
 - a read-only sequencer RPC succeeds with Nix and SSL-related environment
@@ -127,6 +160,11 @@ or timestamps from another build. This file accompanies the release as
 artifact metadata and satisfies the release workflow's already-published gate;
 the catalog index independently reads and verifies the `.lgx` asset.
 
+Read the variant list out of the package rather than typing it. The manifest's
+`main` field maps each built variant to its plugin filename, so its keys are
+the variants the artifact actually contains — a locally built package will
+report `["darwin-arm64"]` and be two short of the requested three.
+
 ```sh
 module=lez_faucet
 version=0.3.0
@@ -137,6 +175,9 @@ manifest=$(lgx manifest "$artifact" --json)
 sha256=$(shasum -a 256 "$artifact" | awk '{print $1}')
 size=$(stat -f%z "$artifact")
 root_hash=$(jq -r '.hashes.root' <<<"$manifest")
+built=$(jq -c '.main | keys' <<<"$manifest")
+missing=$(jq -cn --argjson b "$built" \
+  '["darwin-arm64","linux-amd64","linux-arm64"] - $b')
 
 jq -n \
   --arg publisherRef "${module}-v${version}" \
@@ -145,14 +186,16 @@ jq -n \
   --argjson size "$size" \
   --arg rootHash "$root_hash" \
   --argjson manifest "$manifest" \
+  --argjson builtVariants "$built" \
+  --argjson missingVariants "$missing" \
   '{
     publisherRef: $publisherRef,
     releasedAt: $releasedAt,
     sha256: $sha256,
     size: $size,
     rootHash: $rootHash,
-    builtVariants: ["darwin-arm64"],
-    missingVariants: [],
+    builtVariants: $builtVariants,
+    missingVariants: $missingVariants,
     manifest: $manifest
   }' > "${release_dir}/sidecar.json"
 ```
@@ -166,9 +209,14 @@ jq -e \
   '.publisherRef == ($module + "-v" + $version)
    and .manifest.name == $module
    and .manifest.version == $version
-   and .builtVariants == ["darwin-arm64"]' \
+   and (.builtVariants | length) > 0
+   and (.builtVariants + .missingVariants | sort)
+       == ["darwin-arm64","linux-amd64","linux-arm64"]' \
   "${release_dir}/sidecar.json"
 ```
+
+A non-empty `missingVariants` here is expected for the local fallback and is
+the record that the published package is partial. Say so in the release notes.
 
 Repeat with `module=lez_faucet_ui` and `release_dir=release/ui`; both GitHub
 releases receive an asset named `sidecar.json`, while the local directories
