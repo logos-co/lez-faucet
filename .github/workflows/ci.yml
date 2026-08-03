@@ -9,6 +9,10 @@
 # matrix is the slow one: it runs the exact `#lgx-portable` build the release
 # workflow runs, for both modules, on all three release runners, so a green
 # tick here is evidence about a release rather than only about the sources.
+# It then inspects what came out: that the bundle carries this runner's
+# variant, and that the manifest inside it still says what metadata.json says
+# (scripts/check-lgx-manifest.py — the packaging tool copies those fields
+# through an allowlist it maintains in another repo, and has dropped one).
 #
 # What this does NOT cover, so nobody reads a green tick as more than it is:
 #
@@ -192,6 +196,7 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
       - name: nix build .#lgx-portable
+        id: build
         working-directory: ${{ matrix.module }}
         shell: bash
         run: |
@@ -222,3 +227,31 @@ jobs:
             echo "::error::expected variant ${{ matrix.variant }}, bundle carries '${got:-<none>}'"
             exit 1
           fi
+          echo "lgx=$lgx" >> "$GITHUB_OUTPUT"
+
+      # The variant assertion above proves the bundle carries the right
+      # *payload*. This proves it carries the right *description of itself*.
+      #
+      # The two stages that write a .lgx live in other repos, pinned by
+      # flake.lock: `lgx create` writes the base manifest, then
+      # nix-bundle-lgx's bundle.sh patches this module's fields in from
+      # metadata.json — through a hand-maintained key allowlist. When the
+      # pinned bundle.sh has not heard of a key, it drops it. Silently: no
+      # build failure, no test failure, and an optional field that is simply
+      # absent from the artifact users install.
+      #
+      # That already happened once, next door. logos-co/eth-lez-atomic-swaps
+      # shipped swap v0.3.0 with no `display_name`, because its lock pinned
+      # nix-bundle-lgx one commit before `display_name` joined the allowlist.
+      # See https://github.com/logos-co/eth-lez-atomic-swaps/issues/60
+      #
+      # This repo's lock is one commit past that, so it is correct today —
+      # by luck. This step is the part that is not luck. It runs per module
+      # per variant, so a drop is caught on whichever runner it happens on.
+      - name: Manifest round trip (.lgx vs metadata.json)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-lgx-manifest.py \
+            '${{ steps.build.outputs.lgx }}' \
+            '${{ matrix.module }}/metadata.json'
