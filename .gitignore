@@ -16,6 +16,14 @@ faucet-module/lib/*.dll
 # CMake output from the module test harness
 faucet-module/tests/build/
 
+# Python bytecode. scripts/check-lgx-manifest.py is normally run as a script,
+# and CPython never caches a __main__ module — so this only appears when
+# something *imports* it, e.g. a harness introspecting its ROUND_TRIP list
+# against the pinned bundle.sh allowlist. Rare enough to be easy to commit by
+# accident, which is the case for ignoring it rather than relying on noticing.
+__pycache__/
+*.py[cod]
+
 # Local agent tooling. .gstack/ holds terminal tokens; .context/ is a large
 # research cache. Neither belongs in a clone, and .context/ was previously
 # excluded only by .git/info/exclude, which does not travel with the repo.
