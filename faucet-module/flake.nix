@@ -3,7 +3,27 @@
 
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
+
+    # The packaging tool, and the one input whose staleness is silent. Its
+    # bundle.sh copies metadata.json's descriptive fields into the bundled
+    # manifest.json through a hand-written key allowlist, so a pin that
+    # predates a key drops that key with no build failure and no test failure.
+    # The sibling repo shipped swap v0.3.0 with no `display_name` exactly that
+    # way, from a pin one commit short of the fix
+    # (logos-co/eth-lez-atomic-swaps#60).
+    #
+    # As of this writing b49074a8 is the tip of upstream `main`, and
+    # logos-module-builder resolves nix-bundle-lgx to that same commit, so
+    # there is nothing newer to move to. The durable protection is not the pin
+    # anyway — it is CI's manifest round trip,
+    # scripts/check-lgx-manifest.py, which compares the built .lgx's manifest
+    # against metadata.json field by field on every build. Chasing this
+    # through `nix flake update` would drag `nixpkgs` along with it (it
+    # `follows` logos-module-builder, just below) for no packaging gain; see
+    # the fetchCargoVendorPatched note further down for why moving nixpkgs
+    # wholesale is not free here.
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
+
     nixpkgs.follows = "logos-module-builder/nixpkgs";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
