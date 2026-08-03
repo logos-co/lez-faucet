@@ -63,10 +63,10 @@ Then verify that the rolling `index` release contains both packages at 0.3.0.
 The rebuild scans every non-draft module release, so the v0.1.0 and v0.2.0
 entries remain available for rollback.
 
-## Current CI blocker
+## The crates.io vendoring workaround
 
 As verified during the initial v0.1.0 bootstrap on 2026-07-23, the shared Nix
-release path can fail while staging Cargo dependencies:
+release path failed while staging Cargo dependencies:
 
 ```text
 Failed to fetch file from https://crates.io/api/v1/crates/.../download.
@@ -78,15 +78,29 @@ This is tracked in
 [`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159),
 which is still open.
 
-This tree carries its own workaround rather than waiting on it:
-`faucet-module/flake.nix` patches nixpkgs' cargo-vendor fetcher to send a
-descriptive User-Agent and pins the regenerated `cargoHash`, and
-`nix build ./faucet-module#lez-faucet-ffi` succeeds with that patch applied.
-The workaround has not been exercised by a GitHub Actions run, so it is proven
-locally and unproven in CI. Do not claim that a GitHub Actions release
-succeeded unless both the `.lgx` and `sidecar.json` assets actually exist on
-the release. Until a dispatched run has produced both, build the release
-artifacts locally and publish them by hand as described below.
+This tree carries its own workaround rather than waiting on it.
+`faucet-module/flake.nix` re-expresses nixpkgs' `fetch-cargo-vendor.nix` as a
+private `fetchCargoVendorPatched`, used only by `lez-faucet-ffi`, with three
+substitutions applied to the fetch script: a descriptive User-Agent, a retry
+policy that includes HTTP 429, and crate tarballs downloaded from
+`static.crates.io` instead of the `crates.io/api/v1` endpoint. The scoping
+matters. Patching the shared `fetch-cargo-vendor-util` through `applyPatches`
+also fixes the 403, but it moves the `outPath` of every Rust package in
+nixpkgs — `qt6.qtdeclarative` and `python3Packages.cryptography` included — and
+so throws away the binary-cache hits that keep a cold CI runner from rebuilding
+Qt. If you change this code, keep it scoped, and keep exactly one patched
+fetcher.
+
+`cargoDeps.hash` is unaffected by all three substitutions: it covers the
+checksum-verified vendor-staging tree, so it tracks `Cargo.lock` and not the
+host that served the tarballs.
+
+The workaround is exercised on every pull request by `.github/workflows/ci.yml`,
+which runs the same `nix build .#lgx-portable` on the same three runner types
+the release workflow uses. That is evidence about the build, not about a
+release: do not claim that a GitHub Actions release succeeded unless both the
+`.lgx` and `sidecar.json` assets actually exist on the release. Until a
+dispatched run has produced both, the local path below remains the fallback.
 
 ## Local artifact checks
 

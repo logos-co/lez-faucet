@@ -132,8 +132,12 @@ way to know which one you have.
 
 Releases carry three variants: `darwin-arm64`, `linux-amd64`, and `linux-arm64`.
 Intel macOS is not one of them, and not by omission: logos-blockchain-circuits
-v0.5.3 publishes no macOS x86_64 archive, so the module has nothing to link
-against there. Both flakes expose exactly the three systems they can build.
+v0.5.3 publishes no macOS x86_64 archive, so the core module has nothing to link
+against there. `faucet-module/flake.nix` therefore exposes exactly those three
+systems and no more, which is what makes the release variant list a consequence
+of the flake rather than a preference restated in a workflow. (`faucet-ui` is
+QML with no native link step, so its flake is unrestricted; it is only ever
+asked for the same three.)
 
 ```sh
 ./scripts/scaffold-setup.sh
@@ -241,21 +245,26 @@ rollback. See [Community installation](docs/community-install.md).
 
 Release workflows are present for both modules. The crates.io HTTP 403 that
 blocked every Nix build of the core module is fixed in this tree:
-`faucet-module/flake.nix` patches nixpkgs' cargo-vendor fetcher to send a
-descriptive User-Agent and pins the regenerated `cargoHash`, and
-`nix build ./faucet-module#lez-faucet-ffi` succeeds with that patch. The
-upstream issue
+`faucet-module/flake.nix` re-expresses nixpkgs' cargo-vendor fetcher privately,
+so that only `lez-faucet-ffi` uses the patched copy and no other package in the
+graph loses its binary-cache hit. That private copy sends a descriptive
+User-Agent, retries HTTP 429, and downloads crate tarballs from
+`static.crates.io` rather than the `crates.io/api/v1` endpoint. The upstream
+issue
 [`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159)
 is still open; this repository carries its own workaround rather than waiting on
 it.
 
-That workaround has not been exercised by a GitHub Actions run, so treat a
-release build as unproven until both the `.lgx` and `sidecar.json` assets exist
-on the release. Producing the artifacts locally and publishing them by hand, as
-described in [Releasing](docs/releasing.md), is still the documented path. The
-catalog index reads the published `.lgx` directly. The sidecar remains the
-release's artifact metadata and is required by the release workflow's
-already-published check.
+That workaround is exercised on every pull request: `.github/workflows/ci.yml`
+builds `#lgx-portable` for both modules on all three release runners, which is
+the same command and the same runners the release workflow uses. A release build
+is still not the same thing as a release, so treat one as unproven until both
+the `.lgx` and `sidecar.json` assets exist on the release. Producing the
+artifacts locally and publishing them by hand, as described in
+[Releasing](docs/releasing.md), remains the documented fallback. The catalog
+index reads the published `.lgx` directly. The sidecar remains the release's
+artifact metadata and is required by the release workflow's already-published
+check.
 
 ## License and provenance
 
