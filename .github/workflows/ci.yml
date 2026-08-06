@@ -418,6 +418,54 @@ jobs:
           lgpm --version
           logoscore --version
 
+      # A Logos module deliberately does not bundle Qt, and the first run of
+      # this job is what made that concrete: `ldd` reported libQt6Core,
+      # libQt6Network, libQt6RemoteObjects and libQt6Gui as "not found" while
+      # every non-Qt dependency — liblez_faucet_ffi, boost, openssl —
+      # resolved out of the module's own directory through its $ORIGIN
+      # runpath. That is correct and deliberate. A Logos module is a Qt
+      # plugin, so it has to use the *host's* Qt instance; two QtCores in one
+      # process is undefined behaviour, not redundancy. The SONAMEs resolve
+      # because whichever process dlopens the plugin has already loaded them.
+      #
+      # Checking the module in a bare shell therefore measures the shell, not
+      # the package. So give the loader the host's libraries: logoscore's
+      # AppImage carries the same Qt 6 its own process runs, which is the
+      # closest stand-in available here for Basecamp's.
+      #
+      # libglvnd is the other half, and also not a packaging fault. AppImages
+      # must not bundle graphics driver libraries; the host's own
+      # libQt6Gui.so.6 lists libOpenGL.so.0, libEGL.so.1 and libGLX.so.0 as
+      # NEEDED and expects the system to have them. Any Linux desktop running
+      # Basecamp does. A GitHub runner ships only some of them.
+      - name: Stage the host's libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libopengl0 libegl1 libglx0
+
+          extract="$RUNNER_TEMP/host"
+          mkdir -p "$extract"
+          # `--appimage-extract` is handled by the AppImage runtime itself and
+          # needs no FUSE, but APPIMAGE_EXTRACT_AND_RUN would send the flag on
+          # to logoscore, which knows nothing about it. Drop it for this call
+          # only.
+          ( cd "$extract" && env -u APPIMAGE_EXTRACT_AND_RUN logoscore --appimage-extract >/dev/null )
+
+          # Locate the directory by what is in it rather than by a hardcoded
+          # usr/lib, so a change in the bundle layout is a clear failure here
+          # instead of a confusing one three steps later.
+          qt_core=$(find "$extract" -name 'libQt6Core.so.6' -print -quit)
+          if [[ -z "$qt_core" ]]; then
+            echo "::error::no libQt6Core.so.6 in the extracted logoscore bundle"
+            exit 1
+          fi
+          host_lib=$(dirname "$qt_core")
+          echo "host libraries: $host_lib"
+          echo "LOGOS_HOST_LIB=$host_lib" >> "$GITHUB_ENV"
+
       # The step that makes this an installation rather than an extraction.
       # lgpm chooses the platform variant itself: on x86_64 it asks for
       # linux-x86_64 first and falls back to linux-amd64, which is the name
@@ -501,19 +549,25 @@ jobs:
 
           exit $fail
 
-      # `ldd` answers a question the build cannot: whether the portable
-      # bundle brought everything it needs. A "not found" line here is a
-      # broken package even though every earlier step was green.
+      # `ldd` answers a question the build cannot: with the host's libraries
+      # present, does every dependency this module names actually resolve? A
+      # "not found" line here is a broken package even though every earlier
+      # step was green.
+      #
+      # The full output is printed rather than only the failures, because the
+      # paths are the interesting part: they show which libraries the bundle
+      # carried itself and which it took from the host.
       - name: Resolve shared library dependencies (ldd)
         shell: bash
         run: |
           set -euo pipefail
+          export LD_LIBRARY_PATH="$LOGOS_HOST_LIB"
           fail=0
           for so in "$LOGOS_MODULES_DIR/lez_faucet/lez_faucet_plugin.so" \
                     "$LOGOS_UI_PLUGINS_DIR/lez_faucet_ui/lez_faucet_ui_plugin.so"; do
             echo "::group::ldd $(basename "$so")"
             # Run from the containing directory: these bundles resolve their
-            # siblings through an $ORIGIN rpath, so ldd has to see the .so
+            # siblings through an $ORIGIN runpath, so ldd has to see the .so
             # where it was installed, not where the job happens to be.
             ( cd "$(dirname "$so")" && ldd "./$(basename "$so")" ) | tee /tmp/ldd.txt
             echo "::endgroup::"
@@ -529,6 +583,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export LD_LIBRARY_PATH="$LOGOS_HOST_LIB"
           cc -O0 -Wall -Wextra -Werror -o "$RUNNER_TEMP/dlopen-check" scripts/dlopen-check.c
           "$RUNNER_TEMP/dlopen-check" "$LOGOS_MODULES_DIR/lez_faucet/lez_faucet_plugin.so"
           "$RUNNER_TEMP/dlopen-check" "$LOGOS_UI_PLUGINS_DIR/lez_faucet_ui/lez_faucet_ui_plugin.so"
