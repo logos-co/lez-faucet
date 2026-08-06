@@ -14,11 +14,13 @@ revision (`v0.2.0`, the protocol this client is built against). Each release is
 published as two GitHub releases, `lez_faucet-v<version>` and
 `lez_faucet_ui-v<version>`.
 
-## [0.3.0] — unreleased
+## [0.3.0] — 2026-08-03
 
 Breaking, and the largest change is a removal: the wallet and all key material
-are gone. Both `metadata.json` files carry 0.3.0, but no `lez_faucet-v0.3.0` or
-`lez_faucet_ui-v0.3.0` release exists yet, so this entry is undated.
+are gone. Both `metadata.json` files carry 0.3.0, and both packages were
+published on 2026-08-03 as `lez_faucet-v0.3.0` and `lez_faucet_ui-v0.3.0`. It
+is the first release to carry Linux variants: `darwin-arm64`, `linux-amd64`
+and `linux-arm64`.
 
 Upgrade the core before the UI. The core module's C++ ABI and the UI's Qt Remote
 Objects interface both changed, so a 0.3.0 UI running against a 0.2.x core calls
@@ -79,7 +81,8 @@ one.
   left after dropping `wallet`, `zeroize` and `tempfile`. This is the local half
   of [`logos-module-builder#159`](https://github.com/logos-co/logos-module-builder/issues/159),
   which is still open upstream. `nix build ./faucet-module#lez-faucet-ffi`
-  succeeds with the patch; the GitHub Actions release path remains unproven.
+  succeeds with the patch, and both release workflows ran to completion on
+  2026-08-03, so the GitHub Actions path is no longer the unproven one.
 - The Basecamp catalog page, its aggregate index and its deploy script moved out
   to a separate public repository. Half of what they described was a different
   app.
