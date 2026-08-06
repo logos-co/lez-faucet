@@ -14,11 +14,20 @@
 # (scripts/check-lgx-manifest.py — the packaging tool copies those fields
 # through an allowlist it maintains in another repo, and has dropped one).
 #
+# `linux-install-load` then takes the two Linux bundles the matrix produced
+# and installs and loads them, on the architecture that built them, with the
+# real package manager and the real module host. Building a package and
+# running one are different claims, and until that job existed only the first
+# had ever been made about Linux.
+#
 # What this does NOT cover, so nobody reads a green tick as more than it is:
 #
 #   - `lgs basecamp build`. The `build` matrix calls `nix build .#lgx-portable`
 #     per module directly, which is what the release workflow does; the
 #     Scaffold aggregate wrapper is not exercised here.
+#   - The Basecamp GUI, on any platform. `linux-install-load` is headless: it
+#     proves a module installs and loads, not that a view renders or that the
+#     app works.
 #   - faucet-ui/tests/smoke.mjs. Needs the Qt MCP harness from a Nix build
 #     (LOGOS_QT_MCP), which is not available here.
 #   - The four #[ignore]d live-testnet tests in lez-faucet-ffi. They spend real
@@ -255,3 +264,342 @@ jobs:
           python3 scripts/check-lgx-manifest.py \
             '${{ steps.build.outputs.lgx }}' \
             '${{ matrix.module }}/metadata.json'
+
+      # Hand the Linux bundles to `linux-install-load`. Only Linux, because
+      # that is the only place they can be installed and loaded by a runner
+      # of the matching architecture — a darwin-arm64 bundle has nowhere to
+      # go here, and uploading it would only cost time.
+      #
+      # The .lgx sits in the Nix store, which is root-owned and read-only;
+      # upload-artifact reads rather than writes, so that is fine, but the
+      # file also arrives with the store's 0444 and no execute bit. Nothing
+      # downstream needs one: lgpm reads the archive.
+      - name: Upload the .lgx for the install/load smoke test
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lgx-${{ matrix.module }}-${{ matrix.variant }}
+          path: ${{ steps.build.outputs.lgx }}
+          if-no-files-found: error
+          # Purely a hand-off between two jobs of the same run. Keeping these
+          # for the 90-day default would retain a few hundred MB per pull
+          # request for nobody.
+          retention-days: 1
+
+  # ── Does a Linux package actually install and load? ────────────────────────
+  #
+  # Everything above proves a .lgx can be *built* on Linux and that it
+  # describes itself correctly. Neither is the claim a user makes. Until this
+  # job existed, no Linux artifact this repository had ever produced had been
+  # installed or loaded by anything: the app was developed and verified on
+  # macOS, and the Linux variants shipped on the strength of a tar listing.
+  #
+  # So this takes the bundles the matrix above just built, on the same
+  # architecture that built them, and puts them through the real path:
+  #
+  #   1. lgpm, the package manager Basecamp installs with. `lgpm install
+  #      --file` is PackageManagerLib::installPluginFile behind a CLI — the
+  #      same call, the same variant selection, the same on-disk layout.
+  #      Untarring the bundle by hand would prove none of that.
+  #   2. ldd and dlopen(RTLD_NOW): the dynamic linker's own answer, with lazy
+  #      binding switched off so an unresolved symbol fails here instead of
+  #      in front of a user. See scripts/dlopen-check.c.
+  #   3. logoscore, the real module host. It and Basecamp are the two
+  #      frontends over logos-liblogos, so `load-module` runs the same
+  #      ModuleManager, the same protocol-version gate and the same
+  #      QPluginLoader the desktop app runs.
+  #
+  # Both tools are pulled in as released binaries rather than built from
+  # source. That is what a user has, and building either through Nix would
+  # put a Qt compile in front of a job whose value is that it answers in
+  # minutes once the matrix is done.
+  #
+  # What this deliberately does NOT prove:
+  #
+  #   - The Basecamp GUI, or any GUI. Nothing opens a window.
+  #   - lez_faucet_ui as a running view. Its backend plugin is installed and
+  #     dlopen'd, but a ui_qml package's view needs a QML engine and the
+  #     Logos Design System, so logoscore is not asked to load it.
+  #   - Any faucet behaviour. Nothing is configured and no method is called.
+  #     The module spends from a finite shared testnet pool; CI has no
+  #     business touching it.
+  linux-install-load:
+    name: Install and load (${{ matrix.variant }})
+    # The whole matrix, including the darwin leg. A build failure anywhere
+    # skips this job rather than letting it fail on a missing artifact, which
+    # is the more readable of the two outcomes.
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: linux-amd64
+            runs-on: ubuntu-latest         # x86_64
+            arch: x86_64
+            # `readelf -h` spelling, asserted so that a bundle built for the
+            # other architecture cannot pass by being installed on a runner
+            # that never tries to load it.
+            elf-machine: Advanced Micro Devices X86-64
+            lgpm-sha256: 41c897a6da6db0ecabe03c0098b9bd0652ea8cd2eaf091e2d646a65b71260780
+            logoscore-sha256: 6f216f4b807520194dd0e4d1a3d69bd2bc83f38781a5e7b2c1abf66e40143b33
+          - variant: linux-arm64
+            runs-on: ubuntu-24.04-arm      # Public GitHub arm64 runner
+            arch: aarch64
+            elf-machine: AArch64
+            lgpm-sha256: 0ffa8f33f94d11a1e27985cd8d18f9814b69c38fc2d61614d87a479f0c7ac1e2
+            logoscore-sha256: 3ea4a454681c2867717c1de6f72d7d0dd25549d840e2534386c917d70602c9ee
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 20
+    env:
+      # Both tools ship as AppImages and GitHub's Ubuntu images carry no
+      # libfuse2, so the AppImage runtime cannot mount itself. This unpacks
+      # to a temporary directory and execs from there instead.
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+      # Nothing here opens a window, but liblogos constructs a Qt application
+      # object; offscreen keeps that from wanting an X server.
+      QT_QPA_PLATFORM: offscreen
+      # Pinned rather than "latest": a tool that changes under the job turns
+      # this from evidence into weather. Bump deliberately, with the hashes.
+      LGPM_VERSION: '0.2.1'
+      LOGOSCORE_VERSION: '0.2.2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Separate directories rather than one merged download, so that the
+      # step below can name each package instead of globbing a directory and
+      # hoping the right two files are in it. The .lgx basename comes from
+      # the packaging tool, not from this repository, so it is not something
+      # to pattern-match against.
+      - name: Download the core module bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lgx-faucet-module-${{ matrix.variant }}
+          path: lgx/core
+
+      - name: Download the UI module bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lgx-faucet-ui-${{ matrix.variant }}
+          path: lgx/ui
+
+      - name: Fetch lgpm and logoscore
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools"
+
+          fetch() {
+            local url=$1 want=$2 out=$3
+            curl -fsSL --retry 3 --retry-all-errors -o "$out" "$url"
+            echo "$want  $out" | sha256sum -c -
+          }
+
+          fetch \
+            "https://github.com/logos-co/logos-package-manager/releases/download/${LGPM_VERSION}/lgpm-${{ matrix.arch }}-linux.tar.gz" \
+            '${{ matrix.lgpm-sha256 }}' "$tools/lgpm.tar.gz"
+          fetch \
+            "https://github.com/logos-co/logos-logoscore-cli/releases/download/${LOGOSCORE_VERSION}/logoscore-${{ matrix.arch }}-linux.tar.gz" \
+            '${{ matrix.logoscore-sha256 }}' "$tools/logoscore.tar.gz"
+
+          tar -xzf "$tools/lgpm.tar.gz" -C "$tools"
+          tar -xzf "$tools/logoscore.tar.gz" -C "$tools"
+          # The AppImage runtime reads its own path from /proc/self/exe, so
+          # rename rather than symlink and the payload still resolves.
+          mv "$tools/lgpm-${{ matrix.arch }}.AppImage" "$tools/lgpm"
+          mv "$tools/logoscore-${{ matrix.arch }}.AppImage" "$tools/logoscore"
+          chmod +x "$tools/lgpm" "$tools/logoscore"
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Versions under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          lgpm --version
+          logoscore --version
+
+      # The step that makes this an installation rather than an extraction.
+      # lgpm chooses the platform variant itself: on x86_64 it asks for
+      # linux-x86_64 first and falls back to linux-amd64, which is the name
+      # the release matrix uses, so the fallback is the live path here.
+      - name: Install both packages with lgpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          modules_dir="$RUNNER_TEMP/logos/modules"
+          plugins_dir="$RUNNER_TEMP/logos/ui-plugins"
+          mkdir -p "$modules_dir" "$plugins_dir"
+          echo "LOGOS_MODULES_DIR=$modules_dir" >> "$GITHUB_ENV"
+          echo "LOGOS_UI_PLUGINS_DIR=$plugins_dir" >> "$GITHUB_ENV"
+
+          core=$(find lgx/core -name '*.lgx' | head -n1)
+          ui=$(find lgx/ui -name '*.lgx' | head -n1)
+          [[ -n "$core" && -n "$ui" ]] || { echo "::error::missing .lgx input"; exit 1; }
+
+          # Core before UI: the same order docs/community-install.md gives a
+          # user, because the UI declares the core as a dependency.
+          for pkg in "$core" "$ui"; do
+            echo "::group::lgpm install $(basename "$pkg")"
+            lgpm --modules-dir "$modules_dir" --ui-plugins-dir "$plugins_dir" \
+              install --file "$pkg"
+            echo "::endgroup::"
+          done
+
+          lgpm --modules-dir "$modules_dir" --ui-plugins-dir "$plugins_dir" list
+
+      # Requirement two: the right variant was chosen, and the payload landed
+      # where a loader looks — `<modules-dir>/<name>/`, which is the layout
+      # liblogos scans through this same library.
+      - name: Check the installed layout and variant
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+
+          check() {
+            local dir=$1 name=$2 main=$3
+            echo "--- $name in $dir"
+            if [[ ! -d "$dir/$name" ]]; then
+              echo "::error::$name was not installed into $dir"; fail=1; return
+            fi
+            # lgpm writes this file with the variant it actually selected, so
+            # it is the package manager's own answer rather than ours.
+            local got
+            got=$(cat "$dir/$name/variant" 2>/dev/null || echo '<absent>')
+            echo "variant: $got"
+            if [[ "$got" != '${{ matrix.variant }}' ]]; then
+              echo "::error::$name installed variant '$got', expected ${{ matrix.variant }}"
+              fail=1
+            fi
+            if [[ ! -f "$dir/$name/manifest.json" ]]; then
+              echo "::error::$name has no manifest.json"; fail=1
+            else
+              python3 -c "import json,sys; m=json.load(open(sys.argv[1])); print('manifest:', m.get('name'), m.get('version'), m.get('type'))" \
+                "$dir/$name/manifest.json"
+            fi
+            if [[ ! -f "$dir/$name/$main" ]]; then
+              echo "::error::$name is missing its main library $main"; fail=1; return
+            fi
+            local machine
+            machine=$(readelf -h "$dir/$name/$main" | sed -n 's/^  Machine: *//p')
+            echo "ELF machine: $machine"
+            if [[ "$machine" != '${{ matrix.elf-machine }}' ]]; then
+              echo "::error::$main is ${machine}, expected ${{ matrix.elf-machine }}"
+              fail=1
+            fi
+          }
+
+          check "$LOGOS_MODULES_DIR"    lez_faucet    lez_faucet_plugin.so
+          check "$LOGOS_UI_PLUGINS_DIR" lez_faucet_ui lez_faucet_ui_plugin.so
+
+          # The UI package is a view, so its QML entry point has to survive
+          # the trip as well; the backend plugin alone is not the app.
+          if [[ ! -f "$LOGOS_UI_PLUGINS_DIR/lez_faucet_ui/qml/FaucetView.qml" ]]; then
+            echo "::error::lez_faucet_ui is missing qml/FaucetView.qml"
+            fail=1
+          fi
+
+          exit $fail
+
+      # `ldd` answers a question the build cannot: whether the portable
+      # bundle brought everything it needs. A "not found" line here is a
+      # broken package even though every earlier step was green.
+      - name: Resolve shared library dependencies (ldd)
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for so in "$LOGOS_MODULES_DIR/lez_faucet/lez_faucet_plugin.so" \
+                    "$LOGOS_UI_PLUGINS_DIR/lez_faucet_ui/lez_faucet_ui_plugin.so"; do
+            echo "::group::ldd $(basename "$so")"
+            # Run from the containing directory: these bundles resolve their
+            # siblings through an $ORIGIN rpath, so ldd has to see the .so
+            # where it was installed, not where the job happens to be.
+            ( cd "$(dirname "$so")" && ldd "./$(basename "$so")" ) | tee /tmp/ldd.txt
+            echo "::endgroup::"
+            if grep -q 'not found' /tmp/ldd.txt; then
+              echo "::error::unresolved dependencies for $(basename "$so"):"
+              grep 'not found' /tmp/ldd.txt
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: dlopen the plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -O0 -Wall -Wextra -Werror -o "$RUNNER_TEMP/dlopen-check" scripts/dlopen-check.c
+          "$RUNNER_TEMP/dlopen-check" "$LOGOS_MODULES_DIR/lez_faucet/lez_faucet_plugin.so"
+          "$RUNNER_TEMP/dlopen-check" "$LOGOS_UI_PLUGINS_DIR/lez_faucet_ui/lez_faucet_ui_plugin.so"
+
+      # The real host. logoscore scans the same directory lgpm installed
+      # into, resolves the module through logos-liblogos, applies the
+      # protocol-version gate and hands the file to QPluginLoader — the whole
+      # sequence Basecamp performs, minus the window.
+      - name: Load lez_faucet in the module host
+        id: host
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/logoscore.log"
+          # A private config directory, so the daemon cannot pick up state
+          # from anywhere else on the runner and a client command cannot
+          # reach a daemon this step did not start. logoscore reads this
+          # variable for both roles, so it does not have to be repeated as a
+          # flag on every call.
+          export LOGOSCORE_CONFIG_DIR="$RUNNER_TEMP/logoscore-home"
+
+          logoscore -D -m "$LOGOS_MODULES_DIR" > "$log" 2>&1 &
+
+          # Poll rather than sleep: startup cost differs between the two
+          # runner classes, and a fixed sleep is either flaky or slow.
+          for _ in $(seq 1 60); do
+            if logoscore status >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          if ! logoscore status; then
+            echo "::error::logoscore daemon did not come up"
+            cat "$log"
+            exit 1
+          fi
+
+          echo "::group::modules the host discovered"
+          logoscore list-modules
+          echo "::endgroup::"
+
+          echo "--- loading lez_faucet"
+          logoscore load-module lez_faucet
+
+          # `load-module` exiting 0 is the assertion. This is the evidence a
+          # reader wants beside it: the interface the host can now see, which
+          # only exists if the plugin was instantiated rather than merely
+          # mapped.
+          echo "::group::module-info lez_faucet"
+          logoscore module-info lez_faucet
+          echo "::endgroup::"
+
+          logoscore unload-module lez_faucet || true
+          logoscore stop || true
+
+          # Printed unconditionally, not just on failure. The protocol-version
+          # gate and the plugin loader both report here, and a green run whose
+          # log is full of warnings is worth seeing.
+          echo "::group::daemon log"
+          cat "$log"
+          echo "::endgroup::"
+
+      - name: Summarise
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Linux install and load — ${{ matrix.variant }}"
+            echo
+            echo "- runner: \`${{ matrix.runs-on }}\` (${{ matrix.arch }})"
+            echo "- installed with: \`lgpm ${LGPM_VERSION}\`"
+            echo "- loaded with: \`logoscore ${LOGOSCORE_VERSION}\` (logos-liblogos, same host library as Basecamp)"
+            echo "- result: **${{ steps.host.outcome == 'success' && 'lez_faucet loaded' || 'did not load — see the log above' }}**"
+            echo
+            echo "Headless. No GUI, no QML view, no faucet method called."
+          } >> "$GITHUB_STEP_SUMMARY"
