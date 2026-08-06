@@ -533,6 +533,50 @@ jobs:
           "$RUNNER_TEMP/dlopen-check" "$LOGOS_MODULES_DIR/lez_faucet/lez_faucet_plugin.so"
           "$RUNNER_TEMP/dlopen-check" "$LOGOS_UI_PLUGINS_DIR/lez_faucet_ui/lez_faucet_ui_plugin.so"
 
+      # `logos_protocol_version` is the field the host gates loading on.
+      # liblogos reads it out of the plugin's embedded Qt metadata — not out
+      # of metadata.json on disk and not out of the .lgx manifest, neither of
+      # which carries it — and a module without it loads only because the
+      # current host is permissive:
+      #
+      #   Module lez_faucet carries no usable logos_protocol_version
+      #   (pre-protocol build) — loading permissively
+      #
+      # A host that stops being permissive refuses the module outright, so
+      # this is worth a check rather than a hope. Nothing in this repository
+      # sets the field, and nothing should: logos-module-builder stamps it in
+      # preConfigure from the logos-protocol header the whole stack links,
+      # ahead of moc, and would overwrite anything written here. What this
+      # repository can own is the evidence that the stamp survived — which is
+      # a property of the flake.lock pin, and so can regress silently on a
+      # `nix flake update`.
+      #
+      # The metadata is a CBOR blob inside the .so, and both the key and a
+      # short version string appear in it as plain text runs separated by one
+      # CBOR length byte. Reading it that way needs no Qt on the runner.
+      - name: Protocol version stamp
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$LOGOS_MODULES_DIR/lez_faucet/lez_faucet_plugin.so" \
+                    "$LOGOS_UI_PLUGINS_DIR/lez_faucet_ui/lez_faucet_ui_plugin.so" <<'PY'
+          import re, sys
+
+          pattern = re.compile(rb"logos_protocol_version.(\d+\.\d+\.\d+)")
+          failed = False
+          for path in sys.argv[1:]:
+              with open(path, "rb") as handle:
+                  match = pattern.search(handle.read())
+              if match is None:
+                  print(f"::error::{path} carries no logos_protocol_version "
+                        "stamp — this host loads it only permissively")
+                  failed = True
+              else:
+                  print(f"{path}: logos_protocol_version "
+                        f"{match.group(1).decode()}")
+          sys.exit(1 if failed else 0)
+          PY
+
       # The real host. logoscore scans the same directory lgpm installed
       # into, resolves the module through logos-liblogos, applies the
       # protocol-version gate and hands the file to QPluginLoader — the whole
