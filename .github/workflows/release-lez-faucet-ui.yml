@@ -3,6 +3,12 @@ name: Release lez_faucet_ui
 on:
   workflow_dispatch: {}
 
+# Shared with release-lez-faucet.yml and release-on-merge.yml — see the
+# rationale in release-on-merge.yml.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   release:
     permissions:

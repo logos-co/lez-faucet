@@ -22,11 +22,33 @@ newest core automatically.
 
 ## Standard workflow
 
-The repository contains three manually dispatchable workflows:
+Releases are cut on merge. `release-on-merge.yml` triggers on a push to `main`
+that changes `faucet-module/metadata.json` or `faucet-ui/metadata.json`, and
+publishes the core module then the UI module. Bumping both versions in a pull
+request is therefore the whole release action — merging it publishes. A merge
+that touches no version file does not start the workflow at all.
+
+It first asserts the two `metadata.json` versions match, because releasing them
+at different numbers produces the install-breaking pair described above; that
+check is a hard failure, not a warning. Ordering core before UI is enforced with
+`needs:`, which sequences the two *releases* — the index itself is rebuilt
+asynchronously afterwards and converges because each rebuild rescans every
+release.
+
+One consequence of triggering on the version files: the shared action normally
+treats a release missing its `.lgx` or `sidecar.json` as unpublished and rebuilds
+it on the next run, but an unrelated merge no longer supplies that nudge. Heal a
+partial release with a manual dispatch.
+
+The repository also contains three manually dispatchable workflows, kept as the
+override for releasing outside the merge flow:
 
 - `release-lez-faucet.yml` builds and publishes `faucet-module/`.
 - `release-lez-faucet-ui.yml` builds and publishes `faucet-ui/`.
 - `rebuild-index.yml` regenerates the rolling catalog index.
+
+All release workflows share one concurrency group, so a manual dispatch cannot
+overlap a merge-triggered run and have both write the same tag.
 
 They call `logos-co/logos-modules-release-action@v1` and pass no `variants`
 input, so its default applies: `darwin-arm64`, `linux-amd64`, `linux-arm64`.

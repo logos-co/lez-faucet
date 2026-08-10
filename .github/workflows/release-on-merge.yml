@@ -1,0 +1,106 @@
+name: Release on merge
+
+# Publishes both faucet modules when a merge to `main` changes a declared
+# version, so a released fix reaches the Basecamp catalog without anyone
+# remembering to dispatch a workflow.
+#
+# The trigger is the version files themselves, not every push. The shared action
+# reads the version from `<module_path>/metadata.json` and tags
+# `<name>-v<version>`; it has no idea what a push changed, so gating on `paths:`
+# is what makes the rule below actually true rather than merely usually true:
+#
+#     bump both metadata.json versions in a PR  ->  merging it publishes
+#     merge anything else                       ->  workflow never starts
+#
+# Without the paths filter every merge would run four jobs and fire two
+# `rebuild-index` dispatches, each of which re-downloads and verifies every .lgx
+# in the repo. That is a real cost to pay on commits that cannot possibly
+# release anything.
+#
+# The trade-off: the shared action treats a release missing its `.lgx` or
+# `sidecar.json` as unpublished and would rebuild it on a later run, but with
+# this filter an unrelated merge no longer provides that nudge. Heal a partial
+# release with a manual dispatch of release-lez-faucet{,-ui}.yml.
+#
+# No release loop is possible: the only push the chain makes is
+# `git push -f origin refs/tags/<tag>` to re-point the release tag. That is a
+# tag ref and cannot match `push: branches:`, regardless of who authored it.
+# (GITHUB_TOKEN-authored pushes also don't trigger workflows, but that rule
+# would stop protecting us the day a PAT gets introduced for signing; the
+# tag-vs-branch distinction is the durable reason.)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - faucet-module/metadata.json
+      - faucet-ui/metadata.json
+
+# One group across every workflow in this repo that can publish a release, so a
+# manual dispatch of release-lez-faucet.yml cannot race a merge run and have two
+# jobs write the same tag, upload the same assets, and force-push the same ref.
+# Not scoped to github.ref: a dispatch runs on a different ref and still must not
+# overlap. cancel-in-progress is false because cancelling mid-publish is exactly
+# how a release ends up with a .lgx but no sidecar.json.
+#
+# Caveat worth knowing: GitHub keeps at most one *pending* run per group. Three
+# version-bump merges inside one release cycle would silently drop the middle
+# one. The paths filter makes that unlikely rather than impossible.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  # CHANGELOG.md: "lez_faucet and lez_faucet_ui are released together at the same
+  # number." Enforce that here, because `needs:` below only *orders* the two
+  # releases — it does not pair them. Bumping one module alone would otherwise
+  # publish it, let the other skip as already-published, and exit green, leaving
+  # the pair skewed. docs/releasing.md describes that skew as an install-breaking
+  # state: a 0.3.x UI calls slots a 0.2.x core does not implement.
+  check-pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Both modules must declare the same version
+        run: |
+          set -euo pipefail
+          core=$(jq -er .version faucet-module/metadata.json)
+          ui=$(jq -er .version faucet-ui/metadata.json)
+          echo "lez_faucet=$core lez_faucet_ui=$ui"
+          if [[ "$core" != "$ui" ]]; then
+            echo "::error::version skew — lez_faucet is $core but lez_faucet_ui is $ui. Release them together (CHANGELOG.md)."
+            exit 1
+          fi
+
+  # docs/releasing.md: "Release the core package before the UI package", because
+  # faucet-ui/metadata.json declares a dependency on lez_faucet that Basecamp
+  # resolves from the catalog index. `needs:` guarantees core's *release* is
+  # published before ui builds; it does not guarantee core is in the index first,
+  # since rebuild-index runs asynchronously off a repository_dispatch. The index
+  # converges anyway because each rebuild rescans every release. Two separately
+  # triggered workflows would give no ordering at all, which is why both modules
+  # are jobs here.
+  #
+  # Consequence of `needs:`: if core's release job fails, ui is skipped even
+  # when its own build would have succeeded. That is the intended trade — a UI
+  # published against a core that failed to publish is the worse outcome.
+  core:
+    needs: check-pair
+    permissions:
+      contents: write
+    uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
+    with:
+      module_path: faucet-module
+      # No `variants` override, for the reason release-lez-faucet.yml gives:
+      # faucet-module/flake.nix is the single source of truth for what is
+      # buildable, and restating the list here would only let the two drift.
+
+  ui:
+    needs: core
+    permissions:
+      contents: write
+    uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
+    with:
+      module_path: faucet-ui
+      # No `variants` override — see core above.
