@@ -10,9 +10,58 @@ Every version here is LEZ Faucet's own, covering both packages — `lez_faucet`
 and `lez_faucet_ui` are released together at the same number, and the version
 source of truth is each module's `metadata.json`. These numbers are not Logos
 Basecamp's version (0.2.1, the host application) and not the pinned upstream LEZ
-revision (`v0.2.0`, the protocol this client is built against). Each release is
+revision (`v0.2.2`, the protocol this client is built against). Each release is
 published as two GitHub releases, `lez_faucet-v<version>` and
 `lez_faucet_ui-v<version>`.
+
+## [0.3.1] — 2026-08-10
+
+Repins the client to the upgraded public testnet. No interface changed, which is
+why this is a patch and not a minor.
+
+The testnet was reset and upgraded from LEZ `v0.2.0` to `v0.2.2` on 2026-08-05,
+changing the builtin program ELFs and therefore their ImageIDs. Because those
+IDs are computed client-side from ELFs embedded at build time, every 0.3.0 build
+has since refused to claim, reporting **"This app does not match the deployed
+testnet"**. That is the fingerprint gate working as designed — a version-skewed
+client would otherwise build transactions the sequencer silently drops — so the
+fix is to move the pin, not to relax the gate.
+
+### Changed
+
+- Pinned LEZ revision moved from `v0.2.0` (`a58fbce2`) to `v0.2.2`
+  (`d6e4ae694e7419f5906b340c232704466a1917b7`) across `Cargo.toml`,
+  `faucet-module/flake.nix`, `scaffold.toml` and both `flake.lock` files.
+- `docs/testnet.md` records the new `authenticated_transfer` and `pinata`
+  ImageIDs, and notes that the reset discarded all prior chain history —
+  pre-reset explorer links are dead, and accounts initialized on the old chain
+  must be initialized again.
+- No client logic changed — the only source edit is the version string
+  `LezFaucetModule::version()` returns, which
+  `faucet-module/tests/test_lez_faucet_module.cpp` checks against
+  `metadata.json`. Every upstream API this app consumes survived the bump:
+  `lee`'s `public_transaction` module is byte-identical, `system_accounts` is
+  untouched, and `programs` only gained functions. `getTransaction` now returns
+  `Option<(LeeTransaction, BlockId)>` rather than `Option<LeeTransaction>`,
+  which the existing inclusion check absorbs because it never names the payload
+  type.
+- The vendor hash in `faucet-module/flake.nix` was regenerated; it tracks
+  `Cargo.lock`, and every LEZ git checkout in the vendored set moved.
+
+### Added
+
+- `scripts/check-program-fingerprint.sh` compares the sequencer's
+  `getProgramIds` against the ImageIDs recorded in `docs/testnet.md`. CI runs it
+  daily, so the next testnet upgrade is reported by a red build rather than
+  discovered by a user meeting the red banner. It reads the expected values out
+  of `docs/testnet.md`, keeping that document the single source of truth.
+
+### Removed
+
+- The inert `wallet` entry in `[workspace.dependencies]`. No member crate
+  depended on it, so Cargo never resolved it and it has never appeared in
+  `Cargo.lock` — it was stale configuration left over from the pre-0.3.0 wallet
+  flow, and removing it changes nothing about what gets built.
 
 ## [0.3.0] — 2026-08-03
 

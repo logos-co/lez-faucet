@@ -8,10 +8,16 @@ LEZ Faucet targets only the public testnet:
 | --- | --- |
 | Sequencer RPC | `https://testnet.lez.logos.co` |
 | Explorer | `https://explorer.testnet.lez.logos.co` |
-| LEZ source tag | `v0.2.0` |
-| LEZ source commit | `a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a` |
+| LEZ source tag | `v0.2.2` |
+| LEZ source commit | `d6e4ae694e7419f5906b340c232704466a1917b7` |
 | Pinata account | `EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7` |
 | Claim value | 150 testnet LEZ |
+
+The testnet was **reset and upgraded on 2026-08-05**, from `v0.2.0` to `v0.2.2`.
+The reset discarded all prior chain history, so block and transaction links from
+before that date no longer resolve in the explorer, and accounts initialized on
+the old chain must be initialized again. The Piñata account ID is derived, not
+allocated, so it survived the reset unchanged.
 
 The pin is a protocol requirement, not a convenience. Builtin program IDs are
 derived from program ELFs embedded in the client. A client built from a
@@ -23,10 +29,19 @@ creating transactions. At the pinned deployment, the relevant program IDs are:
 
 | Program | ImageID as 32-byte little-endian hex |
 | --- | --- |
-| `authenticated_transfer` | `dcbbfebcd59399961ed9973b8307dc475fd4c5ca5779aacfe7588f7dbc3f4a71` |
-| `pinata` | `66f6a58d92c159c3c13ea54d1e37a68a814f0fd3b8fd44b7d35c0617ac4456f8` |
+| `authenticated_transfer` | `fe96c4228babbe8bc578e3e25b884cacb07f8c86541f27ed676789875eef875a` |
+| `pinata` | `fc52f17a60f8b5e8de28e1a8c3133c012485011a36aef985ce24d69ff4f3528c` |
 
-You can inspect the live response with:
+That table is the source of truth for this check.
+`scripts/check-program-fingerprint.sh` reads it, queries the live sequencer, and
+exits non-zero when the two disagree. CI runs it daily so that an upgrade is
+reported here before a user meets it as a red banner in the app:
+
+```sh
+scripts/check-program-fingerprint.sh
+```
+
+You can also inspect the live response directly:
 
 ```sh
 curl -fsS -H 'content-type: application/json' \
@@ -47,10 +62,10 @@ A Piñata claim names the pool and the recipient as `PublicNoSign`, so the
 transaction carries no signatures and no nonces. At the pinned revision this is
 verifiable in three places: the facade builds both accounts as `PublicNoSign`
 (`lez/wallet/src/program_facades/pinata.rs`); the `PublicNoSign` arm of
-`AccountManager` sets `sk = None` (`lez/wallet/src/account_manager.rs:213-223`),
+`AccountManager` sets `sk = None` (`lez/wallet/src/account_manager.rs:225-235`),
 so `sign_message` and `public_account_nonces` both return empty; and the
 state machine only requires that the nonce and signature lists have equal
-length (`lee/state_machine/src/validated_state_diff.rs`). An empty witness set
+length (`lee/state_machine/src/validated_state_diff/mod.rs`). An empty witness set
 is an ordinary, exercised shape upstream — the per-block clock transaction is
 built exactly the same way.
 

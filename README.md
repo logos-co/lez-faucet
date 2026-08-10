@@ -59,10 +59,10 @@ and nothing client-side could be.
 ## Version lock
 
 All LEZ client crates and build inputs are pinned to
-`logos-blockchain/logos-execution-zone` tag `v0.2.0`, commit:
+`logos-blockchain/logos-execution-zone` tag `v0.2.2`, commit:
 
 ```text
-a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a
+d6e4ae694e7419f5906b340c232704466a1917b7
 ```
 
 This must match the software running at `https://testnet.lez.logos.co`.
@@ -71,6 +71,11 @@ Before sending transactions the backend compares the sequencer's
 pinata ImageIDs. A mismatch is a hard error, not a warning: version-skewed
 instructions can otherwise be accepted without performing the requested state
 transition.
+
+When the testnet upgrades, this pin has to move with it — a build left on the
+old revision refuses every claim rather than sending one that would be dropped.
+`scripts/check-program-fingerprint.sh` runs daily in CI to catch that drift, and
+`docs/testnet.md` records the current contract and how to move it.
 
 ## Project layout
 
@@ -213,35 +218,38 @@ LEE_WALLET_HOME_DIR=/path/to/wallet \
 
 The CLI wallet is only the network-client context for this query and need not
 own the account being checked. Its `wallet_config.json` must point at the same
-sequencer. Upstream LEZ v0.2.0 — the pinned protocol revision, not this app's
+sequencer. Upstream LEZ v0.2.2 — the pinned protocol revision, not this app's
 version — uses `LEE_WALLET_HOME_DIR`; the older `NSSA_WALLET_HOME_DIR` name is
 not read by this pinned wallet.
 
 ## Install and release
 
-This tree builds **LEZ Faucet 0.3.0**: `lez_faucet` 0.3.0 and `lez_faucet_ui`
-0.3.0, per each module's `metadata.json`. Three unrelated version numbers appear
+This tree builds **LEZ Faucet 0.3.1**: `lez_faucet` 0.3.1 and `lez_faucet_ui`
+0.3.1, per each module's `metadata.json`. Three unrelated version numbers appear
 around this app, so name the subject every time:
 
 | Subject | Version |
 | --- | --- |
-| LEZ Faucet (this repository, both packages) | 0.3.0 |
+| LEZ Faucet (this repository, both packages) | 0.3.1 |
 | Logos Basecamp (the host app it installs into) | 0.2.1 |
-| Upstream LEZ (the pinned protocol revision) | `v0.2.0` |
+| Upstream LEZ (the pinned protocol revision) | `v0.2.2` |
 
-0.3.0 is a breaking release, not a patch. The core module's C++ ABI changed, the
-UI's Qt Remote Objects interface changed, and the entire wallet and key-material
-flow was removed. Under semver a 0.x breaking change bumps the minor, which is
-why this is 0.3.0 and not 0.2.1. `CHANGELOG.md` records what moved.
+0.3.1 is a patch: it moves the LEZ pin to match the upgraded testnet and changes
+no interface. Its predecessor 0.3.0 was a breaking release — the core module's
+C++ ABI changed, the UI's Qt Remote Objects interface changed, and the entire
+wallet and key-material flow was removed. Under semver a 0.x breaking change
+bumps the minor, which is why that one was 0.3.0 and not 0.2.1. `CHANGELOG.md`
+records what moved.
 
 For a new installation, install `lez_faucet_ui`; Basecamp should resolve its
 `lez_faucet` core dependency from the same catalog. When upgrading an existing
-0.1.0 or 0.2.0 installation, upgrade or install `lez_faucet` 0.3.0 first, then
-`lez_faucet_ui` 0.3.0. The UI dependency is currently unversioned, so installing
-the new UI alone may leave an older core in place — and against 0.3.0 that is
-not a degraded app but a broken one, because the 0.2.x core does not implement
-the slots the 0.3.0 UI calls. The rolling catalog retains v0.1.0 and v0.2.0 for
-rollback. See [Community installation](docs/community-install.md).
+0.1.0 or 0.2.0 installation, upgrade or install `lez_faucet` 0.3.1 first, then
+`lez_faucet_ui` 0.3.1. The UI dependency is currently unversioned, so installing
+the new UI alone may leave an older core in place — and against a 0.3.x UI that
+is not a degraded app but a broken one, because the 0.2.x core does not
+implement the slots it calls. Rolling back to 0.3.0 or earlier is possible but
+pointless against the current testnet: those builds are pinned to LEZ `v0.2.0`
+and refuse every claim. See [Community installation](docs/community-install.md).
 
 Release workflows are present for both modules. The crates.io HTTP 403 that
 blocked every Nix build of the core module is fixed in this tree:

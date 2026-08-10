@@ -1,0 +1,71 @@
+# Watches the public testnet for a protocol upgrade.
+#
+# Builtin program ImageIDs are computed client-side from ELFs embedded at build
+# time, so when the testnet upgrades, every already-shipped build starts failing
+# every claim with `program_fingerprint_mismatch` — "This app does not match the
+# deployed testnet". Nothing in this repository changes at that moment, so no
+# ordinary check goes red; the 2026-08-05 upgrade went unnoticed for four days
+# and was reported by a user looking at the banner.
+#
+# This job exists to be the thing that notices instead. It compares the live
+# `getProgramIds` response against the ImageIDs recorded in docs/testnet.md and
+# fails when they diverge. A failure here means "repin to the deployed LEZ
+# revision", and the procedure is at the bottom of docs/testnet.md.
+#
+# Deliberately its own workflow rather than a job in ci.yml: ci.yml has no
+# `schedule` trigger, and giving it one would run the six-way nix build matrix
+# daily and let a cron run cancel an in-flight pull-request run through its
+# shared `cancel-in-progress` concurrency group.
+#
+# Deliberately not run on pull requests either. A testnet upgrade is not a
+# defect in whatever branch happens to be open, and reddening every unrelated PR
+# is how a check earns the right to be ignored.
+
+name: Testnet fingerprint
+
+on:
+  schedule:
+    # Early UTC daily, offset off the hour to avoid the scheduler's peak.
+    - cron: "17 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lez-faucet-testnet-fingerprint
+  cancel-in-progress: true
+
+jobs:
+  fingerprint:
+    name: Deployed program IDs match docs/testnet.md
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # curl and python3 are both present on ubuntu-latest; the script checks
+      # for them anyway and says which one is missing.
+      - name: Check the deployed program fingerprint
+        id: check
+        run: scripts/check-program-fingerprint.sh
+
+      - name: Summarise
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Testnet fingerprint"
+            echo
+            if [ "${{ steps.check.outcome }}" = "success" ]; then
+              echo "The deployed program IDs match the ones pinned in \`docs/testnet.md\`."
+            else
+              echo "**The deployed program IDs no longer match \`docs/testnet.md\`.**"
+              echo
+              echo "The testnet has been upgraded past this build, so every shipped"
+              echo "client now refuses to claim. Repin to the deployed LEZ revision,"
+              echo "rebuild, refresh the ImageID table in \`docs/testnet.md\`, and rerun"
+              echo "the live account-init/claim test. See the procedure at the bottom"
+              echo "of \`docs/testnet.md\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
