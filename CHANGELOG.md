@@ -10,9 +10,96 @@ Every version here is LEZ Faucet's own, covering both packages — `lez_faucet`
 and `lez_faucet_ui` are released together at the same number, and the version
 source of truth is each module's `metadata.json`. These numbers are not Logos
 Basecamp's version (0.2.1, the host application) and not the pinned upstream LEZ
-revision (`v0.2.0`, the protocol this client is built against). Each release is
+revision (`v0.2.2`, the protocol this client is built against). Each release is
 published as two GitHub releases, `lez_faucet-v<version>` and
 `lez_faucet_ui-v<version>`.
+
+## [0.3.1] — 2026-08-10
+
+Repins the client to the upgraded public testnet. No interface changed, which is
+why this is a patch and not a minor.
+
+The testnet was reset and upgraded from LEZ `v0.2.0` to `v0.2.2` on 2026-08-05,
+changing the builtin program ELFs and therefore their ImageIDs. Because those
+IDs are computed client-side from ELFs embedded at build time, every 0.3.0 build
+has since refused to claim, reporting **"This app does not match the deployed
+testnet"**. That is the fingerprint gate working as designed — a version-skewed
+client would otherwise build transactions the sequencer silently drops — so the
+fix is to move the pin, not to relax the gate.
+
+### Changed
+
+- Pinned LEZ revision moved from `v0.2.0` (`a58fbce2`) to `v0.2.2`
+  (`d6e4ae694e7419f5906b340c232704466a1917b7`) across `Cargo.toml`,
+  `faucet-module/flake.nix`, `scaffold.toml` and both `flake.lock` files.
+- `docs/testnet.md` records the new `authenticated_transfer` and `pinata`
+  ImageIDs, and notes that the reset discarded all prior chain history —
+  pre-reset explorer links are dead, and accounts initialized on the old chain
+  must be initialized again.
+- No client logic changed — the only source edit is the version string
+  `LezFaucetModule::version()` returns, which
+  `faucet-module/tests/test_lez_faucet_module.cpp` checks against
+  `metadata.json`. Every upstream API this app consumes survived the bump:
+  `lee`'s `public_transaction` module is byte-identical, `system_accounts` is
+  untouched, and `programs` only gained functions. `getTransaction` now returns
+  `Option<(LeeTransaction, BlockId)>` rather than `Option<LeeTransaction>`,
+  which the existing inclusion check absorbs because it never names the payload
+  type.
+- The vendor hash in `faucet-module/flake.nix` was regenerated; it tracks
+  `Cargo.lock`, and every LEZ git checkout in the vendored set moved.
+
+Verified on chain, not only by fingerprint: claim
+`4581848e26271a512ec2dfacbdfad568b1dede31d96821685536958006968b88` credited a
+freshly initialized account from 0 to 150 and moved the pool from 1498800 to
+1498650. The same test replays its request key afterwards and gets the original
+receipt without a second credit, so idempotency holds on the upgraded chain too.
+
+### Added
+
+- A `Testnet fingerprint` workflow that runs daily. Its gate compares the
+  ImageIDs *compiled into the build* against the sequencer, via the existing
+  `faucet_info_matches_the_pinned_protocol` live test — the same comparison the
+  runtime gate makes. `scripts/check-program-fingerprint.sh` runs alongside it
+  as a fast advisory diagnostic, comparing the sequencer against the table in
+  `docs/testnet.md`; it needs no toolchain and names the drift precisely, but it
+  cannot be the gate, because editing that table would silence it while leaving
+  every build unable to claim. A real mismatch opens or updates an issue, since
+  a scheduled failure reddens no pull request and would otherwise notify nobody.
+
+### Fixed
+
+- `classify`'s correctness argument in `client.rs` cited sequencer behaviour
+  that v0.2.2 changed. That release added a two-tier chain state with peer block
+  adoption and orphaning, reads answer from the reorg-able head, and the hash
+  index behind `get_transaction` is never pruned when a block is orphaned. So a
+  transaction can read as included after its block was reverted. The decision
+  table already refused rather than guessed in that case — it returns
+  `Unattributable` and submits nothing further — but the comment called it
+  unreachable, and the stale upstream path it cited
+  (`core/src/program.rs:464`) had moved to `core/src/program/mod.rs:470`.
+  Documented rather than redesigned: reads against a finalized tier would need
+  RPC the sequencer does not expose.
+- `docs/testnet.md`, `README.md` and `docs/community-install.md` told users to
+  point the pinned wallet CLI at an existing wallet home. v0.2.2 replaced
+  `WalletConfig`'s `sequencer_addr` with a `sequencers` list and added
+  `calibration_limit`, with no serde alias, default or migration, so a home
+  created before the upgrade fails to parse. Now called out, along with two
+  other traps found while creating a test account: the upstream flake's `wallet`
+  output is the FFI shared library rather than the CLI, and
+  `auth-transfer init` exits non-zero even when it succeeds.
+- Three stale `v0.2.0` references in `scripts/scaffold-setup.sh`, one of which
+  is printed at runtime. The layout assumption behind those symlinks is still
+  correct at v0.2.2.
+- Rollback prose in `docs/community-install.md` and `docs/releasing.md` listed
+  only 0.2.0 and 0.1.0; the index is rebuilt from every non-draft release, so
+  0.3.0 is listed too.
+
+### Removed
+
+- The inert `wallet` entry in `[workspace.dependencies]`. No member crate
+  depended on it, so Cargo never resolved it and it has never appeared in
+  `Cargo.lock` — it was stale configuration left over from the pre-0.3.0 wallet
+  flow, and removing it changes nothing about what gets built.
 
 ## [0.3.0] — 2026-08-03
 

@@ -1757,17 +1757,17 @@
     "logos-execution-zone": {
       "flake": false,
       "locked": {
-        "lastModified": 1782820738,
-        "narHash": "sha256-OnXBx3nD/r7vCzZwh/RXmoqbtNF9rG+ZZsWXPsXoOzk=",
+        "lastModified": 1785854842,
+        "narHash": "sha256-4Q0vnbnYJwxx3gWTtlt5ozTud4yj5CmxvXoHmdcmoB0=",
         "owner": "logos-blockchain",
         "repo": "logos-execution-zone",
-        "rev": "a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a",
+        "rev": "d6e4ae694e7419f5906b340c232704466a1917b7",
         "type": "github"
       },
       "original": {
         "owner": "logos-blockchain",
         "repo": "logos-execution-zone",
-        "rev": "a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a",
+        "rev": "d6e4ae694e7419f5906b340c232704466a1917b7",
         "type": "github"
       }
     },

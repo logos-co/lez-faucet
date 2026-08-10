@@ -8,10 +8,16 @@ LEZ Faucet targets only the public testnet:
 | --- | --- |
 | Sequencer RPC | `https://testnet.lez.logos.co` |
 | Explorer | `https://explorer.testnet.lez.logos.co` |
-| LEZ source tag | `v0.2.0` |
-| LEZ source commit | `a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a` |
+| LEZ source tag | `v0.2.2` |
+| LEZ source commit | `d6e4ae694e7419f5906b340c232704466a1917b7` |
 | Pinata account | `EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7` |
 | Claim value | 150 testnet LEZ |
+
+The testnet was **reset and upgraded on 2026-08-05**, from `v0.2.0` to `v0.2.2`.
+The reset discarded all prior chain history, so block and transaction links from
+before that date no longer resolve in the explorer, and accounts initialized on
+the old chain must be initialized again. The Piñata account ID is derived, not
+allocated, so it survived the reset unchanged.
 
 The pin is a protocol requirement, not a convenience. Builtin program IDs are
 derived from program ELFs embedded in the client. A client built from a
@@ -23,10 +29,33 @@ creating transactions. At the pinned deployment, the relevant program IDs are:
 
 | Program | ImageID as 32-byte little-endian hex |
 | --- | --- |
-| `authenticated_transfer` | `dcbbfebcd59399961ed9973b8307dc475fd4c5ca5779aacfe7588f7dbc3f4a71` |
-| `pinata` | `66f6a58d92c159c3c13ea54d1e37a68a814f0fd3b8fd44b7d35c0617ac4456f8` |
+| `authenticated_transfer` | `fe96c4228babbe8bc578e3e25b884cacb07f8c86541f27ed676789875eef875a` |
+| `pinata` | `fc52f17a60f8b5e8de28e1a8c3133c012485011a36aef985ce24d69ff4f3528c` |
 
-You can inspect the live response with:
+The `Testnet fingerprint` workflow checks this daily, so that an upgrade is
+reported here before a user meets it as a red banner in the app. It runs two
+checks, and the difference between them matters.
+
+The **authoritative** one compares the ImageIDs *compiled into the build*
+against the sequencer — the same comparison the runtime gate makes:
+
+```sh
+cargo test -p lez-faucet-ffi --test live_public_testnet \
+  faucet_info_matches_the_pinned_protocol -- --ignored
+```
+
+The **advisory** one compares the sequencer against the table above. It needs
+no toolchain, so it answers in a second and names the drift precisely:
+
+```sh
+scripts/check-program-fingerprint.sh
+```
+
+The table is documentation, not the contract. Editing it would silence the
+advisory check while leaving every build unable to claim, which is why the
+compiled comparison is the gate.
+
+You can also inspect the live response directly:
 
 ```sh
 curl -fsS -H 'content-type: application/json' \
@@ -47,10 +76,10 @@ A Piñata claim names the pool and the recipient as `PublicNoSign`, so the
 transaction carries no signatures and no nonces. At the pinned revision this is
 verifiable in three places: the facade builds both accounts as `PublicNoSign`
 (`lez/wallet/src/program_facades/pinata.rs`); the `PublicNoSign` arm of
-`AccountManager` sets `sk = None` (`lez/wallet/src/account_manager.rs:213-223`),
+`AccountManager` sets `sk = None` (`lez/wallet/src/account_manager.rs:225-235`),
 so `sign_message` and `public_account_nonces` both return empty; and the
 state machine only requires that the nonce and signature lists have equal
-length (`lee/state_machine/src/validated_state_diff.rs`). An empty witness set
+length (`lee/state_machine/src/validated_state_diff/mod.rs`). An empty witness set
 is an ordinary, exercised shape upstream — the per-block clock transaction is
 built exactly the same way.
 
@@ -119,6 +148,11 @@ It reads the pool and the recipient independently before and after, requires an
 exact `+150`, and then replays the same request key to prove a repeat produces
 no second claim.
 
+This was last run against `v0.2.2` on 2026-08-10: claim
+`4581848e26271a512ec2dfacbdfad568b1dede31d96821685536958006968b88` credited
+`Public/AwTjnoBMZZ7KQCKxYYkcv3npTXZqXyYnFwwHkdw7Az5i` from 0 to 150, moving the
+pool from 1498800 to 1498650.
+
 The destination must already be initialized under authenticated-transfer. A
 public account ID alone cannot authorize initialization; the owner runs
 `wallet auth-transfer init --account-id Public/<account-id>` in their own wallet
@@ -126,5 +160,33 @@ context. The faucet copies that command for them and never requests a recovery
 phrase or private key. Private account IDs are not accepted: private funding
 would additionally require privacy keys, synchronized private state and proof
 handling.
+
+### Getting a destination account
+
+The 2026-08-05 reset discarded every account, so a destination generally has to
+be created from scratch. Three things about the pinned wallet cost real time if
+you meet them cold:
+
+- **The flake's `wallet` output is not the CLI.** At `d6e4ae69`,
+  `packages.<system>.wallet` (and `.default`) is the `wallet-ffi` shared
+  library; no flake output contains a CLI binary, so `nix run …#wallet` cannot
+  work. Build it from the source tree instead, which needs none of the
+  `LBC_ROOT_DIR` / `RAPIDSNARK_LIB_DIR` nix-sandbox variables:
+
+  ```sh
+  cargo build --release -p wallet --locked --target-dir /tmp/lez-wallet-target
+  ```
+
+- **`auth-transfer init` exits non-zero even when it succeeds.** It prints the
+  transaction hash and then fails its own inclusion poller with
+  `Error: All pollers failed`. The account is initialized regardless. Confirm
+  with `getAccount` — `program_owner` should equal the `authenticated_transfer`
+  ImageID above — rather than trusting the exit code.
+
+- **A wallet home from before v0.2.2 will not load.** `WalletConfig` replaced
+  `sequencer_addr: Url` with `sequencers: Vec<SequencerConnectionData>` and
+  added `calibration_limit`, with no serde alias, default or migration. An old
+  `wallet_config.json` fails to parse, complaining that the `sequencers` field
+  is missing. Use a fresh `LEE_WALLET_HOME_DIR`, or reshape the file by hand.
 
 The write test mutates shared public Piñata state. Run only one at a time.

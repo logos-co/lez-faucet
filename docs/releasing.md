@@ -3,17 +3,22 @@
 Release the core package before the UI package. The version source of truth is
 each module's `metadata.json`.
 
-Both packages must be released at 0.3.0. LEZ Faucet 0.3.0 is a breaking release
-— the core module's C++ ABI changed, the UI's Qt Remote Objects interface
-changed, and the wallet and key-material flow was removed — so it is a minor
-bump under semver rather than a patch. Existing v0.1.0 and v0.2.0 users must
-upgrade or install `lez_faucet` 0.3.0 before `lez_faucet_ui` 0.3.0, because the
-UI's core dependency is currently unversioned and upgrading the UI alone can
-leave the older core installed. That combination is broken, not merely stale:
-the 0.2.x
-core does not implement the slots the 0.3.0 UI calls, so the app fails on the
-first action rather than presenting an older screen. New installations should
-resolve the newest core automatically.
+Both packages must be released at 0.3.1. LEZ Faucet 0.3.1 is a patch: it repins
+the client to LEZ `v0.2.2` to match the testnet upgraded on 2026-08-05, and
+changes no interface. It is nonetheless mandatory rather than optional, because
+0.3.0 and every earlier build are pinned to `v0.2.0` and now refuse every claim
+with "This app does not match the deployed testnet".
+
+Its predecessor 0.3.0 was the breaking release — the core module's C++ ABI
+changed, the UI's Qt Remote Objects interface changed, and the wallet and
+key-material flow was removed — so that one was a minor bump under semver
+rather than a patch. Existing v0.1.0 and v0.2.0 users must still upgrade or
+install `lez_faucet` before `lez_faucet_ui`, because the UI's core dependency is
+currently unversioned and upgrading the UI alone can leave the older core
+installed. That combination is broken, not merely stale: the 0.2.x core does not
+implement the slots a 0.3.x UI calls, so the app fails on the first action
+rather than presenting an older screen. New installations should resolve the
+newest core automatically.
 
 ## Standard workflow
 
@@ -59,9 +64,10 @@ gh workflow run release-lez-faucet-ui.yml
 gh run watch
 ```
 
-Then verify that the rolling `index` release contains both packages at 0.3.0.
-The rebuild scans every non-draft module release, so the v0.1.0 and v0.2.0
-entries remain available for rollback.
+Then verify that the rolling `index` release contains both packages at 0.3.1.
+The rebuild scans every non-draft module release, so the 0.3.0, v0.2.0 and
+v0.1.0 entries remain listed for rollback — though none of them can claim
+against the current testnet, all being pinned to LEZ `v0.2.0`.
 
 ## The crates.io vendoring workaround
 
@@ -120,8 +126,8 @@ Locate the `.lgx` files in the returned store paths, copy them to a temporary
 release directory, and name them from the embedded module versions, for example:
 
 ```text
-lez_faucet-0.3.0.lgx
-lez_faucet_ui-0.3.0.lgx
+lez_faucet-0.3.1.lgx
+lez_faucet_ui-0.3.1.lgx
 ```
 
 For each artifact:
@@ -167,7 +173,7 @@ report `["darwin-arm64"]` and be two short of the requested three.
 
 ```sh
 module=lez_faucet
-version=0.3.0
+version=0.3.1
 release_dir="release/core"
 artifact="${release_dir}/${module}-${version}.lgx"
 
@@ -225,16 +231,16 @@ keep the independently generated files separate.
 ## Publish the manual releases
 
 ```sh
-gh release create lez_faucet-v0.3.0 \
+gh release create lez_faucet-v0.3.1 \
   --target main \
-  --title "lez_faucet v0.3.0" \
-  release/core/lez_faucet-0.3.0.lgx \
+  --title "lez_faucet v0.3.1" \
+  release/core/lez_faucet-0.3.1.lgx \
   release/core/sidecar.json
 
-gh release create lez_faucet_ui-v0.3.0 \
+gh release create lez_faucet_ui-v0.3.1 \
   --target main \
-  --title "lez_faucet_ui v0.3.0" \
-  release/ui/lez_faucet_ui-0.3.0.lgx \
+  --title "lez_faucet_ui v0.3.1" \
+  release/ui/lez_faucet_ui-0.3.1.lgx \
   release/ui/sidecar.json
 
 gh workflow run rebuild-index.yml
@@ -251,13 +257,13 @@ curl -fsSL \
   | jq '.packages[] | {name, versions: [.versions[].manifest.version]}'
 ```
 
-Both packages must list 0.3.0, with 0.2.0 and 0.1.0 still present as the
+Both packages must list 0.3.1, with 0.3.0, 0.2.0 and 0.1.0 still present as the
 rollback entries.
 
 Finally, test the user journey in a fresh Basecamp profile:
 
 1. Add the raw `logos-repo.json` URL.
-2. Install `lez_faucet_ui` 0.3.0 and confirm `lez_faucet` 0.3.0 resolves with it.
+2. Install `lez_faucet_ui` 0.3.1 and confirm `lez_faucet` 0.3.1 resolves with it.
 3. Confirm the first screen has no onboarding, password, recovery phrase or
    "create account" step.
 4. Paste an independently created, already-initialized public
@@ -268,6 +274,6 @@ Finally, test the user journey in a fresh Basecamp profile:
 8. Confirm no wallet, config or state file was created anywhere.
 
 Test the upgrade path separately, in a profile that already has 0.2.0
-installed: upgrade `lez_faucet` to 0.3.0 first, then `lez_faucet_ui`. Upgrading
+installed: upgrade `lez_faucet` to 0.3.1 first, then `lez_faucet_ui`. Upgrading
 the UI alone is the failure mode this release has to be checked against, and it
 presents as an error on the first action, not as the old screen.

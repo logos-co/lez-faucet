@@ -845,7 +845,7 @@ std::string LezFaucetModule::version() const
 {
     // Kept in step with faucet-module/metadata.json by hand; the two are
     // independent copies and drift silently if only one is bumped.
-    return "0.3.0";
+    return "0.3.1";
 }
 
 // ---- public API ------------------------------------------------------------

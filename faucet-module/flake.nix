@@ -30,7 +30,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     logos-execution-zone = {
-      url = "github:logos-blockchain/logos-execution-zone/a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a";
+      url = "github:logos-blockchain/logos-execution-zone/d6e4ae694e7419f5906b340c232704466a1917b7";
       flake = false;
     };
     faucet-source = {
@@ -306,21 +306,22 @@
         in
         rustPlatform.buildRustPackage {
           pname = "lez-faucet-ffi";
-          version = "0.3.0";
+          version = "0.3.1";
           src = faucetFfiSource;
           # `cargoDeps` rather than `cargoHash` so vendoring goes through the
-          # patched fetcher above. The value is the 0.3.0 vendor hash and is
+          # patched fetcher above. The value is the 0.3.1 vendor hash and is
           # not affected by that patch: it covers only the fixed-output
           # vendor-staging tree — checksum-verified crate tarballs, git
           # checkouts and Cargo.lock — so it tracks the lockfile, not the
           # nixpkgs or the host serving the tarballs. It is likewise the same
-          # on every system. (0.3.0 regenerated it because dropping the
-          # `wallet`, `zeroize` and `tempfile` dependencies changed the
-          # vendored set; the 0.2.0 hash no longer applies.)
+          # on every system. (0.3.1 regenerated it because repinning LEZ from
+          # v0.2.0 to v0.2.2 moved every LEZ git checkout in the vendored set
+          # and shifted their transitive crates; the 0.3.0 hash no longer
+          # applies.)
           cargoDeps = fetchCargoVendorPatched {
-            name = "lez-faucet-ffi-0.3.0";
+            name = "lez-faucet-ffi-0.3.1";
             src = faucetFfiSource;
-            hash = "sha256-g1kXxMjVbalceSm51CebyMqOBORi25Xg+BokvTLkJhw=";
+            hash = "sha256-KQrfJXYLwp2gOE3DrO8gG0C7CQnBx5AWVWtdAuhPHGw=";
           };
           cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
           doCheck = false;
@@ -332,7 +333,7 @@
 
           # build_utils resolves ../artifacts relative to its vendored manifest,
           # so stage the builtin-program artifacts from the pinned upstream LEZ
-          # v0.2.0 revision beside it.
+          # v0.2.2 revision beside it.
           postPatch = ''
             cp -R ${logos-execution-zone}/artifacts "$cargoDepsCopy/artifacts"
           '';
