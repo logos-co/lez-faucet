@@ -48,13 +48,51 @@ fix is to move the pin, not to relax the gate.
 - The vendor hash in `faucet-module/flake.nix` was regenerated; it tracks
   `Cargo.lock`, and every LEZ git checkout in the vendored set moved.
 
+Verified on chain, not only by fingerprint: claim
+`4581848e26271a512ec2dfacbdfad568b1dede31d96821685536958006968b88` credited a
+freshly initialized account from 0 to 150 and moved the pool from 1498800 to
+1498650. The same test replays its request key afterwards and gets the original
+receipt without a second credit, so idempotency holds on the upgraded chain too.
+
 ### Added
 
-- `scripts/check-program-fingerprint.sh` compares the sequencer's
-  `getProgramIds` against the ImageIDs recorded in `docs/testnet.md`. CI runs it
-  daily, so the next testnet upgrade is reported by a red build rather than
-  discovered by a user meeting the red banner. It reads the expected values out
-  of `docs/testnet.md`, keeping that document the single source of truth.
+- A `Testnet fingerprint` workflow that runs daily. Its gate compares the
+  ImageIDs *compiled into the build* against the sequencer, via the existing
+  `faucet_info_matches_the_pinned_protocol` live test — the same comparison the
+  runtime gate makes. `scripts/check-program-fingerprint.sh` runs alongside it
+  as a fast advisory diagnostic, comparing the sequencer against the table in
+  `docs/testnet.md`; it needs no toolchain and names the drift precisely, but it
+  cannot be the gate, because editing that table would silence it while leaving
+  every build unable to claim. A real mismatch opens or updates an issue, since
+  a scheduled failure reddens no pull request and would otherwise notify nobody.
+
+### Fixed
+
+- `classify`'s correctness argument in `client.rs` cited sequencer behaviour
+  that v0.2.2 changed. That release added a two-tier chain state with peer block
+  adoption and orphaning, reads answer from the reorg-able head, and the hash
+  index behind `get_transaction` is never pruned when a block is orphaned. So a
+  transaction can read as included after its block was reverted. The decision
+  table already refused rather than guessed in that case — it returns
+  `Unattributable` and submits nothing further — but the comment called it
+  unreachable, and the stale upstream path it cited
+  (`core/src/program.rs:464`) had moved to `core/src/program/mod.rs:470`.
+  Documented rather than redesigned: reads against a finalized tier would need
+  RPC the sequencer does not expose.
+- `docs/testnet.md`, `README.md` and `docs/community-install.md` told users to
+  point the pinned wallet CLI at an existing wallet home. v0.2.2 replaced
+  `WalletConfig`'s `sequencer_addr` with a `sequencers` list and added
+  `calibration_limit`, with no serde alias, default or migration, so a home
+  created before the upgrade fails to parse. Now called out, along with two
+  other traps found while creating a test account: the upstream flake's `wallet`
+  output is the FFI shared library rather than the CLI, and
+  `auth-transfer init` exits non-zero even when it succeeds.
+- Three stale `v0.2.0` references in `scripts/scaffold-setup.sh`, one of which
+  is printed at runtime. The layout assumption behind those symlinks is still
+  correct at v0.2.2.
+- Rollback prose in `docs/community-install.md` and `docs/releasing.md` listed
+  only 0.2.0 and 0.1.0; the index is rebuilt from every non-draft release, so
+  0.3.0 is listed too.
 
 ### Removed
 

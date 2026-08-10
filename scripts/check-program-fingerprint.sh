@@ -9,10 +9,18 @@ Usage: scripts/check-program-fingerprint.sh
 Compare the builtin program ImageIDs the sequencer reports against the ones
 recorded in docs/testnet.md. Exit 0 when they agree, 1 when they have drifted.
 
-Drift means the testnet was upgraded and this app's pinned LEZ revision no
-longer matches it. Every claim will then fail closed with
-`program_fingerprint_mismatch`, so the fix is to repin, not to edit the table:
-see the procedure at the bottom of docs/testnet.md.
+This is the cheap half of the watchdog: it needs only curl and Python, so it
+answers in a second and names the drift precisely. It is NOT authoritative.
+The value that decides whether a user can claim is the ImageID compiled into
+the binary from the pinned LEZ revision, and this script never reads that --
+it reads a markdown table. Editing that table would silence this check without
+fixing anything. The authoritative check is the live test, which compares the
+*compiled* IDs against the sequencer:
+
+  cargo test -p lez-faucet-ffi --test live_public_testnet \
+    faucet_info_matches_the_pinned_protocol -- --ignored
+
+CI runs both, and the workflow treats that test as the gate.
 
 Environment:
   LEZ_FAUCET_SEQUENCER_URL  Sequencer JSON-RPC URL
@@ -83,9 +91,11 @@ def fail(message):
 def expected_ids(path):
     """Read the ImageID table out of docs/testnet.md.
 
-    The document is the single source of truth for what this build expects, so
-    the check reads it rather than carrying a second copy of the hex that could
-    drift from it silently.
+    First match wins, deliberately. The document already records history (the
+    2026-08-05 reset), and a later section listing superseded IDs -- a
+    "Historical" table, say -- must not override the live contract and turn a
+    healthy testnet red. A false red on a daily cron is how a check earns the
+    right to be ignored.
     """
     row = re.compile(r"^\|\s*`([a-z_]+)`\s*\|\s*`([0-9a-f]{64})`\s*\|\s*$")
     found = {}
@@ -93,7 +103,7 @@ def expected_ids(path):
         with open(path, encoding="utf-8") as handle:
             for line in handle:
                 match = row.match(line.rstrip("\n"))
-                if match:
+                if match and match.group(1) not in found:
                     found[match.group(1)] = match.group(2)
     except OSError as error:
         fail(f"could not read {path}: {error}")
@@ -162,12 +172,17 @@ for name in WATCHED:
 if drifted:
     print(
         "check-program-fingerprint: the deployed program IDs no longer match "
-        "the pinned ones.\n"
-        "The testnet has been upgraded; this build will fail every claim with "
-        "program_fingerprint_mismatch.\n"
+        "the ones recorded in docs/testnet.md.\n"
+        "Most likely the testnet has been upgraded, and every shipped build "
+        "now fails each claim with program_fingerprint_mismatch.\n"
         + "\n".join(drifted)
-        + "\n\nRepin to the deployed LEZ revision, rebuild, then refresh the "
-        "table in docs/testnet.md.",
+        + "\n\nThe fix is to repin: move the LEZ revision in Cargo.toml, "
+        "faucet-module/flake.nix and scaffold.toml, regenerate the lockfiles, "
+        "rebuild, and rerun the live account-init/claim test. Only then update "
+        "the table in docs/testnet.md to match.\n"
+        "Do NOT just edit the table. That silences this check while leaving "
+        "every user unable to claim -- the ImageIDs that matter are compiled "
+        "into the binary, not read from the document.",
         file=sys.stderr,
     )
     raise SystemExit(1)

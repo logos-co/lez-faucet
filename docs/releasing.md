@@ -65,8 +65,9 @@ gh run watch
 ```
 
 Then verify that the rolling `index` release contains both packages at 0.3.1.
-The rebuild scans every non-draft module release, so the v0.1.0 and v0.2.0
-entries remain available for rollback.
+The rebuild scans every non-draft module release, so the 0.3.0, v0.2.0 and
+v0.1.0 entries remain listed for rollback — though none of them can claim
+against the current testnet, all being pinned to LEZ `v0.2.0`.
 
 ## The crates.io vendoring workaround
 
@@ -256,7 +257,7 @@ curl -fsSL \
   | jq '.packages[] | {name, versions: [.versions[].manifest.version]}'
 ```
 
-Both packages must list 0.3.1, with 0.2.0 and 0.1.0 still present as the
+Both packages must list 0.3.1, with 0.3.0, 0.2.0 and 0.1.0 still present as the
 rollback entries.
 
 Finally, test the user journey in a fresh Basecamp profile:

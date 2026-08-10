@@ -74,8 +74,9 @@ transition.
 
 When the testnet upgrades, this pin has to move with it — a build left on the
 old revision refuses every claim rather than sending one that would be dropped.
-`scripts/check-program-fingerprint.sh` runs daily in CI to catch that drift, and
-`docs/testnet.md` records the current contract and how to move it.
+The `Testnet fingerprint` workflow runs daily to catch that drift, comparing the
+compiled ImageIDs against the live sequencer and opening an issue when they
+diverge. `docs/testnet.md` records the current contract and how to move it.
 
 ## Project layout
 
@@ -221,6 +222,12 @@ own the account being checked. Its `wallet_config.json` must point at the same
 sequencer. Upstream LEZ v0.2.2 — the pinned protocol revision, not this app's
 version — uses `LEE_WALLET_HOME_DIR`; the older `NSSA_WALLET_HOME_DIR` name is
 not read by this pinned wallet.
+
+A wallet home created before v0.2.2 will not open: `WalletConfig` replaced
+`sequencer_addr` with a `sequencers` list and added `calibration_limit`, with no
+migration, so an old `wallet_config.json` fails to parse, complaining that
+the `sequencers` field is missing. Create a fresh home, or reshape the file.
+`scripts/lez-balance.sh` above needs no wallet at all and is unaffected.
 
 ## Install and release
 

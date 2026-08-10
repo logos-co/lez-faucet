@@ -32,14 +32,28 @@ creating transactions. At the pinned deployment, the relevant program IDs are:
 | `authenticated_transfer` | `fe96c4228babbe8bc578e3e25b884cacb07f8c86541f27ed676789875eef875a` |
 | `pinata` | `fc52f17a60f8b5e8de28e1a8c3133c012485011a36aef985ce24d69ff4f3528c` |
 
-That table is the source of truth for this check.
-`scripts/check-program-fingerprint.sh` reads it, queries the live sequencer, and
-exits non-zero when the two disagree. CI runs it daily so that an upgrade is
-reported here before a user meets it as a red banner in the app:
+The `Testnet fingerprint` workflow checks this daily, so that an upgrade is
+reported here before a user meets it as a red banner in the app. It runs two
+checks, and the difference between them matters.
+
+The **authoritative** one compares the ImageIDs *compiled into the build*
+against the sequencer — the same comparison the runtime gate makes:
+
+```sh
+cargo test -p lez-faucet-ffi --test live_public_testnet \
+  faucet_info_matches_the_pinned_protocol -- --ignored
+```
+
+The **advisory** one compares the sequencer against the table above. It needs
+no toolchain, so it answers in a second and names the drift precisely:
 
 ```sh
 scripts/check-program-fingerprint.sh
 ```
+
+The table is documentation, not the contract. Editing it would silence the
+advisory check while leaving every build unable to claim, which is why the
+compiled comparison is the gate.
 
 You can also inspect the live response directly:
 
@@ -134,6 +148,11 @@ It reads the pool and the recipient independently before and after, requires an
 exact `+150`, and then replays the same request key to prove a repeat produces
 no second claim.
 
+This was last run against `v0.2.2` on 2026-08-10: claim
+`4581848e26271a512ec2dfacbdfad568b1dede31d96821685536958006968b88` credited
+`Public/AwTjnoBMZZ7KQCKxYYkcv3npTXZqXyYnFwwHkdw7Az5i` from 0 to 150, moving the
+pool from 1498800 to 1498650.
+
 The destination must already be initialized under authenticated-transfer. A
 public account ID alone cannot authorize initialization; the owner runs
 `wallet auth-transfer init --account-id Public/<account-id>` in their own wallet
@@ -141,5 +160,33 @@ context. The faucet copies that command for them and never requests a recovery
 phrase or private key. Private account IDs are not accepted: private funding
 would additionally require privacy keys, synchronized private state and proof
 handling.
+
+### Getting a destination account
+
+The 2026-08-05 reset discarded every account, so a destination generally has to
+be created from scratch. Three things about the pinned wallet cost real time if
+you meet them cold:
+
+- **The flake's `wallet` output is not the CLI.** At `d6e4ae69`,
+  `packages.<system>.wallet` (and `.default`) is the `wallet-ffi` shared
+  library; no flake output contains a CLI binary, so `nix run …#wallet` cannot
+  work. Build it from the source tree instead, which needs none of the
+  `LBC_ROOT_DIR` / `RAPIDSNARK_LIB_DIR` nix-sandbox variables:
+
+  ```sh
+  cargo build --release -p wallet --locked --target-dir /tmp/lez-wallet-target
+  ```
+
+- **`auth-transfer init` exits non-zero even when it succeeds.** It prints the
+  transaction hash and then fails its own inclusion poller with
+  `Error: All pollers failed`. The account is initialized regardless. Confirm
+  with `getAccount` — `program_owner` should equal the `authenticated_transfer`
+  ImageID above — rather than trusting the exit code.
+
+- **A wallet home from before v0.2.2 will not load.** `WalletConfig` replaced
+  `sequencer_addr: Url` with `sequencers: Vec<SequencerConnectionData>` and
+  added `calibration_limit`, with no serde alias, default or migration. An old
+  `wallet_config.json` fails to parse, complaining that the `sequencers` field
+  is missing. Use a fresh `LEE_WALLET_HOME_DIR`, or reshape the file by hand.
 
 The write test mutates shared public Piñata state. Run only one at a time.

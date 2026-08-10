@@ -35,10 +35,11 @@ https://raw.githubusercontent.com/logos-co/lez-faucet/main/logos-repo.json
 ```
 
 The repository descriptor points Basecamp at the rolling catalog index hosted
-in this repository's `index` GitHub release. The index retains the v0.2.0 and
-v0.1.0 packages alongside 0.3.1 so users can roll back when necessary. Rolling
-back past 0.3.1 is possible but not useful against the current testnet: earlier
-builds are pinned to LEZ `v0.2.0` and refuse every claim.
+in this repository's `index` GitHub release. The index is rebuilt from every
+non-draft release, so 0.3.0, 0.2.0 and 0.1.0 all remain listed alongside 0.3.1
+and can be rolled back to. Note that rolling back is not useful against the
+current testnet: every release before 0.3.1 is pinned to LEZ `v0.2.0` and
+refuses each claim with "This app does not match the deployed testnet".
 
 ## Install the app
 
@@ -170,6 +171,13 @@ to own the account being checked. It must already contain `wallet_config.json`
 and `storage.json`, and its configuration must point at the intended sequencer.
 Use `LEE_WALLET_HOME_DIR` with the pinned upstream LEZ v0.2.2 wallet CLI, not
 the older `NSSA_WALLET_HOME_DIR` name.
+
+A wallet home created before v0.2.2 will not open. That release replaced
+`wallet_config.json`'s `sequencer_addr` with a `sequencers` list and added
+`calibration_limit`, with no migration, so an older file fails to parse,
+complaining that the `sequencers` field is missing. Create a fresh wallet home
+or reshape the file by hand. The `scripts/lez-balance.sh` route above needs no wallet and is
+unaffected.
 
 ## What this app does and does not do
 

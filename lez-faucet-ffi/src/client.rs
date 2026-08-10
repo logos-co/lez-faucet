@@ -336,7 +336,7 @@ pub enum ClaimDecision {
 ///
 /// **A losing claim is never included.** When the proof-of-work is stale the
 /// guest returns without calling `ProgramOutput::write`, so it commits an empty
-/// journal (`lee/state_machine/core/src/program.rs:464` is the only journal
+/// journal (`lee/state_machine/core/src/program/mod.rs:470` is the only journal
 /// write). Decoding that empty journal fails, surfacing as
 /// `ProgramExecutionFailed`, and `build_block_from_mempool` logs and `continue`s
 /// past such a transaction rather than sealing it into a block
@@ -356,9 +356,21 @@ pub enum ClaimDecision {
 /// `balance_before` closes it — had our transaction credited, the balance would
 /// already show it, because state leads the index.
 ///
-/// Note that inclusion with an unchanged balance is *not* a safe retry. It
-/// cannot happen if the model above holds, so seeing it means the model is
-/// wrong, and guessing in that state is how one press becomes two credits.
+/// **Both facts describe one sequencer's own block production, and v0.2.2
+/// weakened them.** That release introduced a two-tier chain state with peer
+/// block adoption and orphaning (`lez/chain_state/`). Reads answer from the
+/// reorg-able head rather than a finalized tier, and the hash index behind
+/// `get_transaction` is extended on every block but never pruned when one is
+/// orphaned. So a transaction can read as included after the block carrying it
+/// has been reverted, with the credit no longer in the balance.
+///
+/// This does not make the rules below unsafe, because they were already written
+/// to refuse rather than guess: that combination returns `Unattributable`, which
+/// reports an unknown outcome and submits nothing further. What it does mean is
+/// that inclusion is evidence of payout rather than proof of it, and that a
+/// `Credited` receipt describes the head at the moment it was read. Treating
+/// `Credited` as final would need reads against a finalized tier, which the
+/// current RPC surface does not expose.
 #[must_use]
 pub fn classify(
     balance_before: u128,
@@ -380,9 +392,11 @@ pub fn classify(
     if included == Some(true) {
         return match balance {
             Some(value) if value == expected => ClaimDecision::Credited,
-            // Included but no credit visible. Under the rules above this is
-            // unreachable; treat it as a broken assumption rather than as
-            // permission to send a second claim.
+            // Included but no credit visible. Since v0.2.2 this is reachable:
+            // the block carrying our transaction can be orphaned while the
+            // hash index still answers "included". Either way the response is
+            // the same — refuse to attribute, and never treat it as permission
+            // to send a second claim.
             Some(_) => ClaimDecision::Unattributable,
             None => ClaimDecision::Continue,
         };
