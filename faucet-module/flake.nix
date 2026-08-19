@@ -309,19 +309,33 @@
           version = "0.3.2";
           src = faucetFfiSource;
           # `cargoDeps` rather than `cargoHash` so vendoring goes through the
-          # patched fetcher above. The value is the 0.3.1 vendor hash and is
-          # not affected by that patch: it covers only the fixed-output
-          # vendor-staging tree — checksum-verified crate tarballs, git
-          # checkouts and Cargo.lock — so it tracks the lockfile, not the
-          # nixpkgs or the host serving the tarballs. It is likewise the same
-          # on every system. (0.3.1 regenerated it because repinning LEZ from
-          # v0.2.0 to v0.2.2 moved every LEZ git checkout in the vendored set
-          # and shifted their transitive crates; the 0.3.0 hash no longer
-          # applies.)
+          # patched fetcher above. The value is not affected by that patch: it
+          # covers only the fixed-output vendor-staging tree — checksum-verified
+          # crate tarballs, git checkouts and Cargo.lock — so it tracks the
+          # lockfile, not the nixpkgs or the host serving the tarballs. It is
+          # likewise the same on every system, which the three release variants
+          # confirm on every build by computing it independently.
+          #
+          # REGENERATE THIS ON EVERY RELEASE, even a docs-only one. Cargo.lock
+          # is copied into the staging tree verbatim, so *any* byte of it moves
+          # the hash — including the four characters of this crate's own
+          # `version`, which every release bumps. It is not only an
+          # external-dependency hash, and reasoning that "no dependency moved,
+          # so the hash stands" is wrong: 0.3.2 was merged with the 0.3.1 hash
+          # on exactly that reasoning and took all three faucet-module legs and
+          # the release job down with it.
+          #
+          # To regenerate: set the hash to lib.fakeHash, build, and take the
+          # `got:` value from the mismatch. There is no way to derive it
+          # locally without a build, which is why CI is the check that matters.
+          #
+          # History: 0.3.1 moved it by repinning LEZ v0.2.0 -> v0.2.2 (every LEZ
+          # git checkout in the vendored set changed); 0.3.2 moved it by the
+          # version bump alone.
           cargoDeps = fetchCargoVendorPatched {
             name = "lez-faucet-ffi-0.3.2";
             src = faucetFfiSource;
-            hash = "sha256-KQrfJXYLwp2gOE3DrO8gG0C7CQnBx5AWVWtdAuhPHGw=";
+            hash = "sha256-UrkOG94buY+lNIrkoY1DcZif2eA7VTk2JgTF3uXXhss=";
           };
           cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
           doCheck = false;
