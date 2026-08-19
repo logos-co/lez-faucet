@@ -231,18 +231,20 @@ the `sequencers` field is missing. Create a fresh home, or reshape the file.
 
 ## Install and release
 
-This tree builds **LEZ Faucet 0.3.1**: `lez_faucet` 0.3.1 and `lez_faucet_ui`
-0.3.1, per each module's `metadata.json`. Three unrelated version numbers appear
+This tree builds **LEZ Faucet 0.3.2**: `lez_faucet` 0.3.2 and `lez_faucet_ui`
+0.3.2, per each module's `metadata.json`. Three unrelated version numbers appear
 around this app, so name the subject every time:
 
 | Subject | Version |
 | --- | --- |
-| LEZ Faucet (this repository, both packages) | 0.3.1 |
+| LEZ Faucet (this repository, both packages) | 0.3.2 |
 | Logos Basecamp (the host app it installs into) | 0.2.1 |
 | Upstream LEZ (the pinned protocol revision) | `v0.2.2` |
 
-0.3.1 is a patch: it moves the LEZ pin to match the upgraded testnet and changes
-no interface. Its predecessor 0.3.0 was a breaking release — the core module's
+0.3.2 is a patch: it makes the core module's `shutdown` reversible, so closing
+the app window no longer disables the faucet for the rest of the Basecamp
+session. 0.3.1 before it was also a patch, moving the LEZ pin to match the
+upgraded testnet. Its predecessor 0.3.0 was a breaking release — the core module's
 C++ ABI changed, the UI's Qt Remote Objects interface changed, and the entire
 wallet and key-material flow was removed. Under semver a 0.x breaking change
 bumps the minor, which is why that one was 0.3.0 and not 0.2.1. `CHANGELOG.md`
@@ -250,8 +252,8 @@ records what moved.
 
 For a new installation, install `lez_faucet_ui`; Basecamp should resolve its
 `lez_faucet` core dependency from the same catalog. When upgrading an existing
-0.1.0 or 0.2.0 installation, upgrade or install `lez_faucet` 0.3.1 first, then
-`lez_faucet_ui` 0.3.1. The UI dependency is currently unversioned, so installing
+0.1.0 or 0.2.0 installation, upgrade or install `lez_faucet` 0.3.2 first, then
+`lez_faucet_ui` 0.3.2. The UI dependency is currently unversioned, so installing
 the new UI alone may leave an older core in place — and against a 0.3.x UI that
 is not a degraded app but a broken one, because the 0.2.x core does not
 implement the slots it calls. Rolling back to 0.3.0 or earlier is possible but

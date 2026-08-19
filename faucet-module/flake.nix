@@ -306,7 +306,7 @@
         in
         rustPlatform.buildRustPackage {
           pname = "lez-faucet-ffi";
-          version = "0.3.1";
+          version = "0.3.2";
           src = faucetFfiSource;
           # `cargoDeps` rather than `cargoHash` so vendoring goes through the
           # patched fetcher above. The value is the 0.3.1 vendor hash and is
@@ -319,7 +319,7 @@
           # and shifted their transitive crates; the 0.3.0 hash no longer
           # applies.)
           cargoDeps = fetchCargoVendorPatched {
-            name = "lez-faucet-ffi-0.3.1";
+            name = "lez-faucet-ffi-0.3.2";
             src = faucetFfiSource;
             hash = "sha256-KQrfJXYLwp2gOE3DrO8gG0C7CQnBx5AWVWtdAuhPHGw=";
           };
