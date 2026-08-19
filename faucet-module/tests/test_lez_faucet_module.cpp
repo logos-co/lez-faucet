@@ -570,11 +570,51 @@ void shutdownJoinsWorkersBeforeDestroyingTheHandle()
     CHECK(MockLezFaucetFfi::destroyCalls() == 1);
     CHECK(!MockLezFaucetFfi::destroyWhileCallActive());
 
-    // After shutdown nothing new may start, and the destructor is a no-op.
-    CHECK(codeIs(module->getFaucetInfo(), "module_stopping"));
-    CHECK(codeIs(module->requestDrop(kAddress, kOtherKey), "module_stopping"));
+    // After shutdown the handle is gone, so nothing new may start. The refusal
+    // is `not_configured` and not `module_stopping`: the module is quiescent
+    // and reconfigurable, not dying. See
+    // `shutdownIsReversibleSoReopeningTheAppWorks` below.
+    CHECK(codeIs(module->getFaucetInfo(), "not_configured"));
+    CHECK(codeIs(module->requestDrop(kAddress, kOtherKey), "not_configured"));
     module.reset();
     CHECK(MockLezFaucetFfi::destroyCalls() == 1);
+    CHECK(!MockLezFaucetFfi::destroyWhileCallActive());
+}
+
+void shutdownIsReversibleSoReopeningTheAppWorks()
+{
+    // Basecamp calls `shutdown` when the UI window closes, then keeps this same
+    // core module instance loaded and calls `configure` again when the user
+    // reopens the app. Shipped 0.3.0 and 0.3.1 latched `m_stopping` inside
+    // `joinAllWorkers` and never cleared it, so the second `configure` answered
+    // `module_stopping` and the faucet stayed dead until Basecamp itself was
+    // quit. Observed in the wild on 2026-08-19: close at 14:43:10, reopen at
+    // 14:43:21, "The faucet is shutting down".
+    MockLezFaucetFfi::reset();
+    auto module = std::make_unique<LezFaucetModule>();
+    configure(*module);
+    CHECK(statusIs(startAndWait(*module, module->getFaucetInfo()), "succeeded"));
+
+    CHECK(has(module->shutdown(), "\"stopped\":true"));
+    CHECK(MockLezFaucetFfi::destroyCalls() == 1);
+
+    // The reopen. This is the assertion the shipped builds would have failed.
+    configure(*module);
+    CHECK(statusIs(startAndWait(*module, module->getFaucetInfo()), "succeeded"));
+    CHECK(has(module->requestDrop(kAddress, kOtherKey), "\"ok\":true"));
+
+    // A second shutdown is equally reversible. `already_stopping` reports
+    // `false` here precisely *because* the first one re-armed: the field means
+    // "another shutdown is in flight right now", not "this module was stopped
+    // once before". That `false` is the regression guard — on the 0.3.1 source
+    // it reads `true`, because the flag was never cleared.
+    const std::string second = module->shutdown();
+    CHECK(has(second, "\"stopped\":true"));
+    CHECK(has(second, "\"already_stopping\":false"));
+    configure(*module);
+    CHECK(statusIs(startAndWait(*module, module->getFaucetInfo()), "succeeded"));
+
+    module.reset();
     CHECK(!MockLezFaucetFfi::destroyWhileCallActive());
 }
 
@@ -862,6 +902,7 @@ int main()
     theOutcomePhaseOverridesTheLastPolledPhase();
     phasePollingNeverBlocksAConcurrentCaller();
     shutdownJoinsWorkersBeforeDestroyingTheHandle();
+    shutdownIsReversibleSoReopeningTheAppWorks();
     theDestructorJoinsWorkersToo();
     inputsAreValidatedByTheModuleItself();
     operationsBeforeConfigurationAreStructured();

@@ -845,7 +845,7 @@ std::string LezFaucetModule::version() const
 {
     // Kept in step with faucet-module/metadata.json by hand; the two are
     // independent copies and drift silently if only one is bumped.
-    return "0.3.1";
+    return "0.3.2";
 }
 
 // ---- public API ------------------------------------------------------------
@@ -1103,6 +1103,11 @@ std::string LezFaucetModule::jobResultAck(const std::string& jobId)
 
 std::string LezFaucetModule::shutdown()
 {
+    // True only while another `shutdown()` (or the destructor) is mid-flight on
+    // another thread. It is no longer a record of "this module was stopped
+    // earlier", because the re-arm below clears the flag every time — a second
+    // shutdown after a completed first one reports `false`, and the test suite
+    // asserts exactly that as the regression guard.
     const bool alreadyStopping = m_stopping.load();
     // Same ordering as the destructor, and for the same reason: every worker
     // must be out of the FFI before the handle it is using is freed.
@@ -1111,6 +1116,29 @@ std::string LezFaucetModule::shutdown()
     if (client != nullptr) {
         lez_faucet_client_destroy(client);
     }
+
+    // Re-arm. `shutdown()` is reversible; `~LezFaucetModule()` is not.
+    //
+    // Basecamp calls this when the UI window closes, then keeps the same core
+    // module instance loaded and calls `configure()` again when the user
+    // reopens the app. `joinAllWorkers()` latched `m_stopping`, and nothing
+    // else in this class ever clears it, so leaving it set bricked the module
+    // for the remaining lifetime of the host process: every later `configure()`
+    // answered `module_stopping`, and the only cure was quitting Basecamp. The
+    // UI's own guidance for that code — "Reopen it to make another request" —
+    // was the one thing that could not work.
+    //
+    // Clearing it here rather than in `configure()` keeps the invariant local
+    // to the function that established it, and the position matters: by this
+    // line every worker is joined and `m_client` is already null, so a
+    // `startJob` that races in behind us finds no client and is refused with
+    // `not_configured`. It cannot reach a freed handle, which is what
+    // API_LOCK §A1.7.1 is protecting. Do not hoist this above the destroy.
+    //
+    // The destructor deliberately does not do this: there, stopping is
+    // terminal, and re-arming a module that is being destroyed would reopen
+    // the very use-after-free window the ordering above exists to close.
+    m_stopping.store(false);
 
     Json result = Json::object();
     result.set("stopped", Json::boolean(true));

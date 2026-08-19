@@ -14,6 +14,55 @@ revision (`v0.2.2`, the protocol this client is built against). Each release is
 published as two GitHub releases, `lez_faucet-v<version>` and
 `lez_faucet_ui-v<version>`.
 
+## [0.3.2] — 2026-08-19
+
+Fixes a core module that stopped working for the rest of the Basecamp session
+once its window was closed. Reopening the app is the whole repro.
+
+### Fixed
+
+- `LezFaucetModule::shutdown()` now clears `m_stopping` before returning.
+  `joinAllWorkers()` sets that flag so no new job can enter the FFI while the
+  client handle is being freed, and nothing in the class ever cleared it again.
+  That is correct for `~LezFaucetModule()`, where stopping is terminal, but
+  Basecamp calls `shutdown` when the **UI window closes** and then keeps the
+  same core module instance loaded, calling `configure` again when the user
+  reopens the app. The second `configure` hit the latched flag and answered
+  `module_stopping`, so the faucet showed "This app is shutting down" for the
+  remaining lifetime of the host process, curable only by quitting Basecamp.
+  The UI's guidance for that code — "Reopen it to make another request" — was
+  the one action that could not work.
+
+  The clear is placed after the client is destroyed rather than in
+  `configure()`: the flag is cleared by the function that set it, and by that
+  point every worker is joined and `m_client` is null, so a `startJob` racing
+  in behind it finds no client and is refused with `not_configured`. It cannot
+  reach a freed handle, which is what API_LOCK §A1.7.1 protects. Calls made
+  between a `shutdown` and the next `configure` therefore now report
+  `not_configured` rather than `module_stopping` — the module is quiescent and
+  reconfigurable, not dying.
+
+  Present in 0.3.0 and 0.3.1, and independent of the LEZ pin: this is a
+  lifecycle bug, not a protocol one. It was invisible to the suite because
+  `shutdownJoinsWorkersBeforeDestroyingTheHandle` asserted the latched
+  behaviour as intended, modelling `shutdown` as terminal the way the
+  destructor is. `shutdownIsReversibleSoReopeningTheAppWorks` now covers the
+  close/reopen cycle Basecamp actually performs, and fails on the 0.3.1 source.
+
+- `shutdown`'s `already_stopping` field consequently reports whether another
+  shutdown is *in flight*, not whether one has ever run. Nothing consumes it;
+  the test suite pins the new meaning.
+
+### Changed
+
+- `docs/community-install.md` tells users to restart Basecamp after installing
+  a new version. Replacing a core module's shared library on disk does not
+  affect the copy the running process already loaded, so an upgrade taken
+  without a restart leaves the old build serving every call — including the
+  build a user upgraded specifically to escape. The network-mismatch entry
+  previously sent that user to open an issue instead, which is the wrong
+  advice for the most likely cause.
+
 ## [0.3.1] — 2026-08-10
 
 Repins the client to the upgraded public testnet. No interface changed, which is
