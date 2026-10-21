@@ -10,9 +10,60 @@ Every version here is LEZ Faucet's own, covering both packages — `lez_faucet`
 and `lez_faucet_ui` are released together at the same number, and the version
 source of truth is each module's `metadata.json`. These numbers are not Logos
 Basecamp's version (0.2.1, the host application) and not the pinned upstream LEZ
-revision (`v0.2.2`, the protocol this client is built against). Each release is
+revision (`v0.2.4-lez-legacy`, the protocol this client is built against). Each
+release is
 published as two GitHub releases, `lez_faucet-v<version>` and
 `lez_faucet_ui-v<version>`.
+
+## [0.4.0] — 2026-10-21
+
+Moves the app to the **LEZ legacy testnet**. The main testnet
+(`testnet.lez.logos.co`) upgraded to LEZ v0.3.x at the start of October, and
+v0.3 ships no `pinata` or `authenticated_transfer` program, so every 0.3.x
+build has refused every claim there since with "This app does not match the
+deployed testnet" (issue #20). The chain it used to claim on continues as
+`testnet-legacy.lez.logos.co` at `v0.2.4-lez-legacy`, with the Piñata pool at
+its full 1,500,000; that is the stable testnet residents are expected to use,
+and this release points at it.
+
+### Changed
+
+- **Target network.** Sequencer `https://testnet-legacy.lez.logos.co`,
+  explorer `https://explorer.testnet-legacy.lez.logos.co`. The host pin moved
+  with it: the client now refuses `testnet.lez.logos.co` outright rather than
+  failing its fingerprint check against it. The prize stays 150.
+- **LEZ pin** `v0.2.2` (`d6e4ae69`) → `v0.2.4-lez-legacy` (`399793b4`), in
+  `Cargo.toml`, `scaffold.toml` and `faucet-module/flake.nix`. The builtin
+  program ImageIDs are unchanged by this tag; what moved underneath is
+  `logos-blockchain` to its `0.3.1` tag, which needs Rust 1.98
+  (`rust-version` is now declared; the flake toolchain is 1.98.1),
+  `logos-blockchain-circuits` v0.5.3 → v0.5.7 (new prebuilt archive hashes in
+  the flake), and a transitive `rocksdb` that needs `libclang` at build time
+  (`bindgenHook`).
+- **Networks are a table.** `lez-faucet-ffi/src/network.rs` holds each
+  network's sequencer, explorer, LEZ tag and commit, expected ImageIDs and
+  claim mechanism; `FaucetBackend.cpp` mirrors the display half. One row is
+  enabled. An offline test refuses a row whose ImageIDs disagree with the
+  programs compiled into the build. A v0.3.x row needs a non-Piñata claim
+  mechanism first; the file says what, so that the next network is an
+  addition and not a rewrite.
+- `getFaucetInfo` reports `network` as `lez-legacy-testnet` (was
+  `lez-public-testnet`) and gains `network_name`, `lez_version` and
+  `explorer_url`.
+
+### Added
+
+- The UI names the network it is pointed at, under the title, with the LEZ
+  tag once the core has verified it.
+- A **Copy explorer link** action on a receipt, built only from the pinned
+  explorer root and a well-formed 64-hex transaction hash.
+- `FaucetBackend.rep` gains read-only `networkName` and `explorerUrl`, which
+  is why this is 0.4.0 and not 0.3.3.
+
+### Fixed
+
+- The daily `Testnet fingerprint` watchdog, `scripts/check-program-fingerprint.sh`
+  and `scripts/lez-balance.sh` default to the legacy sequencer. Closes #20.
 
 ## [0.3.2] — 2026-08-19
 

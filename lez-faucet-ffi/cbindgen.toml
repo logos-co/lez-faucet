@@ -20,3 +20,13 @@ include = [
   "lez_faucet_current_phase",
   "lez_faucet_cancel",
 ]
+# The network table is Rust-side configuration, not ABI. Callers select a
+# network by its sequencer URL through lez_faucet_client_new.
+exclude = [
+  "Network",
+  "ClaimMechanism",
+  "ExpectedPrograms",
+  "LEZ_LEGACY_TESTNET",
+  "ENABLED",
+  "DEFAULT",
+]

@@ -21,6 +21,16 @@ Rectangle {
     property bool bootstrapped: false
     property string bootstrapError: ""
 
+    // -- network ------------------------------------------------------------
+    //
+    // Which LEZ network this window is pointed at. The core's own report wins
+    // once it has answered, because that is the network it actually verified;
+    // until then, the backend's pinned constant.
+    readonly property string networkName: pool.networkName !== "" ? pool.networkName
+        : (backend && backend.networkName ? String(backend.networkName) : "")
+    readonly property string explorerUrl: pool.explorerUrl !== "" ? pool.explorerUrl
+        : (backend && backend.explorerUrl ? String(backend.explorerUrl) : "")
+
     // -- pool ---------------------------------------------------------------
     property var pool: FaucetFlow.poolView(null)
     property string poolJobId: ""
@@ -499,6 +509,13 @@ Rectangle {
         })
     }
 
+    function copyExplorerLink(txHash) {
+        var link = FaucetFlow.explorerTransactionUrl(explorerUrl, txHash)
+        if (!backend || link === "")
+            return
+        watch(backend.copyText(link), function(raw) {}, function(error) {})
+    }
+
     function copyInitializationCommand(command) {
         if (!backend || !command)
             return
@@ -582,6 +599,21 @@ Rectangle {
                 text: qsTr("Enter a public LEZ testnet account and request 150 LEZ for it. Testnet LEZ has no real-world value.")
                 textFormat: Text.PlainText
                 color: Theme.palette.textSecondary
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            // The network this build claims on. Stated up front, because an
+            // account on a different LEZ testnet is a different account.
+            LogosText {
+                visible: root.networkName !== ""
+                text: root.pool.lezVersion !== ""
+                    ? qsTr("Network: %1 (LEZ %2)").arg(root.networkName).arg(root.pool.lezVersion)
+                    : qsTr("Network: %1").arg(root.networkName)
+                textFormat: Text.PlainText
+                font.pixelSize: Theme.typography.secondaryText
+                font.weight: Theme.typography.weightMedium
+                color: Theme.palette.textTertiary
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
@@ -1161,6 +1193,13 @@ Rectangle {
                         color: Theme.palette.text
                         wrapMode: Text.WrapAnywhere
                         Layout.fillWidth: true
+                    }
+                    LogosButton {
+                        visible: root.receipt !== null
+                            && FaucetFlow.explorerTransactionUrl(root.explorerUrl, root.receipt.txHash) !== ""
+                        text: qsTr("Copy explorer link")
+                        implicitHeight: 32
+                        onClicked: root.copyExplorerLink(root.receipt ? root.receipt.txHash : "")
                     }
                     LogosText {
                         visible: root.receipt !== null && root.receipt.retried

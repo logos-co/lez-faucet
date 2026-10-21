@@ -489,7 +489,10 @@ test("the view never invents a receipt from an unproven success", () => {
 
 test("the pool reads as finite, shared and instantaneous", () => {
   const view = flow.poolView({
-    network: "lez-public-testnet",
+    network: "lez-legacy-testnet",
+    network_name: "LEZ legacy testnet",
+    lez_version: "v0.2.4-lez-legacy",
+    explorer_url: "https://explorer.testnet-legacy.lez.logos.co",
     pool_balance: "12000",
     claims_remaining: "80",
     prize_amount: "150",
@@ -503,6 +506,10 @@ test("the pool reads as finite, shared and instantaneous", () => {
   assert.equal(view.claimsRemaining, "80");
   assert.equal(view.canClaim, true);
   assert.equal(view.blockedSentence, "");
+  assert.equal(view.network, "lez-legacy-testnet");
+  assert.equal(view.networkName, "LEZ legacy testnet");
+  assert.equal(view.lezVersion, "v0.2.4-lez-legacy");
+  assert.equal(view.explorerUrl, "https://explorer.testnet-legacy.lez.logos.co");
 
   const depleted = flow.poolView({ pool_balance: "0", claims_remaining: "0", can_claim: false, blocked_reason: "pool_depleted" });
   assert.equal(depleted.canClaim, false);
@@ -510,6 +517,28 @@ test("the pool reads as finite, shared and instantaneous", () => {
   assert.match(flow.poolView({ pool_balance: "1", blocked_reason: "unsupported_difficulty" }).blockedSentence, /Update the app/);
   assert.notEqual(flow.poolView({ pool_balance: "1", blocked_reason: "something_new" }).blockedSentence, "");
   assert.equal(flow.poolView(null).known, false);
+});
+
+test("the view names its network and links receipts only to that explorer", () => {
+  const hash = "4581848e26271a512ec2dfacbdfad568b1dede31d96821685536958006968b88";
+  assert.equal(
+    flow.explorerTransactionUrl("https://explorer.testnet-legacy.lez.logos.co/", hash),
+    `https://explorer.testnet-legacy.lez.logos.co/transaction/${hash}`,
+  );
+  for (const [root, tx] of [
+    ["", hash],
+    ["http://explorer.testnet-legacy.lez.logos.co", hash],
+    ["https://explorer.example/path?x=", hash],
+    ["javascript:alert(1)", hash],
+    ["https://explorer.testnet-legacy.lez.logos.co", ""],
+    ["https://explorer.testnet-legacy.lez.logos.co", "../../evil"],
+    ["https://explorer.testnet-legacy.lez.logos.co", hash.toUpperCase().slice(0, 63)],
+  ]) {
+    assert.equal(flow.explorerTransactionUrl(root, tx), "", `${root} ${tx}`);
+  }
+  assert.match(qml, /qsTr\("Network: %1"\)/);
+  assert.match(qml, /backend\.networkName/);
+  assert.match(qml, /Copy explorer link/);
 });
 
 test("copy never promises an unlimited pool or a client-side protection", () => {
@@ -588,6 +617,8 @@ test("the remote interface is exactly the locked surface", () => {
     "PROP(bool busy READONLY)",
     "PROP(QString activeJobId READONLY)",
     "PROP(QString sequencerUrl READONLY)",
+    "PROP(QString networkName READONLY)",
+    "PROP(QString explorerUrl READONLY)",
     "SLOT(QString bootstrap())",
     "SLOT(QString startFaucetInfo())",
     "SLOT(QString startInspectRecipient(QString address))",
@@ -625,7 +656,12 @@ test("the backend touches no filesystem and pins its sequencer", () => {
     assert.doesNotMatch(backend, banned, `FaucetBackend.cpp still references ${banned}`);
     assert.doesNotMatch(backendHeader, banned, `FaucetBackend.h still references ${banned}`);
   }
-  assert.match(backend, /constexpr auto SEQUENCER_URL = "https:\/\/testnet\.lez\.logos\.co"/);
+  // Pinned to the legacy testnet, the only network with a Piñata program.
+  assert.match(backend, /constexpr const Network& PINNED_NETWORK = LEZ_LEGACY_TESTNET;/);
+  assert.match(backend, /"https:\/\/testnet-legacy\.lez\.logos\.co",/);
+  assert.match(backend, /"https:\/\/explorer\.testnet-legacy\.lez\.logos\.co",/);
+  // The v0.3.x main testnet has no Piñata; this build must not point at it.
+  assert.doesNotMatch(withoutComments(backend), /"https:\/\/testnet\.lez\.logos\.co"/);
   // Real JSON parsing, never a brace scan.
   assert.match(backend, /QJsonDocument::fromJson/);
   // The module does not trust its caller: bounds and key shape are re-checked.

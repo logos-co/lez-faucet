@@ -30,17 +30,20 @@ use serde::Serialize;
 use crate::{
     address::{parse_public_address, PublicAddress},
     error::{ApiError, ApiResult, DropPhase, ErrorCode},
+    network::{self, Network},
     solver::{self, Challenge},
 };
 
 /// The exact prize the deployed Piñata guest pays per successful claim.
+///
+/// Every enabled network claims through the Piñata program compiled into this
+/// build, so there is one prize; `network::tests` holds each network to it.
+/// A literal rather than `network::DEFAULT.prize()` so cbindgen keeps emitting
+/// it into the C header.
 pub const PRIZE: u128 = 150;
 
-/// Default public testnet sequencer.
-pub const DEFAULT_SEQUENCER_URL: &str = "https://testnet.lez.logos.co";
-
-/// The only non-loopback host this client will talk to.
-pub const PINNED_SEQUENCER_HOST: &str = "testnet.lez.logos.co";
+/// Sequencer of the network a client targets by default.
+pub const DEFAULT_SEQUENCER_URL: &str = network::DEFAULT.sequencer_url;
 
 /// Upper bound on retained idempotency records.
 ///
@@ -80,7 +83,13 @@ pub struct ProgramFingerprint {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaucetInfo {
+    /// Stable network id, e.g. `lez-legacy-testnet`.
     pub network: &'static str,
+    /// Human-readable network name, for the UI.
+    pub network_name: &'static str,
+    /// Upstream LEZ tag that network runs and this build is pinned to.
+    pub lez_version: &'static str,
+    pub explorer_url: &'static str,
     pub sequencer_url: String,
     pub pinata_account: PublicAddress,
     pub prize_amount: String,
@@ -417,6 +426,7 @@ pub fn classify(
 
 pub struct FaucetClient {
     rpc: SequencerClient,
+    network: &'static Network,
     sequencer_url: String,
     policy: FaucetPolicy,
     cancellation: Arc<Cancellation>,
@@ -474,18 +484,24 @@ impl FaucetClient {
             ));
         }
 
-        // The host is pinned. A sequencer the user can redirect is a channel
-        // for someone else to feed this client a fabricated pool, a fabricated
-        // program fingerprint and a fabricated success, and to collect every
-        // address typed into it. Loopback stays open for local development;
-        // release builds reach exactly one host.
+        // The host is pinned to the enabled networks. A sequencer the user can
+        // redirect is a channel for someone else to feed this client a
+        // fabricated pool, a fabricated program fingerprint and a fabricated
+        // success, and to collect every address typed into it. Loopback stays
+        // open for local development and is treated as the default network,
+        // since a localnet runs the same pinned programs; release builds
+        // reach exactly the hosts in `network::ENABLED`.
         let host = parsed.host_str().unwrap_or_default();
-        if !host_is_loopback && host != PINNED_SEQUENCER_HOST {
-            return Err(ApiError::new(
-                ErrorCode::InvalidSequencerUrl,
-                "That sequencer is not the LEZ public testnet this app is built for.",
-            ));
-        }
+        let network = if host_is_loopback {
+            &network::DEFAULT
+        } else {
+            network::for_host(host).ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::InvalidSequencerUrl,
+                    "That sequencer is not a LEZ testnet this app is built for.",
+                )
+            })?
+        };
 
         let rpc = SequencerClientBuilder::default()
             .build(parsed.clone())
@@ -498,6 +514,7 @@ impl FaucetClient {
 
         Ok(Self {
             rpc,
+            network,
             sequencer_url: parsed.to_string(),
             policy: FaucetPolicy::default(),
             cancellation: Arc::new(Cancellation::default()),
@@ -506,6 +523,12 @@ impl FaucetClient {
             idempotency: Mutex::new(HashMap::new()),
             unreconciled: Mutex::new(std::collections::HashSet::new()),
         })
+    }
+
+    /// The network this client was built for.
+    #[must_use]
+    pub const fn network(&self) -> &'static Network {
+        self.network
     }
 
     #[must_use]
@@ -614,7 +637,10 @@ impl FaucetClient {
         };
 
         Ok(FaucetInfo {
-            network: "lez-public-testnet",
+            network: self.network.id,
+            network_name: self.network.display_name,
+            lez_version: self.network.lez_version,
+            explorer_url: self.network.explorer_url,
             sequencer_url: self.sequencer_url.clone(),
             pinata_account: PublicAddress::new(system_accounts::pinata_account_id()),
             prize_amount: PRIZE.to_string(),
@@ -1339,20 +1365,23 @@ mod tests {
 
     #[test]
     fn sequencer_url_must_be_https_outside_loopback() {
-        assert!(FaucetClient::new("https://testnet.lez.logos.co").is_ok());
+        assert!(FaucetClient::new("https://testnet-legacy.lez.logos.co").is_ok());
         assert!(FaucetClient::new("http://localhost:3040").is_ok());
         assert!(FaucetClient::new("http://127.0.0.1:3040").is_ok());
         for bad in [
-            "http://testnet.lez.logos.co",
-            "ftp://testnet.lez.logos.co",
+            "http://testnet-legacy.lez.logos.co",
+            "ftp://testnet-legacy.lez.logos.co",
             "file:///etc/passwd",
             "not a url",
             "",
             // A redirectable sequencer would let someone else fabricate the
             // pool, the fingerprint and the success, and harvest addresses.
             "https://evil.example.com",
-            "https://testnet.lez.logos.co.evil.example",
-            "https://user:pw@testnet.lez.logos.co",
+            "https://testnet-legacy.lez.logos.co.evil.example",
+            "https://user:pw@testnet-legacy.lez.logos.co",
+            // The v0.3.x main testnet has no Piñata program; this build cannot
+            // claim there, so it must not pretend to connect.
+            "https://testnet.lez.logos.co",
         ] {
             let error = FaucetClient::new(bad)
                 .err()
@@ -1493,7 +1522,7 @@ mod tests {
 
     #[test]
     fn a_fresh_client_reports_no_live_phase_for_any_token() {
-        let client = FaucetClient::new("https://testnet.lez.logos.co").unwrap();
+        let client = FaucetClient::new("https://testnet-legacy.lez.logos.co").unwrap();
         for token in [0, 1, u64::MAX] {
             assert_eq!(client.current_phase(token), None);
         }

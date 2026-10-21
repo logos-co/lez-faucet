@@ -11,15 +11,40 @@
 
 namespace {
 
-// The one host this build talks to.
+// The networks this build knows, mirroring lez-faucet-ffi/src/network.rs.
+//
+// A network is a sequencer, an explorer and a display name. The pinned LEZ
+// revision, its ImageIDs and the claim mechanism live in the core, which is
+// the layer that has to agree with them; the view only needs to say where it
+// is pointed and where a transaction can be looked up.
+struct Network {
+    const char* id;
+    const char* displayName;
+    const char* sequencerUrl;
+    const char* explorerUrl;
+};
+
+// The LEZ legacy testnet: LEZ v0.2.4-lez-legacy, with the built-in Piñata.
+//
+// The main testnet (https://testnet.lez.logos.co) runs LEZ v0.3.x, which has
+// no Piñata program, so it is not a network this build can claim from. Adding
+// it means a new claim mechanism in the core first, then a row here.
+constexpr Network LEZ_LEGACY_TESTNET {
+    "lez-legacy-testnet",
+    "LEZ legacy testnet",
+    "https://testnet-legacy.lez.logos.co",
+    "https://explorer.testnet-legacy.lez.logos.co",
+};
+
+// The one network this build talks to.
 //
 // There is deliberately no environment variable, no settings entry and no UI
 // control that can move it. A redirectable sequencer is not a convenience: it
 // lets someone else fabricate the pool balance, the program fingerprint and the
 // success receipt, and collect every address typed into this window. The core
-// pins the same host independently, so an override here would only ever be
+// pins the same hosts independently, so an override here would only ever be
 // rejected there.
-constexpr auto SEQUENCER_URL = "https://testnet.lez.logos.co";
+constexpr const Network& PINNED_NETWORK = LEZ_LEGACY_TESTNET;
 
 // A public account id is 32 bytes of base58, so it never exceeds 64
 // characters. The bound is applied before the string reaches the decoder.
@@ -32,7 +57,9 @@ FaucetBackend::FaucetBackend(QObject* parent)
 {
     setBusy(false);
     setActiveJobId(QString());
-    setSequencerUrl(QString::fromLatin1(SEQUENCER_URL));
+    setSequencerUrl(QString::fromLatin1(PINNED_NETWORK.sequencerUrl));
+    setNetworkName(QString::fromUtf8(PINNED_NETWORK.displayName));
+    setExplorerUrl(QString::fromLatin1(PINNED_NETWORK.explorerUrl));
 }
 
 FaucetBackend::~FaucetBackend()

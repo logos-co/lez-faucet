@@ -26,7 +26,10 @@
     "claims_remaining": "9846",
     "difficulty_bytes": 3,
     "effective_difficulty_bits": 24,
-    "network": "lez-public-testnet",
+    "explorer_url": "https://explorer.testnet-legacy.lez.logos.co",
+    "lez_version": "v0.2.4-lez-legacy",
+    "network": "lez-legacy-testnet",
+    "network_name": "LEZ legacy testnet",
     "pinata_account": {
       "account_id": "EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7",
       "address": "Public/EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7"
@@ -37,7 +40,7 @@
       "authenticated_transfer": "dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc",
       "pinata": "e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6"
     },
-    "sequencer_url": "https://testnet.lez.logos.co/"
+    "sequencer_url": "https://testnet-legacy.lez.logos.co/"
   },
   "inspection_eligible": {
     "balance": "6000",

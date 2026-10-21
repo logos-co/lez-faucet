@@ -3,11 +3,13 @@
 Release the core package before the UI package. The version source of truth is
 each module's `metadata.json`.
 
-Both packages must be released at 0.3.1. LEZ Faucet 0.3.1 is a patch: it repins
-the client to LEZ `v0.2.2` to match the testnet upgraded on 2026-08-05, and
-changes no interface. It is nonetheless mandatory rather than optional, because
-0.3.0 and every earlier build are pinned to `v0.2.0` and now refuse every claim
-with "This app does not match the deployed testnet".
+Both packages must be released at the same number; 0.4.0 is the current one.
+LEZ Faucet 0.4.0 moves the app to the legacy testnet and repins the client to
+LEZ `v0.2.4-lez-legacy`. It is mandatory rather than optional, because every
+earlier build points at the main testnet, which moved to v0.3 without the
+Piñata program, and refuses every claim with "This app does not match the
+deployed testnet". (0.3.1 before it was the same kind of release, repinning
+`v0.2.0` → `v0.2.2` after the 2026-08-05 upgrade.)
 
 Its predecessor 0.3.0 was the breaking release — the core module's C++ ABI
 changed, the UI's Qt Remote Objects interface changed, and the wallet and

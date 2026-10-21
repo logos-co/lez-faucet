@@ -10,6 +10,11 @@ class FaucetBackend
     PROP(bool busy READONLY)
     PROP(QString activeJobId READONLY)
     PROP(QString sequencerUrl READONLY)
+    // Which LEZ network sequencerUrl belongs to, for the view to name, and
+    // that network's block explorer root for looking up a receipt's
+    // transaction. Compile-time constants, like sequencerUrl.
+    PROP(QString networkName READONLY)
+    PROP(QString explorerUrl READONLY)
 
     // Every start* slot begins a native job and returns
     // {"ok":true,"job_id":"..."} immediately, or {"ok":false,"error":{...}}

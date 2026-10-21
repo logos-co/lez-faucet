@@ -28,6 +28,10 @@ test("the pool panel reads real core faucet info", () => {
   assert.equal(pool.poolBalance, "1476900")
   assert.equal(pool.claimsRemaining, "9846")
   assert.equal(pool.canClaim, true)
+  assert.equal(pool.network, "lez-legacy-testnet")
+  assert.equal(pool.networkName, "LEZ legacy testnet")
+  assert.equal(pool.lezVersion, "v0.2.4-lez-legacy")
+  assert.equal(pool.explorerUrl, "https://explorer.testnet-legacy.lez.logos.co")
   // Exact strings, never coerced through Number.
   assert.equal(typeof pool.poolBalance, "string")
 })

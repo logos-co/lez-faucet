@@ -1,4 +1,4 @@
-//! Headless LEZ public-testnet faucet client and its small C ABI.
+//! Headless LEZ testnet faucet client and its small C ABI.
 //!
 //! The Faucet funds one eligible public LEZ account by exactly one fixed prize
 //! per user action. It is a faucet client, not a wallet:
@@ -12,12 +12,14 @@
 //! material in this process would be material it did not need.
 //!
 //! Every LEZ crate is pinned by the workspace manifest to the revision deployed
-//! on the public testnet, and a runtime fingerprint check still runs before any
-//! state-changing operation so version skew fails loudly rather than quietly.
+//! on the target network (see [`network`]), and a runtime fingerprint check
+//! still runs before any state-changing operation so version skew fails loudly
+//! rather than quietly.
 
 pub mod address;
 pub mod client;
 pub mod error;
+pub mod network;
 pub mod solver;
 
 use std::{
@@ -33,6 +35,7 @@ use tokio::runtime::Runtime;
 pub use crate::{
     client::{FaucetClient, FaucetPolicy, DEFAULT_SEQUENCER_URL, PRIZE},
     error::{ApiError, ErrorCode},
+    network::{ClaimMechanism, Network},
 };
 
 /// Opaque handle owned by the caller.
@@ -326,7 +329,7 @@ mod tests {
 
     #[test]
     fn a_bad_address_is_rejected_before_any_network_call() {
-        let url = CString::new("https://testnet.lez.logos.co").unwrap();
+        let url = CString::new("https://testnet-legacy.lez.logos.co").unwrap();
         let output = unsafe { lez_faucet_client_new(url.as_ptr()) };
         assert!(!output.client.is_null());
         take(output.result_json);
@@ -352,7 +355,7 @@ mod tests {
 
     #[test]
     fn an_idle_or_unknown_token_reports_no_phase_not_an_error() {
-        let url = CString::new("https://testnet.lez.logos.co").unwrap();
+        let url = CString::new("https://testnet-legacy.lez.logos.co").unwrap();
         let output = unsafe { lez_faucet_client_new(url.as_ptr()) };
         assert!(!output.client.is_null());
         take(output.result_json);
@@ -370,7 +373,7 @@ mod tests {
 
     #[test]
     fn null_string_arguments_are_errors_not_crashes() {
-        let url = CString::new("https://testnet.lez.logos.co").unwrap();
+        let url = CString::new("https://testnet-legacy.lez.logos.co").unwrap();
         let output = unsafe { lez_faucet_client_new(url.as_ptr()) };
         take(output.result_json);
 

@@ -23,7 +23,7 @@ namespace {
 
 #define CHECK(expression) ((expression) ? static_cast<void>(0) : failCheck(#expression, __LINE__))
 
-constexpr const char* kUrl = "https://testnet.lez.logos.co";
+constexpr const char* kUrl = "https://testnet-legacy.lez.logos.co";
 constexpr const char* kAddress = "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r";
 constexpr const char* kKey = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 constexpr const char* kOtherKey = "9c1b0a77-5d2e-4f61-8a0b-1c2d3e4f5a6b";

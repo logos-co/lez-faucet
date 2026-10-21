@@ -597,6 +597,9 @@ function poolView(info) {
     return {
         known: balance !== "",
         network: String(payload.network || ""),
+        networkName: String(payload.network_name || ""),
+        lezVersion: String(payload.lez_version || ""),
+        explorerUrl: String(payload.explorer_url || ""),
         poolBalance: balance,
         claimsRemaining: remaining,
         prizeAmount: normalizedDecimal(payload.prize_amount) || prizeAmount,
@@ -608,4 +611,17 @@ function poolView(info) {
         blockedSentence: reason === "" ? ""
             : (blockedReasons[reason] || "The faucet is not accepting claims right now.")
     }
+}
+
+// The explorer page for one transaction, or "" when either half is unusable.
+//
+// Only an https explorer root and a 64-hex-digit hash produce a link: this
+// string is handed to the clipboard as something to open, so it must never be
+// assembled out of whatever an envelope happened to carry.
+function explorerTransactionUrl(explorerUrl, txHash) {
+    var base = String(explorerUrl || "").trim().replace(/\/+$/, "")
+    var hash = String(txHash || "").trim()
+    if (!/^https:\/\/[A-Za-z0-9.-]+$/.test(base) || !/^[0-9a-f]{64}$/.test(hash))
+        return ""
+    return base + "/transaction/" + hash
 }

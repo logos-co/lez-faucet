@@ -63,8 +63,8 @@ std::string g_dropResponse;
 std::string g_phaseResponse;
 
 constexpr const char* kDefaultInfoResponse =
-    "{\"ok\":true,\"result\":{\"network\":\"lez-public-testnet\","
-    "\"sequencer_url\":\"https://testnet.lez.logos.co/\","
+    "{\"ok\":true,\"result\":{\"network\":\"lez-legacy-testnet\","
+    "\"sequencer_url\":\"https://testnet-legacy.lez.logos.co/\","
     "\"pinata_account\":{\"account_id\":\"EfQh\",\"address\":\"Public/EfQh\"},"
     "\"prize_amount\":\"150\",\"pool_balance\":\"1500000\","
     "\"claims_remaining\":\"10000\",\"difficulty_bytes\":3,"
@@ -272,7 +272,7 @@ LezFaucetClientOutput lez_faucet_client_new(const char* sequencer_url)
         return LezFaucetClientOutput{
             nullptr,
             copyString("{\"ok\":false,\"error\":{\"code\":\"invalid_sequencer_url\","
-                       "\"message\":\"That sequencer is not the LEZ public testnet this app is "
+                       "\"message\":\"That sequencer is not a LEZ testnet this app is "
                        "built for.\",\"retryable\":false}}")
         };
     }

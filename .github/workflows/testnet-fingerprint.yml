@@ -1,4 +1,4 @@
-# Watches the public testnet for a protocol upgrade.
+# Watches the LEZ legacy testnet for a protocol upgrade.
 #
 # Builtin program ImageIDs are computed client-side from ELFs embedded at build
 # time, so when the testnet upgrades, every already-shipped build starts failing
@@ -6,6 +6,13 @@
 # deployed testnet". Nothing in this repository changes at that moment, so no
 # ordinary check goes red; the 2026-08-05 upgrade went unnoticed for four days
 # and was reported by a user looking at the banner.
+#
+# The target moved on 2026-10-21. The main testnet (testnet.lez.logos.co) went
+# to LEZ v0.3.x, which has no pinata program, so this watchdog — and the app —
+# now point at testnet-legacy.lez.logos.co, which still runs v0.2.4-lez-legacy.
+# The sequencer URL comes from the network table in lez-faucet-ffi/src/network.rs
+# (compiled check) and the default in scripts/check-program-fingerprint.sh
+# (advisory check); the two must agree, and docs/testnet.md names them both.
 #
 # This job exists to be the thing that notices instead. It runs two checks, and
 # the distinction between them matters:

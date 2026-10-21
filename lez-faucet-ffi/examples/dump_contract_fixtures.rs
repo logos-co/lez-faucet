@@ -20,8 +20,11 @@ fn main() {
 
     let fixtures = serde_json::json!({
         "faucet_info": FaucetInfo {
-            network: "lez-public-testnet",
-            sequencer_url: "https://testnet.lez.logos.co/".into(),
+            network: "lez-legacy-testnet",
+            network_name: "LEZ legacy testnet",
+            lez_version: "v0.2.4-lez-legacy",
+            explorer_url: "https://explorer.testnet-legacy.lez.logos.co",
+            sequencer_url: "https://testnet-legacy.lez.logos.co/".into(),
             pinata_account: pinata,
             prize_amount: "150".into(),
             pool_balance: "1476900".into(),

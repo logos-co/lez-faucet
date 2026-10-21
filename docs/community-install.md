@@ -5,21 +5,23 @@ not currently part of the built-in Logos module catalog.
 
 ## Requirements
 
-- **LEZ Faucet 0.3.2** is the version documented here, for both packages
+- **LEZ Faucet 0.4.0** is the version documented here, for both packages
   (`lez_faucet` and `lez_faucet_ui`).
 - Requires **Logos Basecamp 0.2.1**. That 0.2.1 is the host application's
   version, not the faucet's. The two numbers are unrelated and are not meant to
   match.
 - Apple Silicon macOS (`darwin-arm64`), x86-64 Linux (`linux-amd64`), or ARM64
   Linux (`linux-arm64`)
-- Public-testnet use only
+- **LEZ legacy testnet** use only (`testnet-legacy.lez.logos.co`). The main
+  testnet moved to LEZ v0.3 in October 2026 and has no Piñata program; no
+  release of this app can claim there.
 
 Version numbers in these docs always name their subject. Where you see LEZ
-`v0.2.2`, that is the pinned upstream protocol revision this client is built
-against, and it is a third independent number.
+`v0.2.4-lez-legacy`, that is the pinned upstream protocol revision this client
+is built against, and it is a third independent number.
 
 Intel macOS is not published. The required circuit artifacts
-(logos-blockchain-circuits v0.5.3) exist for Apple Silicon and for both Linux
+(logos-blockchain-circuits v0.5.7) exist for Apple Silicon and for both Linux
 architectures, but not for macOS x86_64, so there is nothing to build against.
 
 The already-published 0.1.0 and 0.2.0 packages predate Linux support and carry
@@ -36,10 +38,11 @@ https://raw.githubusercontent.com/logos-co/lez-faucet/main/logos-repo.json
 
 The repository descriptor points Basecamp at the rolling catalog index hosted
 in this repository's `index` GitHub release. The index is rebuilt from every
-non-draft release, so 0.3.1, 0.3.0, 0.2.0 and 0.1.0 all remain listed alongside
-0.3.2 and can be rolled back to. Note that rolling back is not useful against
-the current testnet: every release before 0.3.1 is pinned to LEZ `v0.2.0` and
-refuses each claim with "This app does not match the deployed testnet".
+non-draft release, so 0.3.2 and everything before it remain listed alongside
+0.4.0 and can be rolled back to. Note that rolling back is not useful: every
+release before 0.4.0 points at the main testnet, which no longer runs the
+programs it claims through, and refuses each claim with "This app does not
+match the deployed testnet".
 
 ## Install the app
 
@@ -47,8 +50,8 @@ For a new installation, install **`lez_faucet_ui`** from the package browser. It
 declares **`lez_faucet`** as a dependency, so Basecamp should install the newest
 core module automatically from the same catalog.
 
-For an existing 0.1.0 or 0.2.0 installation, upgrade or install **`lez_faucet`
-0.3.2 first**, then upgrade **`lez_faucet_ui` to 0.3.2**. The UI dependency is
+For an existing installation, upgrade or install **`lez_faucet` 0.4.0 first**,
+then upgrade **`lez_faucet_ui` to 0.4.0**. The UI dependency is
 currently unversioned, so upgrading the UI alone may treat an installed older
 core as sufficient and leave it in place. If automatic dependency resolution
 is unavailable, use this same core-then-UI order for a new installation.
@@ -176,9 +179,12 @@ LEE_WALLET_HOME_DIR=/path/to/wallet \
 
 The CLI wallet home is used only as the network-client context and does not need
 to own the account being checked. It must already contain `wallet_config.json`
-and `storage.json`, and its configuration must point at the intended sequencer.
-Use `LEE_WALLET_HOME_DIR` with the pinned upstream LEZ v0.2.2 wallet CLI, not
-the older `NSSA_WALLET_HOME_DIR` name.
+and `storage.json`, and its configuration must point at the legacy sequencer,
+`https://testnet-legacy.lez.logos.co` — the wallet's own `testnet` preset
+points at the v0.3 main testnet, so write the URL into the config by hand
+(`docs/testnet.md` shows the file). Use `LEE_WALLET_HOME_DIR` with the pinned
+upstream LEZ `v0.2.4-lez-legacy` wallet CLI, not the older
+`NSSA_WALLET_HOME_DIR` name.
 
 A wallet home created before v0.2.2 will not open. That release replaced
 `wallet_config.json`'s `sequencer_addr` with a `sequencers` list and added
@@ -213,14 +219,20 @@ whether that claim went through. Check the balance independently.
 
 - **Network version mismatch** ("This app does not match the deployed testnet"):
   the sequencer's program IDs differ from the ones compiled from the pinned
-  upstream LEZ v0.2.2 revision, which means the testnet has been upgraded past
-  this build. Nothing you can do in the app fixes it, and nothing is wrong with
-  your account. Install the newest LEZ Faucet release from the catalog, **then
-  restart Basecamp** — an upgrade taken without a restart leaves the old,
-  skewed module loaded and the banner unchanged, which looks exactly like a
-  failed fix. If the banner survives a restart on the newest release, the app
-  has not been repinned yet — open an issue. This is what the testnet's
-  2026-08-05 upgrade did to every 0.3.0 build, which 0.3.1 repins.
+  upstream LEZ `v0.2.4-lez-legacy` revision, which means the testnet has been
+  upgraded past this build. Nothing you can do in the app fixes it, and
+  nothing is wrong with your account. Install the newest LEZ Faucet release
+  from the catalog, **then restart Basecamp** — an upgrade taken without a
+  restart leaves the old, skewed module loaded and the banner unchanged, which
+  looks exactly like a failed fix. If the banner survives a restart on the
+  newest release, the app has not been repinned yet — open an issue. This is
+  what the testnet's 2026-08-05 upgrade did to every 0.3.0 build, which 0.3.1
+  repinned; and what the main testnet's move to v0.3 in October 2026 did to
+  every 0.3.x build, which 0.4.0 answers by moving to the legacy testnet.
+- **The app says "LEZ legacy testnet"** under its title: that is the network
+  it claims on. An account created against the main testnet
+  (`testnet.lez.logos.co`) is a different account on a different chain; it
+  will show as uninitialized here.
 - **"The faucet is shutting down"** on an app you just reopened: fixed in
   0.3.2. On 0.3.0 and 0.3.1, closing the faucet window left the core module
   refusing every later call for the rest of the session. Upgrade, or restart
