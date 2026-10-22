@@ -1,7 +1,10 @@
-//! Live public-testnet tests.
+//! Live legacy-testnet tests.
 //!
-//! These talk to the real LEZ public testnet, so they are `#[ignore]`d and are
-//! never part of a normal `cargo test` run.
+//! These talk to the real LEZ legacy testnet (the default network), so they
+//! are `#[ignore]`d and are never part of a normal `cargo test` run.
+//! `LEZ_FAUCET_SEQUENCER_URL` overrides the sequencer, e.g. to point at a
+//! localnet; the client still refuses any host that is not an enabled network
+//! or loopback. The v0.3 testnet has its own file, `live_v03_testnet.rs`.
 //!
 //! The read-only tests are safe to run at any time. The single write test
 //! spends 150 LEZ from a finite community pool and is additionally gated on an
@@ -10,18 +13,24 @@
 //! purpose.
 
 use lez_faucet_ffi::{
-    client::{Eligibility, FaucetClient},
+    client::{Eligibility, FaucetClient, ProgramFingerprint},
     error::ErrorCode,
+    network::{self, NetworkFingerprint},
 };
-
-const SEQUENCER: &str = "https://testnet.lez.logos.co";
 
 /// Pinned at the revision this client is built against.
 const PINATA_ACCOUNT: &str = "EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7";
 const PRIZE: u128 = 150;
 
+fn sequencer() -> String {
+    std::env::var("LEZ_FAUCET_SEQUENCER_URL")
+        .unwrap_or_else(|_| network::DEFAULT.sequencer_url.to_owned())
+}
+
 fn client() -> FaucetClient {
-    FaucetClient::new(SEQUENCER).expect("the pinned sequencer URL must be accepted")
+    let sequencer = sequencer();
+    println!("sequencer={sequencer}");
+    FaucetClient::new(&sequencer).expect("the pinned sequencer URL must be accepted")
 }
 
 fn decimal(value: &str) -> u128 {
@@ -31,30 +40,48 @@ fn decimal(value: &str) -> u128 {
 }
 
 #[tokio::test]
-#[ignore = "talks to the live public testnet"]
+#[ignore = "talks to the live LEZ testnet"]
 async fn faucet_info_matches_the_pinned_protocol() {
     let info = client().get_info().await.expect("faucet info");
 
-    assert_eq!(info.network, "lez-public-testnet");
+    assert_eq!(info.network, network::DEFAULT.id);
+    assert_eq!(info.lez_version, network::DEFAULT.lez_version);
+    assert_eq!(info.claim_mechanism, "pinata");
+    assert_eq!(info.decimals, 0);
     assert_eq!(info.prize_amount, "150");
-    assert_eq!(info.pinata_account.account_id, PINATA_ACCOUNT);
-    assert_eq!(
-        info.pinata_account.address,
-        format!("Public/{PINATA_ACCOUNT}")
-    );
+    assert!(!info.paused);
+    let pinata_account = info
+        .pinata_account
+        .expect("a Piñata network names its pool");
+    assert_eq!(pinata_account.account_id, PINATA_ACCOUNT);
+    assert_eq!(pinata_account.address, format!("Public/{PINATA_ACCOUNT}"));
 
     // The fingerprint gate passed, which is the whole point of calling this
     // before anything is ever submitted.
-    assert_eq!(info.program_fingerprint.pinata.len(), 64);
-    assert_eq!(info.program_fingerprint.authenticated_transfer.len(), 64);
+    // It also matches what the network table says that network runs.
+    let NetworkFingerprint::ImageIds {
+        authenticated_transfer,
+        pinata,
+    } = network::DEFAULT.fingerprint
+    else {
+        panic!("the legacy testnet is gated on compiled ImageIDs");
+    };
+    assert_eq!(
+        info.program_fingerprint,
+        ProgramFingerprint::ImageIds {
+            authenticated_transfer: authenticated_transfer.to_owned(),
+            pinata: pinata.to_owned(),
+        }
+    );
 
     // Genesis difficulty is 3. A different value is not necessarily wrong, but
     // it is a protocol change we want to notice rather than mine through.
     assert_eq!(
-        info.difficulty_bytes, 3,
+        info.difficulty_bytes,
+        Some(3),
         "difficulty changed from the pinned genesis value"
     );
-    assert_eq!(info.effective_difficulty_bits, 24);
+    assert_eq!(info.effective_difficulty_bits, Some(24));
 
     // The pool only ever moves in multiples of the prize.
     let pool = decimal(&info.pool_balance);
@@ -70,13 +97,13 @@ async fn faucet_info_matches_the_pinned_protocol() {
     );
 
     println!(
-        "pool={pool} claims_remaining={} difficulty={}",
+        "pool={pool} claims_remaining={} difficulty={:?}",
         info.claims_remaining, info.difficulty_bytes
     );
 }
 
 #[tokio::test]
-#[ignore = "talks to the live public testnet"]
+#[ignore = "talks to the live LEZ testnet"]
 async fn recipient_states_are_distinguished_against_live_accounts() {
     let client = client();
 
@@ -91,7 +118,7 @@ async fn recipient_states_are_distinguished_against_live_accounts() {
 }
 
 #[tokio::test]
-#[ignore = "talks to the live public testnet"]
+#[ignore = "talks to the live LEZ testnet"]
 async fn malformed_and_private_addresses_never_reach_the_network() {
     let client = client();
     let bomb = "1".repeat(133);
@@ -171,8 +198,10 @@ async fn one_authorized_claim_credits_exactly_the_prize() {
         "a receipt always carries its transaction hash"
     );
     println!(
-        "receipt: tx={} retries={}",
-        receipt.tx_hash, receipt.stale_challenge_retries
+        "receipt: tx={} retries={} explorer={}",
+        receipt.tx_hash,
+        receipt.stale_challenge_retries,
+        client.network().explorer_transaction_url(&receipt.tx_hash)
     );
 
     // Verify independently rather than trusting the receipt we just produced.

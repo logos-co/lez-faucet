@@ -10,7 +10,7 @@ Print the public account's native LEZ balance as an exact decimal integer.
 
 Environment:
   LEZ_FAUCET_SEQUENCER_URL  Sequencer JSON-RPC URL
-                            (default: https://testnet.lez.logos.co)
+                            (default: https://testnet-legacy.lez.logos.co)
 EOF
 }
 
@@ -55,7 +55,7 @@ case "$account_id" in
         ;;
 esac
 
-sequencer_url=${LEZ_FAUCET_SEQUENCER_URL:-https://testnet.lez.logos.co}
+sequencer_url=${LEZ_FAUCET_SEQUENCER_URL:-https://testnet-legacy.lez.logos.co}
 
 # account_id has already been restricted to the base58 alphabet, so it cannot
 # inject JSON syntax into this request.

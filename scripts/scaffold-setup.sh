@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
-# Compatibility setup for logos-scaffold 0.1.1 and the LEZ v0.2.2 source tree.
-# Scaffold still looks for wallet/ and sequencer/ at the repository root, while
-# v0.2.2 keeps both under lez/. The links live only in Scaffold's cached clone.
+# Compatibility setup for logos-scaffold 0.1.1 and the LEZ v0.2.4-lez-legacy
+# source tree. Scaffold still looks for wallet/ and sequencer/ at the repository
+# root, while v0.2.x keeps both under lez/. The links live only in Scaffold's
+# cached clone.
 
 set -euo pipefail
 
@@ -45,7 +46,7 @@ if "$scaffold_bin" setup; then
 fi
 
 # A first run normally clones LEZ before failing on the old root-level paths.
-echo "scaffold-setup: initial setup did not complete; applying the v0.2.2 layout compatibility links" >&2
+echo "scaffold-setup: initial setup did not complete; applying the v0.2.x layout compatibility links" >&2
 add_layout_links
 
 if [[ ! -L "$lez_checkout/wallet" || ! -L "$lez_checkout/sequencer" ]]; then

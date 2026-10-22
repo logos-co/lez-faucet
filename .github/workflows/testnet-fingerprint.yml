@@ -1,4 +1,4 @@
-# Watches the public testnet for a protocol upgrade.
+# Watches the LEZ legacy testnet for a protocol upgrade.
 #
 # Builtin program ImageIDs are computed client-side from ELFs embedded at build
 # time, so when the testnet upgrades, every already-shipped build starts failing
@@ -6,6 +6,20 @@
 # deployed testnet". Nothing in this repository changes at that moment, so no
 # ordinary check goes red; the 2026-08-05 upgrade went unnoticed for four days
 # and was reported by a user looking at the banner.
+#
+# The target moved on 2026-10-21. The main testnet (testnet.lez.logos.co) went
+# to LEZ v0.3.x, which has no pinata program, so this watchdog — and the app —
+# now point at testnet-legacy.lez.logos.co, which still runs v0.2.4-lez-legacy.
+# The sequencer URL comes from the network table in lez-faucet-ffi/src/network.rs
+# (compiled check) and the default in scripts/check-program-fingerprint.sh
+# (advisory check); the two must agree, and docs/testnet.md names them both.
+#
+# Since 0.5.0 the app also claims on the v0.3 testnet, through a hosted claim
+# service. That network has no compiled program to compare, so its job below
+# (`v03`) checks two different things: that the sequencer's
+# `privacy_preserving_circuit` ImageID still matches the value recorded in
+# docs/testnet.md (the same value the network row carries), and that the claim
+# service answers `GET /v1/info`. The legacy job and its script are unchanged.
 #
 # This job exists to be the thing that notices instead. It runs two checks, and
 # the distinction between them matters:
@@ -165,6 +179,117 @@ jobs:
               labels: 'testnet-drift',
             })
 
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body,
+              })
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['testnet-drift'],
+              })
+            }
+
+  v03:
+    name: v0.3 circuit ID matches docs and the claim service answers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No toolchain: the v0.3 row compiles no program. The ImageID the
+      # client expects is data in lez-faucet-ffi/src/network.rs, recorded in
+      # docs/testnet.md in the raw word form the sequencer reports, so the
+      # comparison needs only curl and jq. The sequencer URL and the claim
+      # service root are read from the network row rather than repeated here.
+      - name: v0.3 privacy_preserving_circuit vs docs/testnet.md
+        id: circuit
+        shell: bash
+        run: |
+          set -euo pipefail
+          row="$(sed -n '/^pub const LEZ_V03_TESTNET/,/^};/p' lez-faucet-ffi/src/network.rs)"
+          sequencer="$(printf '%s\n' "$row" | sed -n 's/^ *sequencer_url: "\([^"]*\)",$/\1/p')"
+          test -n "$sequencer"
+          expected="$(sed -n 's/^| `privacy_preserving_circuit` (words) | `\(\[[0-9,]*\]\)` |$/\1/p' docs/testnet.md)"
+          test -n "$expected" || { echo "docs/testnet.md does not record the v0.3 circuit words"; exit 1; }
+          echo "expected (docs): $expected"
+          deployed="$(curl -fsS --max-time 20 -H 'content-type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"getProgramIds","params":[]}' \
+            "$sequencer" | jq -c '.result.privacy_preserving_circuit')"
+          echo "deployed ($sequencer): $deployed"
+          if [ "$deployed" != "$expected" ]; then
+            echo "::error::the v0.3 testnet's privacy_preserving_circuit ImageID moved"
+            exit 1
+          fi
+
+      - name: Claim service answers GET /v1/info
+        id: service
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          row="$(sed -n '/^pub const LEZ_V03_TESTNET/,/^};/p' lez-faucet-ffi/src/network.rs)"
+          base_url="$(printf '%s\n' "$row" | sed -n 's/^ *base_url: "\([^"]*\)",$/\1/p')"
+          test -n "$base_url"
+          echo "claim service: $base_url"
+          curl -fsS --max-time 20 "$base_url/v1/info" | jq '{network, prize, decimals, hot_balance, claims_remaining, paused}'
+
+      - name: Summarise
+        if: always()
+        shell: bash
+        env:
+          CIRCUIT: ${{ steps.circuit.outcome }}
+          SERVICE: ${{ steps.service.outcome }}
+        run: |
+          {
+            echo "### v0.3 testnet"
+            echo
+            echo "- privacy_preserving_circuit vs docs/testnet.md: \`${CIRCUIT:-skipped}\`"
+            echo "- claim service GET /v1/info: \`${SERVICE:-skipped}\`"
+            echo
+            if [ "$CIRCUIT" = "failure" ]; then
+              echo "**The v0.3 testnet's circuit ImageID no longer matches the network row.**"
+              echo "Every shipped client refuses v0.3 claims with \`program_fingerprint_mismatch\`."
+              echo "Update \`LEZ_V03_TESTNET.fingerprint\` in \`lez-faucet-ffi/src/network.rs\`"
+              echo "and the table in \`docs/testnet.md\`, after checking what else moved."
+            elif [ "$SERVICE" = "failure" ]; then
+              echo "**The claim service did not answer.** v0.3 claims fail with"
+              echo "\`claim_api_unavailable\` until it is back; see \`claimd/README.md\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report drift
+        if: failure() && steps.circuit.outcome == 'failure'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        with:
+          script: |
+            const title = 'v0.3 testnet upgraded: the circuit ImageID no longer matches this build'
+            const body = [
+              'The daily v0.3 check failed: the sequencer reports a',
+              '`privacy_preserving_circuit` ImageID different from the one in',
+              '`docs/testnet.md` and `LEZ_V03_TESTNET` in `lez-faucet-ffi/src/network.rs`.',
+              '',
+              'Every shipped client now refuses v0.3 claims with',
+              '`program_fingerprint_mismatch`. Update the network row and the docs',
+              'table after checking what else moved on the v0.3 testnet.',
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            ].join('\n')
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'testnet-drift',
+            })
             if (existing.data.length > 0) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,

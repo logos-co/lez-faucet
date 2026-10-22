@@ -1,0 +1,4 @@
+# Same toolchain as LEZ v0.3.1 (its rust-toolchain.toml) so the docker build reuses the shared rustup cache.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"

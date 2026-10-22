@@ -1,4 +1,4 @@
-//! Headless LEZ public-testnet faucet client and its small C ABI.
+//! Headless LEZ testnet faucet client and its small C ABI.
 //!
 //! The Faucet funds one eligible public LEZ account by exactly one fixed prize
 //! per user action. It is a faucet client, not a wallet:
@@ -7,18 +7,27 @@
 //! - it never accepts a password, recovery phrase, private key or signature;
 //! - it never writes a file or persists anything across a restart.
 //!
-//! Those are not merely absent features. A Piñata claim names both accounts as
-//! unsigned public participants, so there is nothing to sign with — any key
-//! material in this process would be material it did not need.
+//! Those are not merely absent features. On the legacy testnet a Piñata claim
+//! names both accounts as unsigned public participants, so there is nothing to
+//! sign with; on the v0.3 testnet the signing is done by a hosted claim
+//! service that holds its own small hot balance, and this process asks it for
+//! one drop and then proves the credit on chain itself. Any key material in
+//! this process would be material it did not need.
 //!
-//! Every LEZ crate is pinned by the workspace manifest to the revision deployed
-//! on the public testnet, and a runtime fingerprint check still runs before any
-//! state-changing operation so version skew fails loudly rather than quietly.
+//! Every LEZ crate is pinned by the workspace manifest to one revision, and a
+//! runtime fingerprint check runs against whichever network a client targets
+//! (see [`network`]) before any state-changing operation, so version skew
+//! fails loudly rather than quietly.
 
 pub mod address;
 pub mod client;
 pub mod error;
+pub mod network;
 pub mod solver;
+pub mod v03;
+
+#[cfg(test)]
+mod tests_v03;
 
 use std::{
     ffi::{c_char, CStr, CString},
@@ -31,8 +40,9 @@ use serde::Serialize;
 use tokio::runtime::Runtime;
 
 pub use crate::{
-    client::{FaucetClient, FaucetPolicy, DEFAULT_SEQUENCER_URL, PRIZE},
+    client::{FaucetClient, FaucetPolicy, DEFAULT_SEQUENCER_URL},
     error::{ApiError, ErrorCode},
+    network::{ClaimMechanism, Network, NetworkFingerprint},
 };
 
 /// Opaque handle owned by the caller.
@@ -303,6 +313,20 @@ mod tests {
     }
 
     #[test]
+    fn both_enabled_networks_are_accepted_by_the_ffi() {
+        for sequencer in [
+            "https://testnet-legacy.lez.logos.co",
+            "https://testnet.lez.logos.co",
+        ] {
+            let url = CString::new(sequencer).unwrap();
+            let output = unsafe { lez_faucet_client_new(url.as_ptr()) };
+            assert!(!output.client.is_null(), "{sequencer}");
+            assert_eq!(take(output.result_json)["ok"], true);
+            unsafe { lez_faucet_client_destroy(output.client) };
+        }
+    }
+
+    #[test]
     fn calls_on_a_null_client_are_reported_not_dereferenced() {
         let address = CString::new("CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r").unwrap();
         let key = CString::new("3f2504e0-4f89-41d3-9a0c-0305e82c3301").unwrap();
@@ -326,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_bad_address_is_rejected_before_any_network_call() {
-        let url = CString::new("https://testnet.lez.logos.co").unwrap();
+        let url = CString::new("https://testnet-legacy.lez.logos.co").unwrap();
         let output = unsafe { lez_faucet_client_new(url.as_ptr()) };
         assert!(!output.client.is_null());
         take(output.result_json);
@@ -352,7 +376,7 @@ mod tests {
 
     #[test]
     fn an_idle_or_unknown_token_reports_no_phase_not_an_error() {
-        let url = CString::new("https://testnet.lez.logos.co").unwrap();
+        let url = CString::new("https://testnet-legacy.lez.logos.co").unwrap();
         let output = unsafe { lez_faucet_client_new(url.as_ptr()) };
         assert!(!output.client.is_null());
         take(output.result_json);
@@ -370,7 +394,7 @@ mod tests {
 
     #[test]
     fn null_string_arguments_are_errors_not_crashes() {
-        let url = CString::new("https://testnet.lez.logos.co").unwrap();
+        let url = CString::new("https://testnet-legacy.lez.logos.co").unwrap();
         let output = unsafe { lez_faucet_client_new(url.as_ptr()) };
         take(output.result_json);
 

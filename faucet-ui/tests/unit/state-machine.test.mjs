@@ -44,6 +44,19 @@ const dropPhases = [
   "reconciling",
 ];
 
+// The phases the claim-service drop actually passes through: no
+// proof-of-work, so no challenge phases.
+const claimApiPhases = [
+  "validating_input",
+  "verifying_programs",
+  "inspecting_recipient",
+  "submitting",
+  "reconciling",
+];
+
+const LEGACY_PRIZE = "150";
+const V03_PRIZE = "100000000";
+
 // ---------------------------------------------------------------------------
 // exact decimal arithmetic
 // ---------------------------------------------------------------------------
@@ -101,6 +114,72 @@ test("grouping a balance for reading never changes its value", () => {
   assert.equal(flow.groupDigits("not a balance"), "not a balance");
   assert.equal(flow.groupDigits(null), "");
   assert.equal(flow.groupDigits(undefined), "");
+});
+
+test("amounts render in the network's unit without ever being divided", () => {
+  // Whole LEZ on the legacy testnet.
+  assert.equal(flow.formatAmount("150", 0), "150");
+  assert.equal(flow.formatAmount("1476900", 0), "1,476,900");
+  assert.equal(flow.formatAmount("0", 0), "0");
+  // Lepta on v0.3: nine places, trailing zeros dropped, leading zero kept.
+  assert.equal(flow.formatAmount("100000000", 9), "0.1");
+  assert.equal(flow.formatAmount("1000000000", 9), "1");
+  assert.equal(flow.formatAmount("1234567890", 9), "1.23456789");
+  assert.equal(flow.formatAmount("1", 9), "0.000000001");
+  assert.equal(flow.formatAmount("0", 9), "0");
+  assert.equal(flow.formatAmount("149774694000000000", 9), "149,774,694");
+  assert.equal(flow.formatAmount("350000000", 9), "0.35");
+  // Every digit survives above 2^53, in both halves.
+  assert.equal(flow.formatAmount("9007199254740993", 9), "9,007,199.254740993");
+  assert.equal(
+    flow.formatAmount("340282366920938463463374607431768211455", 9),
+    "340,282,366,920,938,463,463,374,607,431.768211455",
+  );
+  // The decimals count may arrive as a number or as digits, never as a float.
+  assert.equal(flow.formatAmount("100000000", "9"), "0.1");
+  assert.equal(flow.decimalPlaces(9), 9);
+  assert.equal(flow.decimalPlaces("18"), 18);
+  assert.equal(flow.decimalPlaces(0), 0);
+  for (const bad of [-1, 1.5, 39, "x", "", null, undefined, "1e1"]) {
+    assert.equal(flow.decimalPlaces(bad), -1, `${bad} is not a decimals count`);
+    assert.equal(flow.formatAmount("1", bad), "", `${bad} must not format`);
+  }
+  // A malformed balance renders as nothing rather than as a plausible lie.
+  for (const bad of ["", "12.5", "-1", "abc", null, undefined]) {
+    assert.equal(flow.formatAmount(bad, 9), "");
+  }
+});
+
+test("the network table is read from the backend's JSON and nothing else", () => {
+  const rows = flow.parseNetworks(JSON.stringify([
+    { id: "lez-legacy-testnet", name: "LEZ legacy testnet", sequencerUrl: "https://a", explorerUrl: "https://b", lezVersion: "v0.2.4-lez-legacy", prize: "150", decimals: 0, mechanism: "pinata", claimApiUrl: "" },
+    { id: "lez-v03-testnet", name: "LEZ v0.3 testnet", sequencerUrl: "https://c", explorerUrl: "https://d", lezVersion: "v0.3.1", prize: "100000000", decimals: 9, mechanism: "claim_api", claimApiUrl: "https://e" },
+    { id: "broken", name: "no prize" },
+  ]));
+  assert.equal(rows.length, 2, "a row without a prize is not a network");
+  assert.equal(rows[0].prize, "150");
+  assert.equal(rows[0].decimals, 0);
+  assert.equal(rows[0].isClaimApi, false);
+  assert.equal(rows[1].prize, "100000000");
+  assert.equal(rows[1].decimals, 9);
+  assert.equal(rows[1].isClaimApi, true);
+  assert.equal(rows[1].claimApiUrl, "https://e");
+  assert.equal(flow.findNetwork(rows, "lez-v03-testnet"), rows[1]);
+  assert.equal(flow.findNetwork(rows, "nope"), null);
+  assert.equal(flow.findNetwork(null, "lez-v03-testnet"), null);
+  // Garbage in, empty table out — never a throw into the view.
+  // (Spread into this realm: arrays built inside the vm context carry its
+  // own Array prototype, which strict deep equality rejects.)
+  assert.deepEqual([...flow.parseNetworks("not json")], []);
+  assert.deepEqual([...flow.parseNetworks("{}")], []);
+  assert.deepEqual([...flow.parseNetworks(null)], []);
+  const empty = flow.networkView(null);
+  assert.equal(empty.prize, "");
+  assert.equal(empty.mechanism, "");
+  // Each mechanism has its own one-line explanation; nothing else does.
+  assert.match(flow.mechanismSentence("claim_api"), /holds no key/);
+  assert.match(flow.mechanismSentence("pinata"), /no key needed/);
+  assert.equal(flow.mechanismSentence("other"), "");
 });
 
 // ---------------------------------------------------------------------------
@@ -259,9 +338,31 @@ test("no outcome that may already have credited the account invites a retry", ()
     "recipient_uninitialized",
     "recipient_wrong_owner",
     "drop_in_progress",
+    // The service said no under a cap or a pause; asking again at once is
+    // exactly what it asked us not to do.
+    "rate_limited",
+    "faucet_paused",
+    "unknown_network",
   ]) {
     assert.equal(flow.errorPresentation({ code }).newAttempt, false, `${code} must not invite a retry`);
   }
+});
+
+test("the claim service's refusals are recognised and read from their code", () => {
+  const limited = flow.errorPresentation({
+    code: "rate_limited",
+    message: "The faucet service is limiting claims right now. Try again in about 24 hours.",
+    details: { retry_after_seconds: 86000 },
+  });
+  assert.equal(limited.recognized, true);
+  assert.equal(limited.newAttempt, false);
+  assert.equal(limited.retryAfterSeconds, "86000");
+  assert.equal(flow.errorPresentation({ code: "rate_limited" }).retryAfterSeconds, "");
+  assert.equal(flow.errorPresentation({ code: "faucet_paused" }).recognized, true);
+  // An unreachable service recorded nothing, so a fresh attempt is honest.
+  const unavailable = flow.errorPresentation({ code: "claim_api_unavailable" });
+  assert.equal(unavailable.recognized, true);
+  assert.equal(unavailable.newAttempt, true);
 });
 
 test("the substring classifiers are gone from the flow module", () => {
@@ -298,9 +399,61 @@ test("no phase ever renders as its raw enum name", () => {
   for (const unheard of ["", null, undefined, "some_future_phase", "SOLVING"]) {
     assert.equal(flow.phaseSentence(unheard), "Working on your request…");
   }
-  // The view renders the mapped sentence, never envelope.phase.
-  assert.match(qml, /statusText = FaucetFlow\.phaseSentence\(envelope\.phase\)/);
+  // The same holds for the claim-service sentences.
+  for (const phase of claimApiPhases.concat(["queued"])) {
+    const sentence = flow.phaseSentence(phase, "claim_api");
+    assert.notEqual(sentence, phase);
+    assert.doesNotMatch(sentence, /_/);
+    assert.equal(sentence.length > 12, true, `${phase} needs a real sentence on v0.3`);
+  }
+  // The v0.3 sentences describe asking a service, not mining; the legacy ones
+  // the reverse. An unknown mechanism reads as the legacy flow.
+  assert.match(flow.phaseSentence("submitting", "claim_api"), /faucet service/);
+  assert.doesNotMatch(flow.phaseSentence("submitting", "pinata"), /faucet service/);
+  assert.match(flow.phaseSentence("verifying_programs", "claim_api"), /Checking the network/);
+  assert.match(flow.phaseSentence("inspecting_recipient", "claim_api"), /Reading your balance/);
+  assert.equal(flow.phaseSentence("solving", "mystery"), flow.phaseSentence("solving"));
+  // The view renders the mapped sentence for the selected mechanism, never
+  // envelope.phase.
+  assert.match(qml, /statusText = FaucetFlow\.phaseSentence\(envelope\.phase, network\.mechanism\)/);
   assert.doesNotMatch(qml, /statusText = String\(payload\.phase\)|text: [^\n]*\.phase\b/);
+});
+
+test("the claim-service rail has four lamps and every v0.3 phase lands on one", () => {
+  const rail = flow.stagesFor("claim_api");
+  assert.equal(rail.length, 4);
+  assert.deepEqual([...rail.map((stage) => stage.title)], [
+    "Checking the network",
+    "Reading your balance",
+    "Asking the faucet service",
+    "Waiting for inclusion",
+  ]);
+  for (const phase of claimApiPhases.concat(["queued"])) {
+    const stage = flow.phaseStage(phase, "claim_api");
+    assert.equal(Number.isInteger(stage) && stage >= 0 && stage <= 3, true, `${phase} → ${stage}`);
+  }
+  assert.equal(flow.phaseStage("verifying_programs", "claim_api"), 0);
+  assert.equal(flow.phaseStage("inspecting_recipient", "claim_api"), 1);
+  assert.equal(flow.phaseStage("submitting", "claim_api"), 2);
+  assert.equal(flow.phaseStage("reconciling", "claim_api"), 3);
+  // The slow lamp is the last one, alone, on both rails.
+  assert.deepEqual(claimApiPhases.filter((phase) => flow.phaseStage(phase, "claim_api") === 3), ["reconciling"]);
+  // Proof-of-work phases never happen on v0.3; if one ever arrived it would
+  // light nothing rather than a wrong lamp.
+  for (const phase of ["fetching_challenge", "solving", "refreshing_challenge"]) {
+    assert.equal(flow.phaseStage(phase, "claim_api"), -1);
+  }
+  // The legacy rail is unchanged, and is what an unnamed mechanism gets.
+  assert.equal(flow.stagesFor("pinata").length, 3);
+  assert.deepEqual(flow.stagesFor(undefined), flow.stagesFor("pinata"));
+  assert.equal(flow.phaseStage("solving", undefined), 0);
+  // The rail follows the mechanism in railStage too.
+  assert.equal(flow.railStage("none", true, "submitting", 4, "claim_api"), 2);
+  assert.equal(flow.railStage("none", true, "submitting", 3, "pinata"), 1);
+  assert.equal(flow.railStage("receipt", false, "", 4, "claim_api"), 4);
+  // The view draws the rail from the selected network's mechanism.
+  assert.match(qml, /readonly property var stages: FaucetFlow\.stagesFor\(network\.mechanism\)/);
+  assert.match(qml, /panel, creditLive, creditPhase, stages\.length, network\.mechanism\)/);
 });
 
 test("every phase lands on exactly one of the three lamps", () => {
@@ -430,28 +583,49 @@ test("a receipt is shown only for a proven, exact credit", () => {
     tx_hash: "5fb9fd56265effefabe13021d4031b62ec915d83312c24bd8dfa130afe053dc7",
     stale_challenge_retries: 0,
   };
-  const view = flow.receiptView(proven);
+  const view = flow.receiptView(proven, LEGACY_PRIZE);
   assert.equal(view.address, recipient.address);
   assert.equal(view.balanceBefore, "9007199254740993");
   assert.equal(view.balanceAfter, "9007199254741143");
   assert.equal(view.txHash, proven.tx_hash);
   assert.equal(view.retried, false);
-  assert.equal(flow.receiptView({ ...proven, stale_challenge_retries: 2 }).retried, true);
+  assert.equal(flow.receiptView({ ...proven, stale_challenge_retries: 2 }, LEGACY_PRIZE).retried, true);
 
   // No hash is no proof, whatever the balances say.
-  assert.equal(flow.receiptView({ ...proven, tx_hash: "" }), null);
-  assert.equal(flow.receiptView({ ...proven, tx_hash: null }), null);
+  assert.equal(flow.receiptView({ ...proven, tx_hash: "" }, LEGACY_PRIZE), null);
+  assert.equal(flow.receiptView({ ...proven, tx_hash: null }, LEGACY_PRIZE), null);
   // Balances that do not differ by exactly the prize are not this claim's.
-  assert.equal(flow.receiptView({ ...proven, balance_after: "9007199254741293" }), null);
-  assert.equal(flow.receiptView({ ...proven, balance_after: "9007199254740993" }), null);
+  assert.equal(flow.receiptView({ ...proven, balance_after: "9007199254741293" }, LEGACY_PRIZE), null);
+  assert.equal(flow.receiptView({ ...proven, balance_after: "9007199254740993" }, LEGACY_PRIZE), null);
   // A rounding-equal pair that only Number() would accept.
   assert.equal(flow.receiptView({
     ...proven,
     balance_before: "9007199254740992",
     balance_after: "9007199254741143",
-  }), null);
-  assert.equal(flow.receiptView(null), null);
-  assert.equal(flow.receiptView({ ...proven, recipient: {} }), null);
+  }, LEGACY_PRIZE), null);
+  assert.equal(flow.receiptView(null, LEGACY_PRIZE), null);
+  assert.equal(flow.receiptView({ ...proven, recipient: {} }, LEGACY_PRIZE), null);
+
+  // The prize is the selected network's, not a constant: the same payload is
+  // a receipt on the legacy testnet and nothing on v0.3, and vice versa.
+  assert.equal(flow.receiptView(proven, V03_PRIZE), null);
+  assert.equal(flow.receiptView(proven, ""), null);
+  assert.equal(flow.receiptView(proven, undefined), null);
+  const lepta = {
+    ...proven,
+    amount: V03_PRIZE,
+    balance_before: "250000000",
+    balance_after: "350000000",
+  };
+  const v03 = flow.receiptView(lepta, V03_PRIZE);
+  assert.ok(v03, "a lepta receipt for the v0.3 prize must be accepted");
+  assert.equal(v03.amount, "100000000");
+  assert.equal(flow.formatAmount(v03.amount, 9), "0.1");
+  assert.equal(flow.formatAmount(v03.balanceAfter, 9), "0.35");
+  assert.equal(flow.receiptView(lepta, LEGACY_PRIZE), null);
+  // A service that paid a different amount than the row says is not a
+  // receipt either, even when its own arithmetic holds.
+  assert.equal(flow.receiptView({ ...lepta, amount: "50000000", balance_after: "300000000" }, V03_PRIZE), null);
 });
 
 test("an unproven outcome shows the evidence and offers no retry", () => {
@@ -479,7 +653,7 @@ test("an unproven outcome shows the evidence and offers no retry", () => {
 test("the view never invents a receipt from an unproven success", () => {
   assert.match(
     qml,
-    /var proven = FaucetFlow\.receiptView\(resultOf\(envelope\)\)[\s\S]*if \(proven\)[\s\S]*presentUnknown\(/,
+    /var proven = FaucetFlow\.receiptView\(resultOf\(envelope\), network\.prize\)[\s\S]*if \(proven\)[\s\S]*presentUnknown\(/,
   );
 });
 
@@ -489,7 +663,10 @@ test("the view never invents a receipt from an unproven success", () => {
 
 test("the pool reads as finite, shared and instantaneous", () => {
   const view = flow.poolView({
-    network: "lez-public-testnet",
+    network: "lez-legacy-testnet",
+    network_name: "LEZ legacy testnet",
+    lez_version: "v0.2.4-lez-legacy",
+    explorer_url: "https://explorer.testnet-legacy.lez.logos.co",
     pool_balance: "12000",
     claims_remaining: "80",
     prize_amount: "150",
@@ -503,6 +680,10 @@ test("the pool reads as finite, shared and instantaneous", () => {
   assert.equal(view.claimsRemaining, "80");
   assert.equal(view.canClaim, true);
   assert.equal(view.blockedSentence, "");
+  assert.equal(view.network, "lez-legacy-testnet");
+  assert.equal(view.networkName, "LEZ legacy testnet");
+  assert.equal(view.lezVersion, "v0.2.4-lez-legacy");
+  assert.equal(view.explorerUrl, "https://explorer.testnet-legacy.lez.logos.co");
 
   const depleted = flow.poolView({ pool_balance: "0", claims_remaining: "0", can_claim: false, blocked_reason: "pool_depleted" });
   assert.equal(depleted.canClaim, false);
@@ -510,6 +691,99 @@ test("the pool reads as finite, shared and instantaneous", () => {
   assert.match(flow.poolView({ pool_balance: "1", blocked_reason: "unsupported_difficulty" }).blockedSentence, /Update the app/);
   assert.notEqual(flow.poolView({ pool_balance: "1", blocked_reason: "something_new" }).blockedSentence, "");
   assert.equal(flow.poolView(null).known, false);
+  // The prize comes from the core's report, never from a constant here.
+  assert.equal(view.prizeAmount, "150");
+  assert.equal(flow.poolView({ pool_balance: "1" }).prizeAmount, "");
+  assert.doesNotMatch(withoutComments(source), /"150"/);
+  assert.doesNotMatch(withoutComments(qml), /150/);
+
+  // A claim-service network reports the hot balance as the pool, in lepta.
+  const service = flow.poolView({
+    network: "lez-v03-testnet",
+    network_name: "LEZ v0.3 testnet",
+    lez_version: "v0.3.1",
+    explorer_url: "https://explorer.testnet.lez.logos.co",
+    claim_mechanism: "claim_api",
+    decimals: 9,
+    claim_api_url: "https://rog-devbox.tail957e2.ts.net:8443",
+    pool_balance: "1234567890",
+    claims_remaining: "7",
+    prize_amount: "100000000",
+    paused: false,
+    can_claim: true,
+  });
+  assert.equal(service.isClaimApi, true);
+  assert.equal(service.decimals, 9);
+  assert.equal(service.poolBalance, "1234567890");
+  assert.equal(service.poolAddress, "");
+  assert.equal(service.difficultyBits, "");
+  assert.equal(service.claimApiUrl, "https://rog-devbox.tail957e2.ts.net:8443");
+  assert.equal(flow.formatAmount(service.poolBalance, service.decimals), "1.23456789");
+  assert.equal(flow.formatAmount(service.prizeAmount, service.decimals), "0.1");
+  const paused = flow.poolView({ ...service, paused: true, can_claim: false, blocked_reason: "faucet_paused" });
+  assert.equal(paused.paused, true);
+  assert.equal(paused.canClaim, false);
+  assert.match(paused.blockedSentence, /paused/);
+  assert.match(flow.poolView({ pool_balance: "1", blocked_reason: "prize_mismatch" }).blockedSentence, /Update the app/);
+  // Without a mechanism the row reads as the legacy pool.
+  assert.equal(view.isClaimApi, false);
+  assert.equal(view.decimals, 0);
+});
+
+test("the view formats every amount in the selected network's unit", () => {
+  // No balance, prize or receipt figure reaches the screen through groupDigits
+  // alone any more: each goes through formatAmount with the row's decimals.
+  // claims_remaining is a count, not an amount, and is the one exception.
+  const grouped = qml.match(/FaucetFlow\.groupDigits\([^)]*\)/g) || [];
+  assert.deepEqual(grouped, ["FaucetFlow.groupDigits(root.pool.claimsRemaining)"]);
+  assert.match(qml, /FaucetFlow\.formatAmount\(root\.pool\.poolBalance, root\.pool\.decimals\)/);
+  assert.match(qml, /FaucetFlow\.formatAmount\(root\.pool\.prizeAmount, root\.pool\.decimals\)/);
+  assert.match(qml, /readonly property string prizeDisplay: FaucetFlow\.formatAmount\(network\.prize, network\.decimals\)/);
+  assert.match(qml, /qsTr\("Request %1 LEZ"\)\.arg\(root\.prizeDisplay\)/);
+  assert.match(qml, /root\.receipt \? root\.receipt\.amount : "",\s*root\.network\.decimals\)/);
+  assert.match(qml, /root\.inspection \? root\.inspection\.balance : "",\s*root\.network\.decimals\)/);
+});
+
+test("the network selector is the backend's table and is inert while anything runs", () => {
+  // The choices come from the backend's JSON; the view never lists a host.
+  assert.match(qml, /networks = FaucetFlow\.parseNetworks\(backend\.networks\)/);
+  assert.match(qml, /selectedNetworkId = String\(backend\.selectedNetworkId \|\| ""\)/);
+  assert.match(qml, /ComboBox \{[\s\S]*model: root\.networks\.map\(function\(row\) \{ return row\.name \}\)[\s\S]*enabled: root\.canSwitchNetwork/);
+  assert.equal(qml.split("backend.selectNetwork(").length - 1, 1);
+  // Not while a credit request, a pool read or an inspection is inside the
+  // core: the core refuses reconfiguration under any live job.
+  assert.match(qml, /readonly property bool canSwitchNetwork: bootstrapped && !creditLive\s*&& poolJobId === "" && inspectJobId === ""/);
+  // Switching clears what the previous chain established and reads afresh.
+  assert.match(qml, /function selectNetwork\(id\)[\s\S]*pool = FaucetFlow\.poolView\(null\)[\s\S]*clearInspection\(\)[\s\S]*receipt = null[\s\S]*refreshPool\(\)/);
+  // The initialization command is a legacy-only affordance.
+  assert.match(qml, /visible: !root\.network\.isClaimApi && root\.inspection !== null\s*&& root\.inspection\.initializationCommand !== ""/);
+  assert.match(qml, /visible: !root\.network\.isClaimApi && root\.failure !== null\s*&& root\.failure\.initializationCommand !== ""/);
+  // No host is typed into the view.
+  assert.doesNotMatch(withoutComments(qml), /https:\/\//);
+});
+
+test("the view names its network and links receipts only to that explorer", () => {
+  const hash = "4581848e26271a512ec2dfacbdfad568b1dede31d96821685536958006968b88";
+  assert.equal(
+    flow.explorerTransactionUrl("https://explorer.testnet-legacy.lez.logos.co/", hash),
+    `https://explorer.testnet-legacy.lez.logos.co/transaction/${hash}`,
+  );
+  for (const [root, tx] of [
+    ["", hash],
+    ["http://explorer.testnet-legacy.lez.logos.co", hash],
+    ["https://explorer.example/path?x=", hash],
+    ["javascript:alert(1)", hash],
+    ["https://explorer.testnet-legacy.lez.logos.co", ""],
+    ["https://explorer.testnet-legacy.lez.logos.co", "../../evil"],
+    ["https://explorer.testnet-legacy.lez.logos.co", hash.toUpperCase().slice(0, 63)],
+  ]) {
+    assert.equal(flow.explorerTransactionUrl(root, tx), "", `${root} ${tx}`);
+  }
+  assert.match(qml, /qsTr\("Network"\)/);
+  assert.match(qml, /backend\.networkName/);
+  assert.match(qml, /Copy explorer link/);
+  // The link is built from the explorer of the network the core reported.
+  assert.match(qml, /FaucetFlow\.explorerTransactionUrl\(explorerUrl, txHash\)/);
 });
 
 test("copy never promises an unlimited pool or a client-side protection", () => {
@@ -527,9 +801,10 @@ test("copy never promises an unlimited pool or a client-side protection", () => 
   }
   assert.match(qml, /finite, shared resource/);
   assert.match(qml, /at this instant/);
-  // The button says what it does, and asks rather than promises.
-  assert.match(qml, /text: qsTr\("Request 150 LEZ"\)/);
-  assert.doesNotMatch(qml, /qsTr\("Get [^"]*LEZ"\)|qsTr\("Receive[^"]*"\)|qsTr\("Claim 150 LEZ"\)/);
+  // The button says what it does, and asks rather than promises, and names
+  // the selected network's prize rather than a constant.
+  assert.match(qml, /text: qsTr\("Request %1 LEZ"\)\.arg\(root\.prizeDisplay\)/);
+  assert.doesNotMatch(qml, /qsTr\("Get [^"]*LEZ"\)|qsTr\("Receive[^"]*"\)|qsTr\("Claim [^"]*LEZ"\)/);
   // The one thing this app cannot do for the user is stated, not hidden.
   assert.match(qml, /If you quit while a claim is running it cannot reconcile that claim afterwards/);
 });
@@ -588,11 +863,16 @@ test("the remote interface is exactly the locked surface", () => {
     "PROP(bool busy READONLY)",
     "PROP(QString activeJobId READONLY)",
     "PROP(QString sequencerUrl READONLY)",
+    "PROP(QString networkName READONLY)",
+    "PROP(QString explorerUrl READONLY)",
+    "PROP(QString networks READONLY)",
+    "PROP(QString selectedNetworkId READONLY)",
     "SLOT(QString bootstrap())",
     "SLOT(QString startFaucetInfo())",
     "SLOT(QString startInspectRecipient(QString address))",
     "SLOT(QString startRequestDrop(QString address, QString requestKey))",
     "SLOT(QString cancelJob(QString jobId))",
+    "SLOT(QString selectNetwork(QString id))",
     "SLOT(QString jobStatus(QString jobId))",
     "SLOT(QString acknowledgeJob(QString jobId))",
     "SLOT(QString copyText(QString text))",
@@ -625,7 +905,29 @@ test("the backend touches no filesystem and pins its sequencer", () => {
     assert.doesNotMatch(backend, banned, `FaucetBackend.cpp still references ${banned}`);
     assert.doesNotMatch(backendHeader, banned, `FaucetBackend.h still references ${banned}`);
   }
-  assert.match(backend, /constexpr auto SEQUENCER_URL = "https:\/\/testnet\.lez\.logos\.co"/);
+  // The hosts are a compile-time table of exactly the two enabled networks,
+  // the legacy testnet first, and the selector can only move between rows.
+  assert.match(backend, /constexpr Network NETWORKS\[\] = \{/);
+  assert.match(backend, /constexpr int DEFAULT_NETWORK = 0;/);
+  assert.match(backend, /"https:\/\/testnet-legacy\.lez\.logos\.co",/);
+  assert.match(backend, /"https:\/\/explorer\.testnet-legacy\.lez\.logos\.co",/);
+  assert.match(backend, /"https:\/\/testnet\.lez\.logos\.co",/);
+  assert.match(backend, /"https:\/\/explorer\.testnet\.lez\.logos\.co",/);
+  const hosts = withoutComments(backend).match(/"https:\/\/[^"]+"/g) || [];
+  assert.deepEqual([...new Set(hosts)].sort(), [
+    '"https://explorer.testnet-legacy.lez.logos.co"',
+    '"https://explorer.testnet.lez.logos.co"',
+    '"https://rog-devbox.tail957e2.ts.net:8443"',
+    '"https://testnet-legacy.lez.logos.co"',
+    '"https://testnet.lez.logos.co"',
+  ]);
+  assert.match(backend, /const int row = networkRow\(id\);/);
+  // A switch is refused while a credit request is live, and reverts if the
+  // core refuses it, so the properties never describe a client that does not
+  // exist.
+  assert.match(backend, /if \(busy\(\) \|\| !activeJobId\(\)\.isEmpty\(\)\) \{\s*return localError\(QStringLiteral\("drop_in_progress"\)/);
+  assert.match(backend, /presentNetwork\(previous\);/);
+  // Selection is process state only; nothing persists it.
   // Real JSON parsing, never a brace scan.
   assert.match(backend, /QJsonDocument::fromJson/);
   // The module does not trust its caller: bounds and key shape are re-checked.
