@@ -313,11 +313,13 @@ LEZ_FAUCET_LIVE_RECIPIENT=Public/<fresh-account-id> \
   -- --ignored --exact --nocapture
 ```
 
-It has not yet been run against the public service: at the time of the 0.5.0
-change the Funnel hostname did not resolve from outside the tailnet, and the
-read-only `faucet_info` test failed with `claim_api_unavailable` while the
-circuit check against `testnet.lez.logos.co` passed. Record the first claim
-here when it lands.
+First run against the public service on 2026-10-22 (all four `live_v03_testnet`
+tests passed, 99 s): recipient `Public/8HjcNL4Y4duo2zMCPCKtJXm1qUS3AtnQ1HnRmZsiZQtW`
+went from 0 to 100,000,000 lepta through transaction
+`12811d98d37e1285867f925613fa3bc4599a57c03325c0c2049648ab1e124e3c`
+(https://explorer.testnet.lez.logos.co/transaction/12811d98d37e1285867f925613fa3bc4599a57c03325c0c2049648ab1e124e3c).
+The service's hot balance moved by exactly the prize plus the 2,968 lepta fee
+(1,029,997,032 to 929,994,064).
 
 The destination on the **legacy** testnet must already be initialized under
 authenticated-transfer. A public account ID alone cannot authorize
