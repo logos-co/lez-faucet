@@ -1,34 +1,50 @@
 # LEZ Faucet
 
-LEZ Faucet is a small Basecamp app that funds one public account on the Logos
-Execution Zone **legacy testnet**. Its entire user input is one public LEZ
-address, and its entire action is one button:
+LEZ Faucet is a small Basecamp app that funds one public account on a Logos
+Execution Zone testnet. Its entire user input is a network, one public LEZ
+address, and one button:
 
 ```text
+Network  [ LEZ legacy testnet ▾ ]
 Public LEZ address
 [ Request 150 LEZ ]
 ```
 
-One press funds one eligible account by exactly 150 testnet LEZ.
+One press funds one eligible account by exactly the selected network's prize.
 
 ## Which network
 
-The app targets the **LEZ legacy testnet** — sequencer
-`https://testnet-legacy.lez.logos.co`, explorer
-`https://explorer.testnet-legacy.lez.logos.co`, running LEZ `v0.2.4-lez-legacy`
-— and says so at the top of its window. It does not, and cannot, claim on the
-main testnet (`testnet.lez.logos.co`): that network moved to LEZ v0.3.x in
-October 2026, which ships no Piñata program, so there is nothing there for a
-faucet client of this design to claim from. The legacy testnet is the stable
-one residents are expected to use, and an address on one is not an address on
-the other.
+The app claims on two testnets and opens on the first:
+
+| | LEZ legacy testnet | LEZ v0.3 testnet |
+| --- | --- | --- |
+| Sequencer | `https://testnet-legacy.lez.logos.co` | `https://testnet.lez.logos.co` |
+| Explorer | `https://explorer.testnet-legacy.lez.logos.co` | `https://explorer.testnet.lez.logos.co` |
+| LEZ | `v0.2.4-lez-legacy` | `v0.3.1` |
+| Prize | 150 LEZ | 0.1 LEZ (100,000,000 lepta) |
+| How | an unsigned proof-of-work claim against the on-chain Piñata | a request to the team's hosted claim service, `claimd` |
+
+An address on one is not an address on the other. The selector under the title
+switches between the rows; it is disabled while a request is running, and the
+choice is not remembered between runs.
+
+On the **legacy** testnet the app builds and submits one unsigned `PublicNoSign`
+transaction itself; nothing there needs a key. The **v0.3** testnet has no
+Piñata and no fee-less transaction — every public transaction needs a funded,
+signing fee payer — so a keyless client cannot claim on it alone. There the app
+asks `claimd`, a small service the team runs
+(`https://rog-devbox.tail957e2.ts.net:8443`, contract in
+[`claimd/README.md`](claimd/README.md)), which sends one native transfer from a
+small hot account. The app still proves the credit itself: it reads the balance
+before, watches for the service's transaction hash with `getTransaction`, and
+shows a receipt only once the balance is at exactly `before + prize`. The
+service's word is never a receipt.
 
 Networks are a table, not a URL: `lez-faucet-ffi/src/network.rs` holds the
-sequencer, explorer, LEZ pin, expected program ImageIDs and claim mechanism for
-every network the build will connect to. Today that table has one enabled row.
-A second (LEZ v0.3.x, later 0.4) is a planned addition, and the notes in that
-file and in `docs/testnet.md` describe what it needs — a new claim mechanism,
-since v0.3 has no Piñata — rather than pretending a row would be enough.
+sequencer, explorer, LEZ pin, fingerprint, unit, prize and claim mechanism for
+every network the build will connect to, and `faucet-ui/src/FaucetBackend.cpp`
+mirrors it. There is no setting, variable or field through which any other
+host can be reached. `docs/testnet.md` carries the full contract.
 
 ## It is a faucet client, not a wallet
 
@@ -55,8 +71,9 @@ Consequences worth stating plainly:
 ### What "success" means here
 
 A receipt is shown only when the app has observed **its own** transaction
-included on chain **and** the recipient's balance up by exactly 150. Having
-submitted a transaction is never reported as success.
+included on chain **and** the recipient's balance up by exactly the prize.
+Having submitted a transaction — or, on v0.3, having been told by the service
+that it did — is never reported as success.
 
 Where that cannot be proven within the deadline, the app says the outcome is
 unknown, shows the address, the pre-claim balance and the transaction hash, and
@@ -65,10 +82,15 @@ two credits.
 
 ## The pool is finite and shared
 
-The Piñata pool started at 1,500,000 testnet LEZ and pays 150 per claim. It is
-**permissionless and repeatedly claimable, not unlimited**: every claim is a
-proof-of-work race against every other claimant for one global challenge, and
+The legacy Piñata pool started at 1,500,000 testnet LEZ and pays 150 per claim.
+It is **permissionless and repeatedly claimable, not unlimited**: every claim is
+a proof-of-work race against every other claimant for one global challenge, and
 the pool stops paying when it can no longer subtract 150.
+
+On v0.3 the service's hot balance plays the pool's part. It is topped up from
+the team's mined supply and the service caps claims — one per recipient per
+day, a few per hour overall — so a refusal there is the service's policy, not
+this app's; the app shows it as such and offers no retry.
 
 The deployed program enforces no cooldown, no per-address quota and no rate
 limit. This app's internal bounds are there to keep it well behaved on your
@@ -188,10 +210,11 @@ Scaffold localnet uses the fixed port `3040`. Run at most one localnet at a time
 across Conductor workspaces or other checkouts of this repository to avoid a
 port collision.
 
-Read-only tests against the legacy testnet are safe to run at any time:
+Read-only tests against either testnet are safe to run at any time:
 
 ```sh
 cargo test -p lez-faucet-ffi --test live_public_testnet -- --ignored --nocapture
+cargo test -p lez-faucet-ffi --test live_v03_testnet -- --ignored --nocapture
 ```
 
 There is exactly one write test. It spends 150 LEZ from a finite shared pool,
@@ -260,34 +283,36 @@ the `sequencers` field is missing. Create a fresh home, or reshape the file.
 
 ## Install and release
 
-This tree builds **LEZ Faucet 0.4.0**: `lez_faucet` 0.4.0 and `lez_faucet_ui`
-0.4.0, per each module's `metadata.json`. Three unrelated version numbers appear
+This tree builds **LEZ Faucet 0.5.0**: `lez_faucet` 0.5.0 and `lez_faucet_ui`
+0.5.0, per each module's `metadata.json`. Three unrelated version numbers appear
 around this app, so name the subject every time:
 
 | Subject | Version |
 | --- | --- |
-| LEZ Faucet (this repository, both packages) | 0.4.0 |
+| LEZ Faucet (this repository, both packages) | 0.5.0 |
 | Logos Basecamp (the host app it installs into) | 0.2.1 |
-| Upstream LEZ (the pinned protocol revision) | `v0.2.4-lez-legacy` |
+| Upstream LEZ (the pinned protocol revision the client links) | `v0.2.4-lez-legacy` |
 
-0.4.0 moves the app from the main testnet to the legacy testnet and repins it
-to `v0.2.4-lez-legacy`. It is a minor bump, not a patch, because the UI's Qt
-Remote Objects interface grew two properties (`networkName`, `explorerUrl`) and
-the core's `getFaucetInfo` envelope grew matching fields; a 0.4.0 UI on a 0.3.x
-core still runs (the fields are optional on the way in) but will not name its
-network. 0.3.2 before it made the core module's `shutdown` reversible; 0.3.1
-moved the LEZ pin to `v0.2.2`; 0.3.0 was the breaking release that removed the
-wallet flow and changed both module interfaces. `CHANGELOG.md` records what
-moved.
+0.5.0 adds the v0.3 testnet through the hosted claim service and a network
+selector. It is a minor bump because the UI's Qt Remote Objects interface grew
+(`networks`, `selectedNetworkId`, `selectNetwork`) and the core's
+`getFaucetInfo` envelope changed shape (`claim_mechanism`, `decimals`,
+`paused`, `claim_api_url`; the Piñata-only fields are now absent on v0.3), and
+because the `PRIZE` constant left the C header: a 0.5.0 UI on a 0.4.0 core runs
+but has no selector to offer. 0.4.0 moved the app to the legacy testnet and
+repinned it to `v0.2.4-lez-legacy`; 0.3.2 made the core module's `shutdown`
+reversible; 0.3.1 moved the LEZ pin to `v0.2.2`; 0.3.0 was the breaking release
+that removed the wallet flow and changed both module interfaces. `CHANGELOG.md`
+records what moved.
 
 For a new installation, install `lez_faucet_ui`; Basecamp should resolve its
 `lez_faucet` core dependency from the same catalog. When upgrading, upgrade or
-install `lez_faucet` 0.4.0 first, then `lez_faucet_ui` 0.4.0. The UI dependency
+install `lez_faucet` 0.5.0 first, then `lez_faucet_ui` 0.5.0. The UI dependency
 is currently unversioned, so installing the new UI alone may leave an older
 core in place — against a 0.3.x core that is a faucet still pointed at the v0.3
 main testnet, which refuses every claim with "This app does not match the
-deployed testnet". Every release before 0.4.0 is in that state now, so rolling
-back is possible but pointless. See
+deployed testnet"; against a 0.4.0 core the legacy row works and the v0.3 row
+is refused as an unknown sequencer. See
 [Community installation](docs/community-install.md).
 
 Release workflows are present for both modules. The crates.io HTTP 403 that

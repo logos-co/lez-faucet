@@ -1,0 +1,53 @@
+# claimd is its own workspace: it links LEZ v0.3.1, which cannot share a lockfile with the
+# app's v0.2.4 pin in the parent workspace (the parent excludes this directory).
+[workspace]
+
+[package]
+name = "claimd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "LEZ v0.3 testnet faucet claim service: signs native transfers from a hot account"
+
+[features]
+default = []
+# The real chain backend (wallet crate from LEZ v0.3.1). Off by default so that
+# `cargo test` stays cheap; the release build on the host uses `--features lez`.
+lez = ["dep:wallet", "dep:lee", "dep:common", "dep:sequencer_service_rpc"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["json", "tokio", "http1"] }
+bs58 = "0.5"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+hex = "0.4"
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = "1"
+
+# LEZ v0.3.1 (tag v0.3.1 = commit 1a003bfb). Package names are the workspace member names.
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "1a003bfbfb89fcf987f62975cd08a401169e1b8c", optional = true }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "1a003bfbfb89fcf987f62975cd08a401169e1b8c", optional = true }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "1a003bfbfb89fcf987f62975cd08a401169e1b8c", optional = true }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "1a003bfbfb89fcf987f62975cd08a401169e1b8c", features = ["client"], optional = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["test-util"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Mirrors the LEZ workspace's own patch; git dependencies do not carry their [patch] section.
+[patch.crates-io]
+keccak = { git = "https://github.com/logos-blockchain/sponges", rev = "3a56e99771beedf04946eab21a4a62adc2951377" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

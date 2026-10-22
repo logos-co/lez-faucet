@@ -12,9 +12,16 @@ class FaucetBackend
     PROP(QString sequencerUrl READONLY)
     // Which LEZ network sequencerUrl belongs to, for the view to name, and
     // that network's block explorer root for looking up a receipt's
-    // transaction. Compile-time constants, like sequencerUrl.
+    // transaction. Rows of a compile-time table, like sequencerUrl.
     PROP(QString networkName READONLY)
     PROP(QString explorerUrl READONLY)
+    // The whole table, as a JSON array of
+    // {id, name, sequencerUrl, explorerUrl, lezVersion, prize, decimals,
+    // mechanism, claimApiUrl} in display order, and the id of the row the
+    // three properties above currently describe. The view's selector is
+    // drawn from this; nothing in it is user-editable.
+    PROP(QString networks READONLY)
+    PROP(QString selectedNetworkId READONLY)
 
     // Every start* slot begins a native job and returns
     // {"ok":true,"job_id":"..."} immediately, or {"ok":false,"error":{...}}
@@ -29,6 +36,11 @@ class FaucetBackend
     // sending a second transaction. See FaucetView.qml's requestCredit().
     SLOT(QString startRequestDrop(QString address, QString requestKey))
     SLOT(QString cancelJob(QString jobId))
+    // Point the backend at another row of the table. Refused while a credit
+    // request is live; otherwise reconfigures the core for that row's
+    // sequencer and updates the properties above. Selection is not stored
+    // anywhere: a fresh process starts on the default row.
+    SLOT(QString selectNetwork(QString id))
     SLOT(QString jobStatus(QString jobId))
     // Terminal envelopes stay replayable until the view confirms it has
     // presented them, so a dropped connection cannot lose a receipt.

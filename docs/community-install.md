@@ -5,16 +5,17 @@ not currently part of the built-in Logos module catalog.
 
 ## Requirements
 
-- **LEZ Faucet 0.4.0** is the version documented here, for both packages
+- **LEZ Faucet 0.5.0** is the version documented here, for both packages
   (`lez_faucet` and `lez_faucet_ui`).
 - Requires **Logos Basecamp 0.2.1**. That 0.2.1 is the host application's
   version, not the faucet's. The two numbers are unrelated and are not meant to
   match.
 - Apple Silicon macOS (`darwin-arm64`), x86-64 Linux (`linux-amd64`), or ARM64
   Linux (`linux-arm64`)
-- **LEZ legacy testnet** use only (`testnet-legacy.lez.logos.co`). The main
-  testnet moved to LEZ v0.3 in October 2026 and has no Piñata program; no
-  release of this app can claim there.
+- **LEZ legacy testnet** (`testnet-legacy.lez.logos.co`, 150 LEZ per claim)
+  and, since 0.5.0, the **LEZ v0.3 testnet** (`testnet.lez.logos.co`, 0.1 LEZ
+  per claim through the team's hosted claim service). The app opens on legacy;
+  a selector under the title switches.
 
 Version numbers in these docs always name their subject. Where you see LEZ
 `v0.2.4-lez-legacy`, that is the pinned upstream protocol revision this client
@@ -38,11 +39,11 @@ https://raw.githubusercontent.com/logos-co/lez-faucet/main/logos-repo.json
 
 The repository descriptor points Basecamp at the rolling catalog index hosted
 in this repository's `index` GitHub release. The index is rebuilt from every
-non-draft release, so 0.3.2 and everything before it remain listed alongside
-0.4.0 and can be rolled back to. Note that rolling back is not useful: every
-release before 0.4.0 points at the main testnet, which no longer runs the
-programs it claims through, and refuses each claim with "This app does not
-match the deployed testnet".
+non-draft release, so 0.4.0 and everything before it remain listed alongside
+0.5.0 and can be rolled back to. Rolling back to 0.4.0 loses the v0.3 testnet;
+rolling back further is not useful: every release before 0.4.0 points at the
+main testnet with the old claim path, and refuses each claim with "This app
+does not match the deployed testnet".
 
 ## Install the app
 
@@ -50,8 +51,8 @@ For a new installation, install **`lez_faucet_ui`** from the package browser. It
 declares **`lez_faucet`** as a dependency, so Basecamp should install the newest
 core module automatically from the same catalog.
 
-For an existing installation, upgrade or install **`lez_faucet` 0.4.0 first**,
-then upgrade **`lez_faucet_ui` to 0.4.0**. The UI dependency is
+For an existing installation, upgrade or install **`lez_faucet` 0.5.0 first**,
+then upgrade **`lez_faucet_ui` to 0.5.0**. The UI dependency is
 currently unversioned, so upgrading the UI alone may treat an installed older
 core as sufficient and leave it in place. If automatic dependency resolution
 is unavailable, use this same core-then-UI order for a new installation.
@@ -106,19 +107,26 @@ button. If you see a password or recovery-phrase step instead, you are running
 
 1. Open the LEZ Faucet app. There is no onboarding: no account to create, no
    password, no recovery phrase.
-2. Paste `Public/<account-id>` or the bare 32-byte base58 account ID. Private
+2. Pick the network under the title. It opens on the **LEZ legacy testnet**
+   (150 LEZ per claim); **LEZ v0.3 testnet** pays 0.1 LEZ through the team's
+   claim service. An account on one chain is not an account on the other.
+3. Paste `Public/<account-id>` or the bare 32-byte base58 account ID. Private
    account IDs are not accepted.
-3. The app reports malformed IDs, valid-but-uninitialized accounts, and
-   accounts owned by another program as separate states. For an uninitialized
-   account it shows the exact command for **you** to run in the owning wallet.
-4. Press **Request 150 LEZ** once.
-5. Watch the phases. Before the transaction is sent you can cancel; after it is
-   sent the app can only reconcile it, so cancelling then reports the real
-   outcome rather than pretending nothing happened.
-6. A receipt appears only when the app has seen its own transaction included
-   *and* your balance up by exactly 150. If it cannot prove that in time it
-   says so, shows the transaction hash, and offers no retry — re-check the
-   balance yourself before trying again.
+4. On legacy, the app reports malformed IDs, valid-but-uninitialized accounts,
+   and accounts owned by another program as separate states. For an
+   uninitialized account it shows the exact command for **you** to run in the
+   owning wallet. On v0.3 there is no initialization step: any valid id can
+   receive, and one that has never been seen simply has a balance of 0.
+5. Press **Request 150 LEZ** (or **Request 0.1 LEZ**) once.
+6. Watch the phases. Before anything is sent you can cancel; after it is sent
+   the app can only reconcile it, so cancelling then reports the real outcome
+   rather than pretending nothing happened.
+7. A receipt appears only when the app has seen its own transaction included
+   *and* your balance up by exactly the prize. If it cannot prove that in time
+   it says so, shows the transaction hash, and offers no retry — re-check the
+   balance yourself before trying again. On v0.3 the service may also refuse
+   up front — one claim per account per day, a few per hour overall, or
+   paused — and the app says which; nothing was sent in that case.
 
 Funding is a public credit and does not require the faucet to possess the
 recipient's signing key. The recipient remains controlled only by its original
@@ -195,20 +203,27 @@ unaffected.
 
 ## What this app does and does not do
 
-- It funds one public, already-initialized account by exactly 150 testnet LEZ
-  per press.
+- It funds one public account by exactly the selected network's prize per
+  press: 150 LEZ on legacy (the account must already be initialized), 0.1 LEZ
+  on v0.3.
 - It never asks for a password, recovery phrase or private key, and it has no
   way to accept one.
 - It writes no files and remembers nothing after you quit.
 - It cannot initialize an account for you. If yours is not initialized, the app
   shows the command for **you** to run in your own wallet.
 
-The Piñata pool is finite and shared: it started at 1,500,000 testnet LEZ, pays
-150 per claim, and every claim is a proof-of-work race against everyone else
-for one global challenge. It is permissionless and repeatedly claimable, but it
-is not unlimited and it will run out. The deployed program has no cooldown and
-no per-address quota; this app's internal limits keep it well behaved on your
-machine and on a shared sequencer, and are not abuse prevention.
+The legacy Piñata pool is finite and shared: it started at 1,500,000 testnet
+LEZ, pays 150 per claim, and every claim is a proof-of-work race against
+everyone else for one global challenge. It is permissionless and repeatedly
+claimable, but it is not unlimited and it will run out. The deployed program has
+no cooldown and no per-address quota; this app's internal limits keep it well
+behaved on your machine and on a shared sequencer, and are not abuse prevention.
+
+On v0.3 the claim service pays from a small hot balance it tops up from the
+team's mined supply, and it does enforce caps — one claim per account per day,
+two per client address per day, a few per hour overall. The app holds no key on
+either network: on v0.3 the service signs, and the app checks the credit on
+chain itself before showing a receipt.
 
 Testnet LEZ has no monetary value.
 
@@ -229,10 +244,14 @@ whether that claim went through. Check the balance independently.
   what the testnet's 2026-08-05 upgrade did to every 0.3.0 build, which 0.3.1
   repinned; and what the main testnet's move to v0.3 in October 2026 did to
   every 0.3.x build, which 0.4.0 answers by moving to the legacy testnet.
-- **The app says "LEZ legacy testnet"** under its title: that is the network
-  it claims on. An account created against the main testnet
-  (`testnet.lez.logos.co`) is a different account on a different chain; it
-  will show as uninitialized here.
+- **The selector under the title says which network** the app claims on. An
+  account created against the main testnet (`testnet.lez.logos.co`) is a
+  different account on a different chain; on the legacy row it will show as
+  uninitialized. Pick **LEZ v0.3 testnet** for it instead.
+- **"Could not reach the faucet service"** on the v0.3 row: the team's claim
+  service is down or unreachable from your network. Nothing was sent; the
+  legacy row is unaffected. **"The faucet service is limiting claims right
+  now"** means you (or your address) already claimed today.
 - **"The faucet is shutting down"** on an app you just reopened: fixed in
   0.3.2. On 0.3.0 and 0.3.1, closing the faucet window left the core module
   refusing every later call for the rest of the session. Upgrade, or restart

@@ -3,13 +3,19 @@
 Release the core package before the UI package. The version source of truth is
 each module's `metadata.json`.
 
-Both packages must be released at the same number; 0.4.0 is the current one.
-LEZ Faucet 0.4.0 moves the app to the legacy testnet and repins the client to
-LEZ `v0.2.4-lez-legacy`. It is mandatory rather than optional, because every
-earlier build points at the main testnet, which moved to v0.3 without the
-Piñata program, and refuses every claim with "This app does not match the
-deployed testnet". (0.3.1 before it was the same kind of release, repinning
-`v0.2.0` → `v0.2.2` after the 2026-08-05 upgrade.)
+Both packages must be released at the same number; 0.5.0 is the current one.
+LEZ Faucet 0.5.0 adds the v0.3 testnet through the hosted claim service and a
+network selector; the legacy path is unchanged. Before it, 0.4.0 moved the app
+to the legacy testnet and repinned the client to LEZ `v0.2.4-lez-legacy`. That
+one was mandatory rather than optional, because every earlier build points at
+the main testnet, which moved to v0.3 without the Piñata program, and refuses
+every claim with "This app does not match the deployed testnet". (0.3.1 before
+it was the same kind of release, repinning `v0.2.0` → `v0.2.2` after the
+2026-08-05 upgrade.)
+
+Since 0.5.0 a release also depends on the claim service being up: the `v03`
+job of the fingerprint workflow checks `GET /v1/info` daily, and the live
+`live_v03_testnet` tests are the pre-release check for that network.
 
 Its predecessor 0.3.0 was the breaking release — the core module's C++ ABI
 changed, the UI's Qt Remote Objects interface changed, and the wallet and
@@ -296,6 +302,11 @@ Finally, test the user journey in a fresh Basecamp profile:
 6. Press **Request 150 LEZ** exactly once.
 7. Confirm the recipient is up exactly 150 and the pool down at least 150.
 8. Confirm no wallet, config or state file was created anywhere.
+9. Switch the selector to **LEZ v0.3 testnet**, paste a fresh 32-byte base58
+   id, press **Request 0.1 LEZ** once, and confirm the receipt shows
+   `+0.1 LEZ`, the balance `0 → 0.1`, and an explorer link on
+   `explorer.testnet.lez.logos.co`. Switch back and confirm the legacy pool
+   reading returns.
 
 Test the upgrade path separately, in a profile that already has 0.2.0
 installed: upgrade `lez_faucet` to 0.3.1 first, then `lez_faucet_ui`. Upgrading

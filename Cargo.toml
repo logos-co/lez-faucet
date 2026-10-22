@@ -1,5 +1,7 @@
 [workspace]
 members = ["lez-faucet-ffi"]
+# claimd links LEZ v0.3.1 and is its own workspace (see claimd/Cargo.toml).
+exclude = ["claimd"]
 resolver = "2"
 
 [workspace.package]
@@ -11,7 +13,9 @@ anyhow = "1"
 cbindgen = "0.29"
 common = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "399793b4f99b836e40694cea34fa02790912e18e" }
 lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "399793b4f99b836e40694cea34fa02790912e18e" }
+httpmock = "0.9"
 programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "399793b4f99b836e40694cea34fa02790912e18e", features = ["artifacts"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "399793b4f99b836e40694cea34fa02790912e18e", features = ["client"] }
 system_accounts = { git = "https://github.com/logos-blockchain/logos-execution-zone", rev = "399793b4f99b836e40694cea34fa02790912e18e" }
 serde = { version = "1", features = ["derive"] }

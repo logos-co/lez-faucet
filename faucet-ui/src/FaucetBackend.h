@@ -34,6 +34,7 @@ public slots:
     QString startInspectRecipient(QString address) override;
     QString startRequestDrop(QString address, QString requestKey) override;
     QString cancelJob(QString jobId) override;
+    QString selectNetwork(QString id) override;
     QString jobStatus(QString jobId) override;
     QString acknowledgeJob(QString jobId) override;
     QString copyText(QString text) override;
@@ -54,11 +55,14 @@ private:
     static QString localError(const QString& code, const QString& message);
     static QString localSuccess(const QJsonObject& fields = {});
     void clearTerminalResponse(const QString& jobId);
+    void presentNetwork(int row);
 
-    // Set once the core has accepted the pinned sequencer. The core rejects
-    // reconfiguration after a credit request has started, so a second
-    // bootstrap (a view reload) must not attempt one.
+    // Set once the core has accepted the selected row's sequencer. The core
+    // rejects reconfiguration while a job is live, so a second bootstrap (a
+    // view reload) must not attempt one; selectNetwork() clears it and
+    // configures again for the new row.
     bool m_configured = false;
+    int m_selectedNetwork = 0;
     QHash<QString, QString> m_jobKinds;
     QHash<QString, QString> m_terminalResponses;
 };

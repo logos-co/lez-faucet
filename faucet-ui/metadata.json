@@ -1,11 +1,11 @@
 {
   "name": "lez_faucet_ui",
   "display_name": "LEZ Faucet",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "ui_qml",
   "interface": "universal",
   "category": "blockchain",
-  "description": "Request 150 testnet LEZ for a public LEZ account you already own. The faucet holds no account, asks for no secret, and stores nothing.",
+  "description": "Request testnet LEZ for a public LEZ account you already own, on the LEZ legacy testnet or the LEZ v0.3 testnet. The faucet holds no account, asks for no secret, and stores nothing.",
   "author": "Logos",
   "main": "lez_faucet_ui_plugin",
   "icon": null,

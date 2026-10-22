@@ -4,6 +4,7 @@
 #include <QChar>
 #include <QClipboard>
 #include <QGuiApplication>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
 
@@ -11,40 +12,104 @@
 
 namespace {
 
-// The networks this build knows, mirroring lez-faucet-ffi/src/network.rs.
+// The networks this build knows, mirroring lez-faucet-ffi/src/network.rs row
+// for row. The core-contract test holds the two tables to each other.
 //
-// A network is a sequencer, an explorer and a display name. The pinned LEZ
-// revision, its ImageIDs and the claim mechanism live in the core, which is
-// the layer that has to agree with them; the view only needs to say where it
-// is pointed and where a transaction can be looked up.
+// A network is a sequencer, an explorer, a display name, and how a claim is
+// paid out and shown: the prize, in the chain's smallest unit, and how many
+// decimal places sit between that unit and one LEZ. The pinned LEZ revision,
+// the program fingerprint and the claim mechanism's implementation live in the
+// core, which is the layer that has to agree with them; the view needs to say
+// where it is pointed, what one press pays, and where a transaction can be
+// looked up.
 struct Network {
     const char* id;
     const char* displayName;
     const char* sequencerUrl;
     const char* explorerUrl;
+    const char* lezVersion;
+    // Exact decimal string, never a number: a u128 does not survive a double.
+    const char* prize;
+    int decimals;
+    // "pinata": the core builds and submits an unsigned proof-of-work claim.
+    // "claim_api": the core asks a hosted claim service, which pays from its
+    // own small hot balance; the core still proves the credit on chain.
+    const char* mechanism;
+    // The claim service root for a "claim_api" row; empty otherwise.
+    const char* claimApiUrl;
 };
 
-// The LEZ legacy testnet: LEZ v0.2.4-lez-legacy, with the built-in Piñata.
-//
-// The main testnet (https://testnet.lez.logos.co) runs LEZ v0.3.x, which has
-// no Piñata program, so it is not a network this build can claim from. Adding
-// it means a new claim mechanism in the core first, then a row here.
-constexpr Network LEZ_LEGACY_TESTNET {
-    "lez-legacy-testnet",
-    "LEZ legacy testnet",
-    "https://testnet-legacy.lez.logos.co",
-    "https://explorer.testnet-legacy.lez.logos.co",
-};
-
-// The one network this build talks to.
+// Display order. The first row is the default a fresh process starts on.
 //
 // There is deliberately no environment variable, no settings entry and no UI
-// control that can move it. A redirectable sequencer is not a convenience: it
-// lets someone else fabricate the pool balance, the program fingerprint and the
-// success receipt, and collect every address typed into this window. The core
-// pins the same hosts independently, so an override here would only ever be
-// rejected there.
-constexpr const Network& PINNED_NETWORK = LEZ_LEGACY_TESTNET;
+// control that can point the backend at a host outside this table. A
+// redirectable sequencer is not a convenience: it lets someone else fabricate
+// the pool balance, the program fingerprint and the success receipt, and
+// collect every address typed into this window. The core pins the same hosts
+// independently, so an override here would only ever be rejected there.
+constexpr Network NETWORKS[] = {
+    // The LEZ legacy testnet: LEZ v0.2.4-lez-legacy, with the built-in Piñata.
+    // Balances are whole LEZ; the prize is 150.
+    {
+        "lez-legacy-testnet",
+        "LEZ legacy testnet",
+        "https://testnet-legacy.lez.logos.co",
+        "https://explorer.testnet-legacy.lez.logos.co",
+        "v0.2.4-lez-legacy",
+        "150",
+        0,
+        "pinata",
+        "",
+    },
+    // The LEZ v0.3 testnet: no Piñata, every public transaction needs a funded
+    // fee payer, so claims go through the hosted claim service. Balances are
+    // in lepta, 10^9 to the LEZ; the prize is 0.1 LEZ.
+    {
+        "lez-v03-testnet",
+        "LEZ v0.3 testnet",
+        "https://testnet.lez.logos.co",
+        "https://explorer.testnet.lez.logos.co",
+        "v0.3.1",
+        "100000000",
+        9,
+        "claim_api",
+        "https://rog-devbox.tail957e2.ts.net:8443",
+    },
+};
+constexpr int NETWORK_COUNT = static_cast<int>(sizeof(NETWORKS) / sizeof(NETWORKS[0]));
+constexpr int DEFAULT_NETWORK = 0;
+
+QJsonObject networkJson(const Network& network)
+{
+    QJsonObject row;
+    row.insert(QStringLiteral("id"), QString::fromLatin1(network.id));
+    row.insert(QStringLiteral("name"), QString::fromUtf8(network.displayName));
+    row.insert(QStringLiteral("sequencerUrl"), QString::fromLatin1(network.sequencerUrl));
+    row.insert(QStringLiteral("explorerUrl"), QString::fromLatin1(network.explorerUrl));
+    row.insert(QStringLiteral("lezVersion"), QString::fromLatin1(network.lezVersion));
+    row.insert(QStringLiteral("prize"), QString::fromLatin1(network.prize));
+    row.insert(QStringLiteral("decimals"), network.decimals);
+    row.insert(QStringLiteral("mechanism"), QString::fromLatin1(network.mechanism));
+    row.insert(QStringLiteral("claimApiUrl"), QString::fromLatin1(network.claimApiUrl));
+    return row;
+}
+
+QString networksJson()
+{
+    QJsonArray rows;
+    for (const Network& network : NETWORKS)
+        rows.append(networkJson(network));
+    return QString::fromUtf8(QJsonDocument(rows).toJson(QJsonDocument::Compact));
+}
+
+int networkRow(const QString& id)
+{
+    for (int row = 0; row < NETWORK_COUNT; ++row) {
+        if (id == QLatin1String(NETWORKS[row].id))
+            return row;
+    }
+    return -1;
+}
 
 // A public account id is 32 bytes of base58, so it never exceeds 64
 // characters. The bound is applied before the string reaches the decoder.
@@ -57,9 +122,56 @@ FaucetBackend::FaucetBackend(QObject* parent)
 {
     setBusy(false);
     setActiveJobId(QString());
-    setSequencerUrl(QString::fromLatin1(PINNED_NETWORK.sequencerUrl));
-    setNetworkName(QString::fromUtf8(PINNED_NETWORK.displayName));
-    setExplorerUrl(QString::fromLatin1(PINNED_NETWORK.explorerUrl));
+    setNetworks(networksJson());
+    presentNetwork(DEFAULT_NETWORK);
+}
+
+void FaucetBackend::presentNetwork(int row)
+{
+    const Network& network = NETWORKS[row];
+    m_selectedNetwork = row;
+    setSequencerUrl(QString::fromLatin1(network.sequencerUrl));
+    setNetworkName(QString::fromUtf8(network.displayName));
+    setExplorerUrl(QString::fromLatin1(network.explorerUrl));
+    setSelectedNetworkId(QString::fromLatin1(network.id));
+}
+
+QString FaucetBackend::selectNetwork(QString id)
+{
+    const int row = networkRow(id);
+    if (row < 0) {
+        return localError(QStringLiteral("unknown_network"),
+                          QStringLiteral("This build does not know that network."));
+    }
+    // A live credit request is inside the core with the current client. The
+    // core would refuse the swap too; refusing here first keeps the
+    // properties and the core in step rather than half-moved.
+    if (busy() || !activeJobId().isEmpty()) {
+        return localError(QStringLiteral("drop_in_progress"),
+                          QStringLiteral("Wait for the running request to finish before switching networks."));
+    }
+
+    const int previous = m_selectedNetwork;
+    const bool previouslyConfigured = m_configured;
+    presentNetwork(row);
+    m_configured = false;
+
+    if (isContextReady()) {
+        const QString response = invokeCore(QStringLiteral("configure"), {sequencerUrl()});
+        if (!succeeded(parseObject(response))) {
+            // The core kept its old client (a read job may still be live
+            // there), so the properties go back to describing it.
+            presentNetwork(previous);
+            m_configured = previouslyConfigured;
+            return response;
+        }
+        m_configured = true;
+    }
+
+    QJsonObject fields;
+    fields.insert(QStringLiteral("network_id"), selectedNetworkId());
+    fields.insert(QStringLiteral("sequencer_url"), sequencerUrl());
+    return localSuccess(fields);
 }
 
 FaucetBackend::~FaucetBackend()
@@ -105,6 +217,7 @@ QString FaucetBackend::bootstrap()
 
     QJsonObject fields;
     fields.insert(QStringLiteral("sequencer_url"), sequencerUrl());
+    fields.insert(QStringLiteral("network_id"), selectedNetworkId());
     // A reloaded view rejoins a live request through this id and recovers its
     // request key from the job envelope. It never mints a new one.
     fields.insert(QStringLiteral("active_job_id"), activeJobId());

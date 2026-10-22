@@ -15,6 +15,77 @@ release is
 published as two GitHub releases, `lez_faucet-v<version>` and
 `lez_faucet_ui-v<version>`.
 
+## [0.5.0] — 2026-10-22
+
+Adds the **LEZ v0.3 testnet** (`testnet.lez.logos.co`, LEZ `v0.3.1`) as a
+second network, next to the legacy testnet, with a selector under the title.
+v0.3 has no Piñata and no fee-less public transaction, so a keyless client
+cannot claim there alone: on that network the app asks `claimd`, a small claim
+service the team hosts (`https://rog-devbox.tail957e2.ts.net:8443`, contract in
+`claimd/README.md`), which sends one native transfer of 100,000,000 lepta
+(0.1 LEZ) from a small hot account funded from the team's mined supply. The app
+stays keyless and stores nothing, and still proves every credit itself: balance
+before, its transaction by hash, balance at exactly `before + prize`. Legacy
+behaviour is unchanged.
+
+### Added
+
+- **Network row** `lez-v03-testnet` in `lez-faucet-ffi/src/network.rs`, with
+  `ClaimMechanism::ClaimApi { base_url, prize }`, `decimals: 9`, and a
+  `NetworkFingerprint::PpcImageId` — the v0.3 `privacy_preserving_circuit`
+  ImageID, checked live before every v0.3 claim since this build compiles no
+  v0.3 program. `ENABLED` lists both rows; `DEFAULT` stays legacy.
+- **v0.3 transport** (`src/v03.rs`): raw JSON-RPC over `reqwest` (rustls) for
+  `getAccountBalance`, `getTransaction` and `getProgramIds` — the pinned
+  v0.2.4 `SequencerClient` cannot parse v0.3's `getAccount` — and the claim
+  service client (`GET /v1/info`, `POST /v1/claim`, `GET /v1/claim/{id}`). The
+  request key the app already uses for its own idempotency is the service's
+  idempotency key too, so a replay cannot pay twice at either end.
+- **v0.3 drop**: validate → verify the circuit ID (`verifying_programs`) →
+  read the balance (`inspecting_recipient`; no init or owner check, `Private/`
+  still refused) → `POST /v1/claim` (`submitting`) → reconcile
+  (`reconciling`): poll the service for the hash, `getTransaction` and the
+  balance, classified by the same `classify()` as the Piñata path with no
+  challenge to consult. A lost `POST` response is resolved through the
+  service's ledger before anything is concluded.
+- **Error codes** `rate_limited` (`details.retry_after_seconds`),
+  `faucet_paused`, and `claim_api_unavailable` (retryable: the service
+  recorded nothing). The service's `hot_balance_low` maps onto `pool_depleted`.
+- **`getFaucetInfo`** fields `claim_mechanism` (`pinata` | `claim_api`),
+  `decimals`, `paused`, and `claim_api_url` on v0.3; `pool_balance` is the hot
+  balance there. `blocked_reason` gains `faucet_paused` and `prize_mismatch`.
+- **UI**: `networks` (JSON table) and `selectedNetworkId` properties and a
+  `selectNetwork(id)` slot on `FaucetBackend`; a ComboBox under the title;
+  amounts rendered in the row's unit (`0.1 LEZ` on v0.3, `150 LEZ` on legacy)
+  through exact string formatting, never division; a four-lamp rail and its
+  own phase sentences on v0.3; the initialization-command panel hidden there.
+  Switching clears the pool reading, inspection and any result, and reads the
+  new network afresh. Nothing persists the choice.
+- **Tests**: `httpmock` tests for the v0.3 happy path, the service's word
+  without the chain, rate limiting, replay, a lost `POST`, and the deadline;
+  `tests/live_v03_testnet.rs` (`--ignored`, write test gated on
+  `LEZ_FAUCET_LIVE_RECIPIENT`, service root override through
+  `LEZ_FAUCET_CLAIM_API_URL`); a module test that reconfiguring to the second
+  network is refused while a job is live and allowed when idle; a `v03` job
+  in the fingerprint workflow comparing the circuit ID with `docs/testnet.md`
+  and checking the service's `/v1/info`.
+
+### Changed
+
+- The global `PRIZE` constant is gone from the Rust API and from the C header;
+  the prize is `network.prize()` and travels in `faucet_info.prize_amount`.
+  `FaucetInfo.pinata_account`, `difficulty_bytes` and
+  `effective_difficulty_bits` are optional and absent on v0.3;
+  `program_fingerprint` is `{authenticated_transfer, pinata}` on legacy and
+  `{privacy_preserving_circuit}` on v0.3. The contract fixture carries both.
+- The client accepts `https://testnet.lez.logos.co` as an enabled host. It
+  still refuses every other host; a `FaucetClient::for_network` constructor
+  exists for tests and tooling and can only name an enabled host or loopback.
+- `FaucetBackend` holds a two-row table instead of one pinned row.
+- Versions: `lez-faucet-ffi` 0.5.0, both `metadata.json` 0.5.0, module
+  `version()` 0.5.0, `faucet-module/flake.nix` 0.5.0 with a regenerated
+  `cargoDeps` hash (the lockfile gained `reqwest` and `httpmock`).
+
 ## [0.4.0] — 2026-10-21
 
 Moves the app to the **LEZ legacy testnet**. The main testnet

@@ -1,10 +1,10 @@
-//! Live testnet tests.
+//! Live legacy-testnet tests.
 //!
-//! These talk to the real LEZ testnet this build targets (the default network,
-//! currently the LEZ legacy testnet), so they are `#[ignore]`d and are never
-//! part of a normal `cargo test` run. `LEZ_FAUCET_SEQUENCER_URL` overrides the
-//! sequencer, e.g. to point at a localnet; the client still refuses any host
-//! that is not an enabled network or loopback.
+//! These talk to the real LEZ legacy testnet (the default network), so they
+//! are `#[ignore]`d and are never part of a normal `cargo test` run.
+//! `LEZ_FAUCET_SEQUENCER_URL` overrides the sequencer, e.g. to point at a
+//! localnet; the client still refuses any host that is not an enabled network
+//! or loopback. The v0.3 testnet has its own file, `live_v03_testnet.rs`.
 //!
 //! The read-only tests are safe to run at any time. The single write test
 //! spends 150 LEZ from a finite community pool and is additionally gated on an
@@ -13,9 +13,9 @@
 //! purpose.
 
 use lez_faucet_ffi::{
-    client::{Eligibility, FaucetClient},
+    client::{Eligibility, FaucetClient, ProgramFingerprint},
     error::ErrorCode,
-    network,
+    network::{self, NetworkFingerprint},
 };
 
 /// Pinned at the revision this client is built against.
@@ -46,32 +46,42 @@ async fn faucet_info_matches_the_pinned_protocol() {
 
     assert_eq!(info.network, network::DEFAULT.id);
     assert_eq!(info.lez_version, network::DEFAULT.lez_version);
+    assert_eq!(info.claim_mechanism, "pinata");
+    assert_eq!(info.decimals, 0);
     assert_eq!(info.prize_amount, "150");
-    assert_eq!(info.pinata_account.account_id, PINATA_ACCOUNT);
-    assert_eq!(
-        info.pinata_account.address,
-        format!("Public/{PINATA_ACCOUNT}")
-    );
+    assert!(!info.paused);
+    let pinata_account = info
+        .pinata_account
+        .expect("a Piñata network names its pool");
+    assert_eq!(pinata_account.account_id, PINATA_ACCOUNT);
+    assert_eq!(pinata_account.address, format!("Public/{PINATA_ACCOUNT}"));
 
     // The fingerprint gate passed, which is the whole point of calling this
     // before anything is ever submitted.
     // It also matches what the network table says that network runs.
+    let NetworkFingerprint::ImageIds {
+        authenticated_transfer,
+        pinata,
+    } = network::DEFAULT.fingerprint
+    else {
+        panic!("the legacy testnet is gated on compiled ImageIDs");
+    };
     assert_eq!(
-        info.program_fingerprint.pinata,
-        network::DEFAULT.programs.pinata
-    );
-    assert_eq!(
-        info.program_fingerprint.authenticated_transfer,
-        network::DEFAULT.programs.authenticated_transfer
+        info.program_fingerprint,
+        ProgramFingerprint::ImageIds {
+            authenticated_transfer: authenticated_transfer.to_owned(),
+            pinata: pinata.to_owned(),
+        }
     );
 
     // Genesis difficulty is 3. A different value is not necessarily wrong, but
     // it is a protocol change we want to notice rather than mine through.
     assert_eq!(
-        info.difficulty_bytes, 3,
+        info.difficulty_bytes,
+        Some(3),
         "difficulty changed from the pinned genesis value"
     );
-    assert_eq!(info.effective_difficulty_bits, 24);
+    assert_eq!(info.effective_difficulty_bits, Some(24));
 
     // The pool only ever moves in multiples of the prize.
     let pool = decimal(&info.pool_balance);
@@ -87,7 +97,7 @@ async fn faucet_info_matches_the_pinned_protocol() {
     );
 
     println!(
-        "pool={pool} claims_remaining={} difficulty={}",
+        "pool={pool} claims_remaining={} difficulty={:?}",
         info.claims_remaining, info.difficulty_bytes
     );
 }

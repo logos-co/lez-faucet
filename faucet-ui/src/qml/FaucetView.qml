@@ -6,11 +6,12 @@ import Logos.Theme
 import Logos.Controls
 import "FaucetFlow.js" as FaucetFlow
 
-// One screen, one address, one button, one credit.
+// One screen, one network, one address, one button, one credit.
 //
 // The faucet owns no account and holds no credential. It reads public chain
-// state, sends one unsigned transaction, and then either proves the recipient
-// gained exactly the prize or refuses to say it did.
+// state, makes one claim — an unsigned transaction on the legacy testnet, a
+// request to a hosted faucet service on the v0.3 testnet — and then either
+// proves the recipient gained exactly the prize or refuses to say it did.
 Rectangle {
     id: root
     color: Theme.palette.background
@@ -23,13 +24,27 @@ Rectangle {
 
     // -- network ------------------------------------------------------------
     //
-    // Which LEZ network this window is pointed at. The core's own report wins
-    // once it has answered, because that is the network it actually verified;
-    // until then, the backend's pinned constant.
+    // The backend's table of networks and which row it is pointed at. The row
+    // is the view's source for the prize, the unit and the shape of a claim;
+    // the core's own report wins for the name and explorer once it has
+    // answered, because that is the network it actually verified.
+    property var networks: []
+    property string selectedNetworkId: ""
+    property string networkSwitchError: ""
+    readonly property var network: FaucetFlow.findNetwork(networks, selectedNetworkId)
+        || FaucetFlow.networkView(null)
     readonly property string networkName: pool.networkName !== "" ? pool.networkName
         : (backend && backend.networkName ? String(backend.networkName) : "")
     readonly property string explorerUrl: pool.explorerUrl !== "" ? pool.explorerUrl
         : (backend && backend.explorerUrl ? String(backend.explorerUrl) : "")
+    readonly property string prizeDisplay: FaucetFlow.formatAmount(network.prize, network.decimals)
+    readonly property int networkIndex: {
+        for (var index = 0; index < networks.length; index += 1) {
+            if (networks[index].id === selectedNetworkId)
+                return index
+        }
+        return -1
+    }
 
     // -- pool ---------------------------------------------------------------
     property var pool: FaucetFlow.poolView(null)
@@ -76,23 +91,26 @@ Rectangle {
     readonly property bool addressUsable: FaucetFlow.isPlausibleAddressInput(addressInput)
     readonly property bool creditLive: creditStage !== ""
     readonly property bool poolBlocked: pool.known && !pool.canClaim
-    readonly property bool canRequest: bootstrapped && !creditLive && addressUsable && !poolBlocked
+    readonly property bool canRequest: bootstrapped && !creditLive && addressUsable
+        && !poolBlocked && network.prize !== ""
+    // Switching networks reconfigures the core, which refuses while any job
+    // is inside it — a read as much as a credit request.
+    readonly property bool canSwitchNetwork: bootstrapped && !creditLive
+        && poolJobId === "" && inspectJobId === "" && networks.length > 1
 
-    // -- the three lamps -----------------------------------------------------
+    // -- the lamps ------------------------------------------------------------
     //
     // The rail is drawn whether or not a claim is running, because its whole
     // point is to say what the five-minute step is *before* the button is
-    // pressed. -1 means nothing is lit: either no claim is live, or the core
-    // reported a phase this build does not recognise.
-    readonly property var stages: [
-        { title: qsTr("Solve"), detail: qsTr("Proof-of-work, usually seconds") },
-        { title: qsTr("Submit"), detail: qsTr("One unsigned claim, no key needed") },
-        { title: qsTr("Confirm"), detail: qsTr("Up to five minutes. Keep the app open.") }
-    ]
+    // pressed. Its shape depends on the network: three lamps for a Piñata
+    // claim, four for the faucet service. -1 means nothing is lit: either no
+    // claim is live, or the core reported a phase this build does not
+    // recognise.
+    readonly property var stages: FaucetFlow.stagesFor(network.mechanism)
     // The decision lives in FaucetFlow.railStage so that "a proven credit leaves
     // every lamp lit" is a tested rule rather than an accident of this binding.
     readonly property int currentStage: FaucetFlow.railStage(
-        panel, creditLive, creditPhase, stages.length)
+        panel, creditLive, creditPhase, stages.length, network.mechanism)
 
     // Addresses, hashes and shell commands are read character by character —
     // an l against a 1, a 0 against an O — so they are set in a fixed-pitch
@@ -152,6 +170,7 @@ Rectangle {
                 return
             }
             bootstrapped = true
+            syncNetwork()
             refreshPool()
             // A reloaded view rejoins a request that is already running. It
             // resumes by polling the existing job, and recovers the original
@@ -165,6 +184,47 @@ Rectangle {
             }
         }, function(error) {
             bootstrapError = String(error)
+        })
+    }
+
+    // ---- network selection -------------------------------------------------
+
+    // Read the table and the current row back from the backend. The backend
+    // is the only thing that moves the selection; this view never guesses.
+    function syncNetwork() {
+        if (!backend)
+            return
+        networks = FaucetFlow.parseNetworks(backend.networks)
+        selectedNetworkId = String(backend.selectedNetworkId || "")
+    }
+
+    // Point the app at another network. Everything the previous one
+    // established — pool reading, inspection, any result on screen — is about
+    // a different chain and is cleared before the new one is read.
+    function selectNetwork(id) {
+        if (!backend || !canSwitchNetwork || id === selectedNetworkId)
+            return
+        networkSwitchError = ""
+        watch(backend.selectNetwork(id), function(raw) {
+            var envelope = parseEnvelope(raw)
+            syncNetwork()
+            if (!envelope.ok) {
+                networkSwitchError = FaucetFlow.errorPresentation(envelope.error).title
+                return
+            }
+            pool = FaucetFlow.poolView(null)
+            poolError = ""
+            clearInspection()
+            panel = "none"
+            receipt = null
+            failure = null
+            unknownOutcome = null
+            statusText = ""
+            refreshPool()
+            inspectAddress()
+        }, function(error) {
+            networkSwitchError = String(error)
+            syncNetwork()
         })
     }
 
@@ -385,7 +445,7 @@ Rectangle {
             var outcome = FaucetFlow.jobOutcome(envelope)
             if (!FaucetFlow.isTerminalOutcome(outcome)) {
                 // A phase name is a state-machine label, never a sentence.
-                statusText = FaucetFlow.phaseSentence(envelope.phase)
+                statusText = FaucetFlow.phaseSentence(envelope.phase, network.mechanism)
                 creditPhase = String(envelope.phase || "")
                 cancelRequested = envelope.cancel_requested === true
                 cancellable = FaucetFlow.cancelAvailable(
@@ -412,7 +472,7 @@ Rectangle {
         creditPhase = ""
 
         if (outcome === "succeeded") {
-            var proven = FaucetFlow.receiptView(resultOf(envelope))
+            var proven = FaucetFlow.receiptView(resultOf(envelope), network.prize)
             if (proven) {
                 receipt = proven
                 panel = "receipt"
@@ -596,24 +656,62 @@ Rectangle {
             }
 
             LogosText {
-                text: qsTr("Enter a public LEZ testnet account and request 150 LEZ for it. Testnet LEZ has no real-world value.")
+                text: qsTr("Enter a public LEZ testnet account and request %1 LEZ for it. Testnet LEZ has no real-world value.")
+                    .arg(root.prizeDisplay)
                 textFormat: Text.PlainText
                 color: Theme.palette.textSecondary
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
 
-            // The network this build claims on. Stated up front, because an
-            // account on a different LEZ testnet is a different account.
+            // The network this window claims on, chosen up front, because an
+            // account on one LEZ testnet is not an account on the other. The
+            // choices are the backend's table and nothing else: there is no
+            // way to type a sequencer in.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spacing.medium
+                LogosText {
+                    text: qsTr("Network")
+                    textFormat: Text.PlainText
+                    font.pixelSize: Theme.typography.secondaryText
+                    font.weight: Theme.typography.weightMedium
+                    color: Theme.palette.textTertiary
+                }
+                ComboBox {
+                    id: networkSelector
+                    model: root.networks.map(function(row) { return row.name })
+                    currentIndex: root.networkIndex
+                    enabled: root.canSwitchNetwork
+                    Layout.preferredWidth: 240
+                    onActivated: function(index) {
+                        if (index >= 0 && index < root.networks.length)
+                            root.selectNetwork(root.networks[index].id)
+                    }
+                }
+                LogosText {
+                    visible: root.network.lezVersion !== ""
+                    text: qsTr("LEZ %1").arg(root.network.lezVersion)
+                    textFormat: Text.PlainText
+                    font.pixelSize: Theme.typography.secondaryText
+                    color: Theme.palette.textTertiary
+                }
+                Item { Layout.fillWidth: true }
+            }
             LogosText {
-                visible: root.networkName !== ""
-                text: root.pool.lezVersion !== ""
-                    ? qsTr("Network: %1 (LEZ %2)").arg(root.networkName).arg(root.pool.lezVersion)
-                    : qsTr("Network: %1").arg(root.networkName)
+                visible: root.network.mechanism !== ""
+                text: FaucetFlow.mechanismSentence(root.network.mechanism)
                 textFormat: Text.PlainText
                 font.pixelSize: Theme.typography.secondaryText
-                font.weight: Theme.typography.weightMedium
                 color: Theme.palette.textTertiary
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+            LogosText {
+                visible: root.networkSwitchError !== ""
+                text: root.networkSwitchError
+                textFormat: Text.PlainText
+                color: Theme.palette.error
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
@@ -643,7 +741,7 @@ Rectangle {
                     RowLayout {
                         Layout.fillWidth: true
                         LogosText {
-                            text: qsTr("Faucet pool")
+                            text: root.pool.isClaimApi ? qsTr("Faucet service") : qsTr("Faucet pool")
                             textFormat: Text.PlainText
                             font.pixelSize: Theme.typography.secondaryText
                             font.weight: Theme.typography.weightMedium
@@ -675,7 +773,7 @@ Rectangle {
                         Layout.fillWidth: true
                         spacing: Theme.spacing.small
                         LogosText {
-                            text: FaucetFlow.groupDigits(root.pool.poolBalance)
+                            text: FaucetFlow.formatAmount(root.pool.poolBalance, root.pool.decimals)
                             textFormat: Text.PlainText
                             font.pixelSize: Theme.typography.panelTitleText
                             font.weight: Theme.typography.weightBold
@@ -716,7 +814,7 @@ Rectangle {
                                 id: prizeBadge
                                 anchors.centerIn: parent
                                 text: qsTr("%1 LEZ / claim").arg(
-                                    FaucetFlow.groupDigits(root.pool.prizeAmount))
+                                    FaucetFlow.formatAmount(root.pool.prizeAmount, root.pool.decimals))
                                 textFormat: Text.PlainText
                                 font.pixelSize: Theme.typography.secondaryText
                                 font.weight: Theme.typography.weightMedium
@@ -745,7 +843,9 @@ Rectangle {
 
                     LogosText {
                         visible: root.pool.known
-                        text: qsTr("The pool is a finite, shared resource: everyone on the testnet claims from the same balance, so this figure moves without you.")
+                        text: root.pool.isClaimApi
+                            ? qsTr("The service pays from a small hot balance that is topped up from the team's mined supply, and it caps claims per account and per day. This figure moves without you.")
+                            : qsTr("The pool is a finite, shared resource: everyone on the testnet claims from the same balance, so this figure moves without you.")
                         textFormat: Text.PlainText
                         font.pixelSize: Theme.typography.secondaryText
                         color: Theme.palette.textTertiary
@@ -856,14 +956,19 @@ Rectangle {
                 LogosText {
                     visible: root.inspection !== null && root.inspection.balance !== ""
                     text: qsTr("Current balance %1 LEZ").arg(
-                        FaucetFlow.groupDigits(root.inspection ? root.inspection.balance : ""))
+                        FaucetFlow.formatAmount(root.inspection ? root.inspection.balance : "",
+                                                root.network.decimals))
                     textFormat: Text.PlainText
                     font.pixelSize: Theme.typography.secondaryText
                     color: Theme.palette.textSecondary
                     Layout.fillWidth: true
                 }
+                // The initialization command exists only on the legacy
+                // testnet; v0.3 has no initialization step, and the core
+                // sends none, but the panel is tied to the mechanism rather
+                // than to the field being empty.
                 LogosText {
-                    visible: root.inspection !== null
+                    visible: !root.network.isClaimApi && root.inspection !== null
                         && root.inspection.initializationCommand !== ""
                     text: root.inspection ? root.inspection.initializationCommand : ""
                     textFormat: Text.PlainText
@@ -873,7 +978,7 @@ Rectangle {
                     Layout.fillWidth: true
                 }
                 LogosButton {
-                    visible: root.inspection !== null
+                    visible: !root.network.isClaimApi && root.inspection !== null
                         && root.inspection.initializationCommand !== ""
                     text: qsTr("Copy command")
                     onClicked: root.copyInitializationCommand(
@@ -903,7 +1008,7 @@ Rectangle {
             // stock white (about 2.8:1, which fails AA on this fill).
             LogosButton {
                 id: requestButton
-                text: qsTr("Request 150 LEZ")
+                text: qsTr("Request %1 LEZ").arg(root.prizeDisplay)
                 enabled: root.canRequest
                 Layout.fillWidth: true
                 onClicked: root.requestCredit()
@@ -1120,7 +1225,8 @@ Rectangle {
                         spacing: Theme.spacing.small
                         LogosText {
                             text: qsTr("+%1 LEZ").arg(
-                                FaucetFlow.groupDigits(root.receipt ? root.receipt.amount : ""))
+                                FaucetFlow.formatAmount(root.receipt ? root.receipt.amount : "",
+                                                        root.network.decimals))
                             textFormat: Text.PlainText
                             font.pixelSize: Theme.typography.panelTitleText
                             font.weight: Theme.typography.weightBold
@@ -1147,8 +1253,10 @@ Rectangle {
                     }
                     LogosText {
                         text: qsTr("Balance %1 → %2 LEZ")
-                            .arg(FaucetFlow.groupDigits(root.receipt ? root.receipt.balanceBefore : ""))
-                            .arg(FaucetFlow.groupDigits(root.receipt ? root.receipt.balanceAfter : ""))
+                            .arg(FaucetFlow.formatAmount(root.receipt ? root.receipt.balanceBefore : "",
+                                                         root.network.decimals))
+                            .arg(FaucetFlow.formatAmount(root.receipt ? root.receipt.balanceAfter : "",
+                                                         root.network.decimals))
                         textFormat: Text.PlainText
                         font.pixelSize: Theme.typography.secondaryText
                         color: Theme.palette.textSecondary
@@ -1215,7 +1323,7 @@ Rectangle {
             }
 
             // Unproven outcome. Deliberately offers no retry: a second request
-            // while the first may still be pending is a second 150 LEZ.
+            // while the first may still be pending is a second prize.
             Rectangle {
                 visible: root.panel === "unknown" && root.unknownOutcome !== null
                 Layout.fillWidth: true
@@ -1257,8 +1365,9 @@ Rectangle {
                         visible: root.unknownOutcome !== null
                             && root.unknownOutcome.balanceBefore !== ""
                         text: qsTr("Balance before the claim: %1 LEZ").arg(
-                            FaucetFlow.groupDigits(
-                                root.unknownOutcome ? root.unknownOutcome.balanceBefore : ""))
+                            FaucetFlow.formatAmount(
+                                root.unknownOutcome ? root.unknownOutcome.balanceBefore : "",
+                                root.network.decimals))
                         textFormat: Text.PlainText
                         color: Theme.palette.text
                         Layout.fillWidth: true
@@ -1323,7 +1432,7 @@ Rectangle {
                         Layout.fillWidth: true
                     }
                     LogosText {
-                        visible: root.failure !== null
+                        visible: !root.network.isClaimApi && root.failure !== null
                             && root.failure.initializationCommand !== ""
                         text: root.failure ? root.failure.initializationCommand : ""
                         textFormat: Text.PlainText
@@ -1333,7 +1442,7 @@ Rectangle {
                         Layout.fillWidth: true
                     }
                     LogosButton {
-                        visible: root.failure !== null
+                        visible: !root.network.isClaimApi && root.failure !== null
                             && root.failure.initializationCommand !== ""
                         text: qsTr("Copy command")
                         onClicked: root.copyInitializationCommand(
@@ -1373,6 +1482,16 @@ Rectangle {
             LogosText {
                 visible: root.pool.poolAddress !== ""
                 text: qsTr("Pool account: %1").arg(root.pool.poolAddress)
+                textFormat: Text.PlainText
+                font.family: root.monoFamily
+                font.pixelSize: Theme.typography.secondaryText
+                color: Theme.palette.textMuted
+                elide: Text.ElideMiddle
+                Layout.fillWidth: true
+            }
+            LogosText {
+                visible: root.pool.claimApiUrl !== ""
+                text: qsTr("Faucet service: %1").arg(root.pool.claimApiUrl)
                 textFormat: Text.PlainText
                 font.family: root.monoFamily
                 font.pixelSize: Theme.typography.secondaryText

@@ -1,13 +1,23 @@
 //! The stateless LEZ Faucet client.
 //!
 //! This client owns no wallet, no key material and no files. It reads public
-//! chain state, builds one unsigned public transaction, submits it once, and
-//! then proves — or refuses to claim — that the recipient gained exactly the
-//! prize.
+//! chain state, makes exactly one claim, and then proves — or refuses to claim
+//! — that the recipient gained exactly the prize.
 //!
-//! A Piñata claim names both accounts as `PublicNoSign`, so the transaction
-//! carries no signatures and no nonces. There is consequently nothing to sign
-//! with and nothing to store.
+//! How the claim is made depends on the network ([`ClaimMechanism`]):
+//!
+//! - **Piñata** (legacy testnet): the client builds one unsigned public
+//!   transaction and submits it itself. A Piñata claim names both accounts as
+//!   `PublicNoSign`, so the transaction carries no signatures and no nonces;
+//!   there is consequently nothing to sign with and nothing to store.
+//! - **Claim API** (v0.3 testnet): the client asks a hosted claim service for
+//!   one drop, keyed by the same request key it uses for its own idempotency.
+//!   The service signs and pays for the transfer; the client never sees a key.
+//!
+//! Either way the proof of success is the client's own: it reads the balance
+//! before, watches for its transaction by hash, and requires the balance to
+//! land at exactly `before + prize`. A service's word that it paid is never
+//! enough on its own.
 
 use std::{
     collections::HashMap,
@@ -30,17 +40,15 @@ use serde::Serialize;
 use crate::{
     address::{parse_public_address, PublicAddress},
     error::{ApiError, ApiResult, DropPhase, ErrorCode},
-    network::{self, Network},
+    network::{self, ClaimMechanism, Network, NetworkFingerprint},
     solver::{self, Challenge},
+    v03::{ClaimApi, ClaimRecord, ClaimState, SequencerV03},
 };
 
-/// The exact prize the deployed Piñata guest pays per successful claim.
-///
-/// Every enabled network claims through the Piñata program compiled into this
-/// build, so there is one prize; `network::tests` holds each network to it.
-/// A literal rather than `network::DEFAULT.prize()` so cbindgen keeps emitting
-/// it into the C header.
-pub const PRIZE: u128 = 150;
+/// How many consecutive "no such request" answers from the claim service are
+/// needed, after a lost `POST` response, before concluding the request was
+/// never recorded. One answer could race a slow server still writing the row.
+const NOT_RECORDED_CONFIRMATIONS: usize = 3;
 
 /// Sequencer of the network a client targets by default.
 pub const DEFAULT_SEQUENCER_URL: &str = network::DEFAULT.sequencer_url;
@@ -75,10 +83,18 @@ impl Default for FaucetPolicy {
     }
 }
 
+/// The program IDs the sequencer was verified to run, as 32-byte
+/// little-endian hex. Which set depends on the network.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ProgramFingerprint {
-    pub authenticated_transfer: String,
-    pub pinata: String,
+#[serde(untagged)]
+pub enum ProgramFingerprint {
+    /// The v0.2.x builtins a Piñata claim depends on.
+    ImageIds {
+        authenticated_transfer: String,
+        pinata: String,
+    },
+    /// The v0.3 privacy-preserving circuit.
+    PrivacyPreservingCircuit { privacy_preserving_circuit: String },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -87,16 +103,32 @@ pub struct FaucetInfo {
     pub network: &'static str,
     /// Human-readable network name, for the UI.
     pub network_name: &'static str,
-    /// Upstream LEZ tag that network runs and this build is pinned to.
+    /// Upstream LEZ tag that network runs.
     pub lez_version: &'static str,
     pub explorer_url: &'static str,
     pub sequencer_url: String,
-    pub pinata_account: PublicAddress,
+    /// `pinata` or `claim_api`.
+    pub claim_mechanism: &'static str,
+    /// Decimal places between the smallest unit and one LEZ, for display.
+    pub decimals: u8,
+    /// Root of the claim service, on a `claim_api` network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_api_url: Option<&'static str>,
+    /// The pool account, on a `pinata` network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinata_account: Option<PublicAddress>,
+    /// Exact decimal strings of the smallest unit. `pool_balance` is the
+    /// Piñata pool or the claim service's hot balance.
     pub prize_amount: String,
     pub pool_balance: String,
     pub claims_remaining: String,
-    pub difficulty_bytes: u8,
-    pub effective_difficulty_bits: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub difficulty_bytes: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_difficulty_bits: Option<u32>,
+    /// Whether the claim service's operator has paused it. Always false on a
+    /// `pinata` network, which has no operator.
+    pub paused: bool,
     pub can_claim: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<&'static str>,
@@ -125,9 +157,14 @@ pub struct RecipientInspection {
 
 /// Proof that one specific claim credited one specific recipient.
 ///
-/// `tx_hash` is not optional. The client computes the transaction hash locally
-/// before submitting, so it always knows which transaction is its own; a
-/// receipt without one would be an assertion of success the client cannot back.
+/// `tx_hash` is not optional. On a Piñata network the client computes the
+/// transaction hash locally before submitting; on a claim-service network it
+/// is the hash the service reported and the client then observed on chain
+/// itself. Either way the client knows which transaction is its own; a receipt
+/// without one would be an assertion of success the client cannot back.
+///
+/// `amount` is in the network's smallest unit. `stale_challenge_retries` is
+/// always 0 on a claim-service network, which has no proof-of-work race.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DropReceipt {
     pub request_key: String,
@@ -424,8 +461,16 @@ pub fn classify(
 
 // ---- client ----------------------------------------------------------------
 
+/// The raw transports a claim-service network needs.
+struct V03 {
+    rpc: SequencerV03,
+    claim_api: ClaimApi,
+}
+
 pub struct FaucetClient {
     rpc: SequencerClient,
+    /// Present exactly when `network.claim` is [`ClaimMechanism::ClaimApi`].
+    v03: Option<V03>,
     network: &'static Network,
     sequencer_url: String,
     policy: FaucetPolicy,
@@ -449,7 +494,7 @@ pub struct FaucetClient {
     /// Request-key idempotency alone does not protect these. A user who is
     /// told "outcome unknown", re-checks a balance that has not moved yet, and
     /// clicks again produces a *fresh* key, which no tombstone covers and no
-    /// live job blocks — and a second 150 LEZ is sent while the first claim is
+    /// live job blocks — and a second prize is sent while the first claim is
     /// still pending. Entries are never removed for the life of the process.
     unreconciled: Mutex<std::collections::HashSet<String>>,
 }
@@ -461,6 +506,21 @@ impl FaucetClient {
     /// is accepted, except for loopback, which tests and local development
     /// need.
     pub fn new(sequencer_url: &str) -> ApiResult<Self> {
+        Self::build(sequencer_url, None)
+    }
+
+    /// Build a client for an explicit network row.
+    ///
+    /// For tests and tooling, never the FFI, which only ever takes a sequencer
+    /// URL. The row's sequencer host must still be loopback or the host of an
+    /// enabled network: this lets a test point a claim-service row at a mock
+    /// server on loopback, and a live test override the service root while
+    /// the sequencer stays pinned. It never opens a new sequencer host.
+    pub fn for_network(network: &'static Network) -> ApiResult<Self> {
+        Self::build(network.sequencer_url, Some(network))
+    }
+
+    fn build(sequencer_url: &str, explicit: Option<&'static Network>) -> ApiResult<Self> {
         let parsed = url::Url::parse(sequencer_url).map_err(|_| {
             ApiError::new(
                 ErrorCode::InvalidSequencerUrl,
@@ -492,15 +552,25 @@ impl FaucetClient {
         // since a localnet runs the same pinned programs; release builds
         // reach exactly the hosts in `network::ENABLED`.
         let host = parsed.host_str().unwrap_or_default();
-        let network = if host_is_loopback {
-            &network::DEFAULT
-        } else {
-            network::for_host(host).ok_or_else(|| {
-                ApiError::new(
-                    ErrorCode::InvalidSequencerUrl,
-                    "That sequencer is not a LEZ testnet this app is built for.",
-                )
-            })?
+        let not_a_target = || {
+            ApiError::new(
+                ErrorCode::InvalidSequencerUrl,
+                "That sequencer is not a LEZ testnet this app is built for.",
+            )
+        };
+        let network = match explicit {
+            Some(network) if host_is_loopback => network,
+            Some(network) => {
+                // An explicit row may only ever name an enabled host.
+                if !network.sequencer_host.eq_ignore_ascii_case(host)
+                    || network::for_host(host).is_none()
+                {
+                    return Err(not_a_target());
+                }
+                network
+            }
+            None if host_is_loopback => &network::DEFAULT,
+            None => network::for_host(host).ok_or_else(not_a_target)?,
         };
 
         let rpc = SequencerClientBuilder::default()
@@ -512,8 +582,17 @@ impl FaucetClient {
                 )
             })?;
 
+        let v03 = match network.claim {
+            ClaimMechanism::Pinata { .. } => None,
+            ClaimMechanism::ClaimApi { base_url, .. } => Some(V03 {
+                rpc: SequencerV03::new(parsed.clone())?,
+                claim_api: ClaimApi::new(base_url)?,
+            }),
+        };
+
         Ok(Self {
             rpc,
+            v03,
             network,
             sequencer_url: parsed.to_string(),
             policy: FaucetPolicy::default(),
@@ -560,10 +639,50 @@ impl FaucetClient {
             .map_err(|error| ApiError::from_rpc(&format!("Reading the {what}"), &error))
     }
 
-    /// Verify the deployed builtin program IDs match the ones pinned at build
-    /// time. A mismatch means this app was built against a different LEZ than
-    /// the one deployed, and nothing after it can be trusted.
+    fn v03(&self) -> ApiResult<&V03> {
+        self.v03
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("this network has no claim service transport"))
+    }
+
+    /// Verify the deployed program IDs match the ones this build expects. A
+    /// mismatch means this app was built for a different LEZ than the one
+    /// deployed, and nothing after it can be trusted.
     async fn verify_fingerprint(&self) -> ApiResult<ProgramFingerprint> {
+        match self.network.fingerprint {
+            NetworkFingerprint::ImageIds { .. } => self.verify_compiled_fingerprint().await,
+            NetworkFingerprint::PpcImageId(expected) => self.verify_ppc_fingerprint(expected).await,
+        }
+    }
+
+    /// The v0.3 sequencer reports one program, the privacy-preserving
+    /// circuit. This build compiles no v0.3 program, so the comparison is
+    /// against the ImageID recorded in the network row.
+    async fn verify_ppc_fingerprint(&self, expected: &str) -> ApiResult<ProgramFingerprint> {
+        let remote = self.v03()?.rpc.get_program_ids().await?;
+        let deployed = remote
+            .get("privacy_preserving_circuit")
+            .map(|words| program_id_hex(*words))
+            .ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::ProgramFingerprintMismatch,
+                    "The sequencer did not report a privacy_preserving_circuit program ID.",
+                )
+            })?;
+        if deployed != expected {
+            return Err(ApiError::new(
+                ErrorCode::ProgramFingerprintMismatch,
+                "This app was built for a different version of the LEZ v0.3 testnet. Update the app.",
+            ));
+        }
+        Ok(ProgramFingerprint::PrivacyPreservingCircuit {
+            privacy_preserving_circuit: deployed,
+        })
+    }
+
+    /// The legacy builtins, compared against the ELFs compiled into this
+    /// build — the comparison the Piñata claim actually depends on.
+    async fn verify_compiled_fingerprint(&self) -> ApiResult<ProgramFingerprint> {
         let remote = self
             .rpc
             .get_program_ids()
@@ -593,7 +712,7 @@ impl FaucetClient {
             }
         }
 
-        Ok(ProgramFingerprint {
+        Ok(ProgramFingerprint::ImageIds {
             authenticated_transfer: program_id_hex(programs::authenticated_transfer().id()),
             pinata: program_id_hex(programs::pinata().id()),
         })
@@ -618,13 +737,21 @@ impl FaucetClient {
     }
 
     pub async fn get_info(&self) -> ApiResult<FaucetInfo> {
+        match self.network.claim {
+            ClaimMechanism::Pinata { .. } => self.pinata_info().await,
+            ClaimMechanism::ClaimApi { .. } => self.claim_api_info().await,
+        }
+    }
+
+    async fn pinata_info(&self) -> ApiResult<FaucetInfo> {
         let fingerprint = self.verify_fingerprint().await?;
         let (pinata, challenge) = self.pinata_state().await?;
+        let prize = self.network.prize();
 
         let pool_balance = pinata.balance;
-        let claims_remaining = pool_balance / PRIZE;
+        let claims_remaining = pool_balance / prize;
         let unsupported = challenge.ensure_supported().is_err();
-        let depleted = pool_balance < PRIZE;
+        let depleted = pool_balance < prize;
 
         // Order matters for the message the user sees: a depleted pool is the
         // more actionable explanation, so report it first.
@@ -642,12 +769,61 @@ impl FaucetClient {
             lez_version: self.network.lez_version,
             explorer_url: self.network.explorer_url,
             sequencer_url: self.sequencer_url.clone(),
-            pinata_account: PublicAddress::new(system_accounts::pinata_account_id()),
-            prize_amount: PRIZE.to_string(),
+            claim_mechanism: self.network.claim_mechanism(),
+            decimals: self.network.decimals,
+            claim_api_url: None,
+            pinata_account: Some(PublicAddress::new(system_accounts::pinata_account_id())),
+            prize_amount: prize.to_string(),
             pool_balance: pool_balance.to_string(),
             claims_remaining: claims_remaining.to_string(),
-            difficulty_bytes: challenge.difficulty,
-            effective_difficulty_bits: u32::from(challenge.difficulty) * 8,
+            difficulty_bytes: Some(challenge.difficulty),
+            effective_difficulty_bits: Some(u32::from(challenge.difficulty) * 8),
+            paused: false,
+            can_claim: blocked_reason.is_none(),
+            blocked_reason,
+            program_fingerprint: fingerprint,
+        })
+    }
+
+    /// Status of a claim-service network: the fingerprint gate first, then
+    /// the service's own report. The hot balance plays the pool's part.
+    async fn claim_api_info(&self) -> ApiResult<FaucetInfo> {
+        let fingerprint = self.verify_fingerprint().await?;
+        let info = self.v03()?.claim_api.info().await?;
+        let prize = self.network.prize();
+
+        let unreadable = || ApiError::internal("The faucet service reported an unreadable amount.");
+        let hot_balance: u128 = info.hot_balance.parse().map_err(|_| unreadable())?;
+        let service_prize: u128 = info.prize.parse().map_err(|_| unreadable())?;
+
+        // The row is what the receipt enforces: a service paying a different
+        // amount would make every claim unattributable, so refuse up front.
+        let blocked_reason = if info.paused {
+            Some("faucet_paused")
+        } else if service_prize != prize || info.decimals != self.network.decimals {
+            Some("prize_mismatch")
+        } else if info.claims_remaining == 0 || hot_balance < prize {
+            Some("pool_depleted")
+        } else {
+            None
+        };
+
+        Ok(FaucetInfo {
+            network: self.network.id,
+            network_name: self.network.display_name,
+            lez_version: self.network.lez_version,
+            explorer_url: self.network.explorer_url,
+            sequencer_url: self.sequencer_url.clone(),
+            claim_mechanism: self.network.claim_mechanism(),
+            decimals: self.network.decimals,
+            claim_api_url: self.network.claim_api_url(),
+            pinata_account: None,
+            prize_amount: prize.to_string(),
+            pool_balance: hot_balance.to_string(),
+            claims_remaining: info.claims_remaining.to_string(),
+            difficulty_bytes: None,
+            effective_difficulty_bits: None,
+            paused: info.paused,
             can_claim: blocked_reason.is_none(),
             blocked_reason,
             program_fingerprint: fingerprint,
@@ -656,8 +832,29 @@ impl FaucetClient {
 
     pub async fn inspect_recipient(&self, address: &str) -> ApiResult<RecipientInspection> {
         let (account_id, recipient) = parse_public_address(address)?;
-        let account = self.account(account_id, "recipient account").await?;
-        Ok(inspect(recipient, &account))
+        match self.network.claim {
+            ClaimMechanism::Pinata { .. } => {
+                let account = self.account(account_id, "recipient account").await?;
+                Ok(inspect(recipient, &account))
+            }
+            // v0.3 has no initialization step and no owning program to check:
+            // any public account id can receive a native transfer, and one
+            // that has never been seen simply has a balance of 0.
+            ClaimMechanism::ClaimApi { .. } => {
+                let balance = self
+                    .v03()?
+                    .rpc
+                    .get_account_balance(&recipient.account_id)
+                    .await?;
+                Ok(RecipientInspection {
+                    recipient,
+                    eligibility: Eligibility::Eligible,
+                    balance: Some(balance.to_string()),
+                    program_owner: None,
+                    initialization_command: None,
+                })
+            }
+        }
     }
 
     // -- the drop ------------------------------------------------------------
@@ -700,9 +897,16 @@ impl FaucetClient {
         // submission still leaves the key un-replayable in this session.
         self.reserve(request_key, &recipient)?;
 
-        let outcome = self
-            .run_drop(account_id, &recipient, request_key, token)
-            .await;
+        let outcome = match self.network.claim {
+            ClaimMechanism::Pinata { .. } => {
+                self.run_pinata_drop(account_id, &recipient, request_key, token)
+                    .await
+            }
+            ClaimMechanism::ClaimApi { .. } => {
+                self.run_claim_api_drop(&recipient, request_key, token)
+                    .await
+            }
+        };
         self.record(request_key, &outcome);
         outcome
     }
@@ -787,13 +991,14 @@ impl FaucetClient {
         }
     }
 
-    async fn run_drop(
+    async fn run_pinata_drop(
         &self,
         account_id: AccountId,
         recipient: &PublicAddress,
         request_key: &str,
         token: u64,
     ) -> ApiResult<DropReceipt> {
+        let prize = self.network.prize();
         // Each step publishes its phase before starting, so a poller on
         // another thread sees where the drop is rather than where it was. The
         // guard clears the channel on every exit path, so a finished token
@@ -836,7 +1041,7 @@ impl FaucetClient {
         let inspection = inspect(recipient.clone(), &recipient_account);
         require_eligible(&inspection)?;
         let mut balance_before = recipient_account.balance;
-        let mut expected = balance_before.checked_add(PRIZE).ok_or_else(|| {
+        let mut expected = balance_before.checked_add(prize).ok_or_else(|| {
             ApiError::new(
                 ErrorCode::RecipientBalanceOverflow,
                 "That account's balance cannot accept the prize.",
@@ -853,7 +1058,7 @@ impl FaucetClient {
             challenge
                 .ensure_supported()
                 .map_err(|error| error.at(DropPhase::FetchingChallenge))?;
-            require_pool_can_pay(pinata.balance)?;
+            require_pool_can_pay(pinata.balance, prize)?;
 
             stop(submitted)?;
             at(DropPhase::Solving);
@@ -884,7 +1089,7 @@ impl FaucetClient {
             if latest != challenge {
                 continue;
             }
-            require_pool_can_pay(pinata.balance)?;
+            require_pool_can_pay(pinata.balance, prize)?;
 
             // The recipient is re-read here too, so `balance_before` is the
             // value at the moment of submission. Using the value captured
@@ -899,7 +1104,7 @@ impl FaucetClient {
                 // The baseline moved. Start over rather than measure a credit
                 // against a stale reference point; nothing has been sent yet.
                 balance_before = current.balance;
-                expected = balance_before.checked_add(PRIZE).ok_or_else(|| {
+                expected = balance_before.checked_add(prize).ok_or_else(|| {
                     ApiError::new(
                         ErrorCode::RecipientBalanceOverflow,
                         "That account's balance cannot accept the prize.",
@@ -950,7 +1155,7 @@ impl FaucetClient {
                     return Ok(DropReceipt {
                         request_key: request_key.to_owned(),
                         recipient: recipient.clone(),
-                        amount: PRIZE.to_string(),
+                        amount: prize.to_string(),
                         balance_before: balance_before.to_string(),
                         balance_after: expected.to_string(),
                         tx_hash: tx_hash.to_string(),
@@ -1033,8 +1238,8 @@ impl FaucetClient {
                         "Another transaction changed this account's balance while the claim was in flight, so this credit cannot be attributed to this request.",
                         recipient,
                         balance_before,
-                        tx_hash,
-                        &submitted,
+                        Some(&tx_hash.to_string()),
+                        Some(&submitted),
                     )));
                 }
                 ClaimDecision::Continue => {}
@@ -1045,14 +1250,289 @@ impl FaucetClient {
                     "The claim was submitted but its outcome could not be confirmed in time.",
                     recipient,
                     balance_before,
-                    tx_hash,
-                    &submitted,
+                    Some(&tx_hash.to_string()),
+                    Some(&submitted),
                 )));
             }
             tokio::time::sleep(interval).await;
             interval = (interval * 2).min(max_interval);
         }
     }
+
+    // -- the claim-service drop ---------------------------------------------
+
+    /// One drop through the hosted claim service.
+    ///
+    /// Same shape as the Piñata drop with the proof-of-work removed: verify
+    /// the network, read the baseline, ask the service once, then prove the
+    /// outcome on chain. The service is asked under this request's own key,
+    /// so a repeat of the same key can never make it pay twice either.
+    async fn run_claim_api_drop(
+        &self,
+        recipient: &PublicAddress,
+        request_key: &str,
+        token: u64,
+    ) -> ApiResult<DropReceipt> {
+        let _phase = PhaseGuard {
+            channel: &self.phase_channel,
+            token,
+        };
+        let at = |phase: DropPhase| self.phase_channel.publish(token, phase);
+        at(DropPhase::ValidatingInput);
+        let prize = self.network.prize();
+        let transport = self.v03()?;
+
+        // Honoured only before the request is sent. Once the service has been
+        // asked, the outcome can only be reconciled, never cancelled, so no
+        // path after `Submitting` consults this again.
+        let stop = || {
+            if self.cancellation.is_cancelled(token) {
+                Err(ApiError::new(
+                    ErrorCode::Cancelled,
+                    "The request was cancelled before anything was submitted.",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+
+        stop()?;
+        at(DropPhase::VerifyingPrograms);
+        self.verify_fingerprint()
+            .await
+            .map_err(|error| error.at(DropPhase::VerifyingPrograms))?;
+
+        stop()?;
+        at(DropPhase::InspectingRecipient);
+        let balance_before = transport
+            .rpc
+            .get_account_balance(&recipient.account_id)
+            .await
+            .map_err(|error| error.at(DropPhase::InspectingRecipient))?;
+        let expected = balance_before.checked_add(prize).ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::RecipientBalanceOverflow,
+                "That account's balance cannot accept the prize.",
+            )
+            .at(DropPhase::InspectingRecipient)
+        })?;
+
+        // Last point at which cancelling is free.
+        stop()?;
+        at(DropPhase::Submitting);
+        let first = match transport
+            .claim_api
+            .claim(&recipient.address, request_key)
+            .await
+        {
+            Ok(record) => Some(record),
+            // The service answered and refused. It records nothing on a
+            // refusal, so this is terminal and nothing was sent.
+            Err(error) if error.code != ErrorCode::ClaimApiUnavailable => {
+                return Err(error.at(DropPhase::Submitting));
+            }
+            // The answer was lost. The request may or may not have been
+            // recorded; only the service's own ledger can say, and it is
+            // asked below before anything is concluded.
+            Err(_) => None,
+        };
+
+        at(DropPhase::Reconciling);
+        match self
+            .reconcile_claim_api(
+                transport,
+                recipient,
+                request_key,
+                first,
+                balance_before,
+                expected,
+            )
+            .await?
+        {
+            ClaimApiOutcome::Credited { tx_hash } => Ok(DropReceipt {
+                request_key: request_key.to_owned(),
+                recipient: recipient.clone(),
+                amount: prize.to_string(),
+                balance_before: balance_before.to_string(),
+                balance_after: expected.to_string(),
+                tx_hash,
+                stale_challenge_retries: 0,
+            }),
+            ClaimApiOutcome::NotRecorded => Err(ApiError::new(
+                ErrorCode::ClaimApiUnavailable,
+                "The faucet service could not be reached and has no record of this request. Nothing was sent.",
+            )
+            .at(DropPhase::Submitting)),
+            ClaimApiOutcome::Rejected(error) => Err(error.at(DropPhase::Submitting)),
+            ClaimApiOutcome::Unknown(error) => {
+                self.mark_unreconciled(&recipient.account_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// Poll the service for the hash and the chain for the proof, until the
+    /// outcome is proven or the deadline makes it honestly unknown.
+    ///
+    /// The service's `included` is never taken as proof. Its transaction hash
+    /// is what lets the client look for its own transaction; the credit is
+    /// then [`classify`]'d from the client's own two reads exactly as on the
+    /// Piñata path, with no challenge to consult.
+    async fn reconcile_claim_api(
+        &self,
+        transport: &V03,
+        recipient: &PublicAddress,
+        request_key: &str,
+        first: Option<ClaimRecord>,
+        balance_before: u128,
+        expected: u128,
+    ) -> ApiResult<ClaimApiOutcome> {
+        let deadline = tokio::time::Instant::now() + self.policy.reconciliation_deadline;
+        let mut interval = self.policy.poll_interval;
+        let max_interval = Duration::from_secs(30);
+
+        let mut record = first;
+        // Latched the first time the service names it; a hash, once sent,
+        // does not change.
+        let mut tx_hash: Option<String> = None;
+        let mut not_recorded = 0_usize;
+
+        loop {
+            if record.is_none() {
+                match transport.claim_api.status(request_key).await {
+                    Ok(latest) => {
+                        not_recorded = 0;
+                        record = Some(latest);
+                    }
+                    Err(error) if error.code == ErrorCode::UnknownJob => {
+                        // The service has no row under this key. After a lost
+                        // `POST` that is the normal "never recorded" answer,
+                        // but one read could race a slow write, so it is only
+                        // believed when it repeats and no hash was ever seen.
+                        not_recorded += 1;
+                        if tx_hash.is_none() && not_recorded >= NOT_RECORDED_CONFIRMATIONS {
+                            return Ok(ClaimApiOutcome::NotRecorded);
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+
+            if let Some(latest) = record.take() {
+                if tx_hash.is_none() {
+                    tx_hash = latest.tx_hash.clone().filter(|hash| is_tx_hash(hash));
+                }
+                if latest.status == ClaimState::Failed && tx_hash.is_none() {
+                    // The service gave up before signing anything. Terminal,
+                    // and honest to say nothing was sent — except where the
+                    // service itself does not know, which is never a reason
+                    // to believe nothing happened.
+                    let code = latest.error.map(|error| error.code).unwrap_or_default();
+                    return Ok(match code.as_str() {
+                        "outcome_unknown" => ClaimApiOutcome::Unknown(unknown_outcome(
+                            "The faucet service sent a transfer but lost track of it, so this app cannot confirm what became of it.",
+                            recipient,
+                            balance_before,
+                            None,
+                            None,
+                        )),
+                        "submission_rejected" => ClaimApiOutcome::Rejected(ApiError::new(
+                            ErrorCode::SubmissionRejected,
+                            "The LEZ testnet sequencer rejected the faucet service's transfer. Nothing was sent.",
+                        )),
+                        "hot_balance_low" => ClaimApiOutcome::Rejected(ApiError::new(
+                            ErrorCode::PoolDepleted,
+                            "The faucet service's hot balance is too low to pay a claim. Nothing was sent.",
+                        )),
+                        _ => ClaimApiOutcome::Rejected(ApiError::internal(
+                            "The faucet service could not complete the request. Nothing was sent.",
+                        )),
+                    });
+                }
+                // Queued, submitted, included, or failed after sending: in
+                // every case the chain is the only thing that can prove the
+                // credit, so fall through to the client's own reads.
+            }
+
+            // Inclusion first, then balance, for the same reason as the
+            // Piñata path: a balance read after a confirmed inclusion reflects
+            // the state at or after it.
+            let included = match tx_hash.as_deref() {
+                Some(hash) => transport.rpc.is_transaction_included(hash).await.ok(),
+                None => None,
+            };
+            let balance = transport
+                .rpc
+                .get_account_balance(&recipient.account_id)
+                .await
+                .ok();
+
+            match classify(
+                balance_before,
+                expected,
+                ClaimObservation {
+                    included,
+                    balance,
+                    // No proof-of-work race here, so nothing can ever prove a
+                    // lost one: a retry is never authorised on this path.
+                    challenge_rotated: None,
+                },
+            ) {
+                ClaimDecision::Credited => {
+                    // `Credited` requires `included == Some(true)`, which
+                    // requires a hash to have been looked up.
+                    let Some(tx_hash) = tx_hash else {
+                        return Ok(ClaimApiOutcome::Unknown(unknown_outcome(
+                            "The credit landed but the faucet service never reported its transaction hash.",
+                            recipient,
+                            balance_before,
+                            None,
+                            None,
+                        )));
+                    };
+                    return Ok(ClaimApiOutcome::Credited { tx_hash });
+                }
+                ClaimDecision::Unattributable => {
+                    return Ok(ClaimApiOutcome::Unknown(unknown_outcome(
+                        "Another transaction changed this account's balance while the claim was in flight, so this credit cannot be attributed to this request.",
+                        recipient,
+                        balance_before,
+                        tx_hash.as_deref(),
+                        None,
+                    )));
+                }
+                ClaimDecision::LostRace | ClaimDecision::Continue => {}
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(ClaimApiOutcome::Unknown(unknown_outcome(
+                    "The faucet service accepted the request but its outcome could not be confirmed in time.",
+                    recipient,
+                    balance_before,
+                    tx_hash.as_deref(),
+                    None,
+                )));
+            }
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(max_interval);
+        }
+    }
+}
+
+/// A transaction hash as the v0.3 sequencer and the claim service spell it.
+fn is_tx_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+enum ClaimApiOutcome {
+    Credited {
+        tx_hash: String,
+    },
+    /// The service never recorded the request, so nothing was sent.
+    NotRecorded,
+    /// The service recorded the request and gave up before sending anything.
+    Rejected(ApiError),
+    Unknown(ApiError),
 }
 
 /// RAII holder for the single-mutating-operation permit.
@@ -1166,8 +1646,8 @@ fn require_eligible(inspection: &RecipientInspection) -> ApiResult<()> {
 /// makes the guest panic and the transaction is rejected outright, whereas a
 /// stale solution is included and quietly does nothing. Conflating the two
 /// would let the client mine forever against an empty pool.
-fn require_pool_can_pay(pool_balance: u128) -> ApiResult<()> {
-    if pool_balance < PRIZE {
+fn require_pool_can_pay(pool_balance: u128, prize: u128) -> ApiResult<()> {
+    if pool_balance < prize {
         return Err(ApiError::new(
             ErrorCode::PoolDepleted,
             "The faucet pool is empty. No more testnet LEZ can be claimed until it is refilled.",
@@ -1180,28 +1660,37 @@ fn unknown_outcome(
     message: &str,
     recipient: &PublicAddress,
     balance_before: u128,
-    tx_hash: HashType,
-    submitted: &Challenge,
+    tx_hash: Option<&str>,
+    submitted: Option<&Challenge>,
 ) -> ApiError {
     // The view has to be able to tell the user exactly which account is in
     // doubt and what its balance was beforehand, so that they can check it
     // themselves. Carrying the canonical recipient here means the view never
-    // has to fall back on echoing whatever the user typed.
+    // has to fall back on echoing whatever the user typed. The hash is absent
+    // only when a claim service never reported one.
+    let mut details = serde_json::json!({
+        "outcome": "unknown",
+        "recipient": recipient,
+        "balance_before": balance_before.to_string(),
+    });
+    if let Some(tx_hash) = tx_hash {
+        details["tx_hash"] = serde_json::Value::String(tx_hash.to_owned());
+    }
+    if let Some(submitted) = submitted {
+        details["submitted_challenge_fingerprint"] =
+            serde_json::Value::String(submitted.fingerprint());
+    }
     ApiError::new(ErrorCode::OutcomeUnknown, message)
         .at(DropPhase::Reconciling)
-        .with_details(serde_json::json!({
-            "outcome": "unknown",
-            "recipient": recipient,
-            "balance_before": balance_before.to_string(),
-            "tx_hash": tx_hash.to_string(),
-            "submitted_challenge_fingerprint": submitted.fingerprint(),
-        }))
+        .with_details(details)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The legacy prize, which the Piñata arithmetic below is written for.
+    const PRIZE: u128 = network::LEZ_LEGACY_TESTNET.prize();
     const BEFORE: u128 = 6_000;
     const EXPECTED: u128 = BEFORE + PRIZE;
 
@@ -1366,6 +1855,7 @@ mod tests {
     #[test]
     fn sequencer_url_must_be_https_outside_loopback() {
         assert!(FaucetClient::new("https://testnet-legacy.lez.logos.co").is_ok());
+        assert!(FaucetClient::new("https://testnet.lez.logos.co").is_ok());
         assert!(FaucetClient::new("http://localhost:3040").is_ok());
         assert!(FaucetClient::new("http://127.0.0.1:3040").is_ok());
         for bad in [
@@ -1379,9 +1869,8 @@ mod tests {
             "https://evil.example.com",
             "https://testnet-legacy.lez.logos.co.evil.example",
             "https://user:pw@testnet-legacy.lez.logos.co",
-            // The v0.3.x main testnet has no Piñata program; this build cannot
-            // claim there, so it must not pretend to connect.
-            "https://testnet.lez.logos.co",
+            "https://user:pw@testnet.lez.logos.co",
+            "http://testnet.lez.logos.co",
         ] {
             let error = FaucetClient::new(bad)
                 .err()
@@ -1453,15 +1942,65 @@ mod tests {
 
     #[test]
     fn the_pool_gate_matches_the_guests_arithmetic() {
-        assert!(require_pool_can_pay(PRIZE).is_ok());
+        assert!(require_pool_can_pay(PRIZE, PRIZE).is_ok());
         assert_eq!(
-            require_pool_can_pay(PRIZE - 1).unwrap_err().code,
+            require_pool_can_pay(PRIZE - 1, PRIZE).unwrap_err().code,
             ErrorCode::PoolDepleted
         );
         assert_eq!(
-            require_pool_can_pay(0).unwrap_err().code,
+            require_pool_can_pay(0, PRIZE).unwrap_err().code,
             ErrorCode::PoolDepleted
         );
+    }
+
+    #[test]
+    fn each_client_carries_its_networks_mechanism() {
+        let legacy = FaucetClient::new("https://testnet-legacy.lez.logos.co").unwrap();
+        assert_eq!(legacy.network().id, "lez-legacy-testnet");
+        assert!(legacy.v03.is_none());
+
+        let v03 = FaucetClient::new("https://testnet.lez.logos.co").unwrap();
+        assert_eq!(v03.network().id, "lez-v03-testnet");
+        assert!(v03.v03.is_some());
+
+        // Loopback is the default network unless a test says otherwise.
+        let local = FaucetClient::new("http://127.0.0.1:3040").unwrap();
+        assert_eq!(local.network().id, network::DEFAULT.id);
+    }
+
+    #[test]
+    fn an_explicit_row_can_never_open_a_new_sequencer_host() {
+        let rogue: &'static Network = Box::leak(Box::new(Network {
+            sequencer_url: "https://evil.example.com",
+            sequencer_host: "evil.example.com",
+            ..network::LEZ_V03_TESTNET
+        }));
+        assert_eq!(
+            FaucetClient::for_network(rogue)
+                .err()
+                .map(|error| error.code),
+            Some(ErrorCode::InvalidSequencerUrl)
+        );
+        // The real rows, and a loopback row, are fine.
+        assert!(FaucetClient::for_network(&network::LEZ_V03_TESTNET).is_ok());
+        assert!(FaucetClient::for_network(&network::LEZ_LEGACY_TESTNET).is_ok());
+        let local: &'static Network = Box::leak(Box::new(Network {
+            sequencer_url: "http://127.0.0.1:3040",
+            sequencer_host: "127.0.0.1",
+            ..network::LEZ_V03_TESTNET
+        }));
+        assert_eq!(
+            FaucetClient::for_network(local).unwrap().network().id,
+            "lez-v03-testnet"
+        );
+    }
+
+    #[test]
+    fn transaction_hashes_from_the_service_are_checked_before_use() {
+        assert!(is_tx_hash(&"5f".repeat(32)));
+        assert!(!is_tx_hash(""));
+        assert!(!is_tx_hash(&"5f".repeat(31)));
+        assert!(!is_tx_hash(&"zz".repeat(32)));
     }
 
     #[test]
@@ -1598,7 +2137,13 @@ mod tests {
             seed: [0xAB; 32],
         };
         let recipient = PublicAddress::new(system_accounts::pinata_account_id());
-        let error = unknown_outcome("lost", &recipient, 6_000, HashType([7; 32]), &challenge);
+        let error = unknown_outcome(
+            "lost",
+            &recipient,
+            6_000,
+            Some(&HashType([7; 32]).to_string()),
+            Some(&challenge),
+        );
         assert_eq!(error.code, ErrorCode::OutcomeUnknown);
         assert!(
             !error.retryable,
@@ -1620,5 +2165,13 @@ mod tests {
             !rendered.contains("abababab"),
             "the raw seed must not appear in error details"
         );
+
+        // A claim-service claim has no challenge, and may have no hash if the
+        // service never reported one. Neither key is then emitted as null.
+        let service = unknown_outcome("lost", &recipient, 6_000, None, None);
+        let details = service.details.unwrap();
+        assert_eq!(details["balance_before"], "6000");
+        assert!(details.get("tx_hash").is_none());
+        assert!(details.get("submitted_challenge_fingerprint").is_none());
     }
 }

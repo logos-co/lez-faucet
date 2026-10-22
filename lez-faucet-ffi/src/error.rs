@@ -31,6 +31,14 @@ pub enum ErrorCode {
     RecipientBalanceOverflow,
     NetworkUnavailable,
     RpcTimeout,
+    /// The claim service refused this request under one of its caps.
+    /// `details.retry_after_seconds` says when it will accept another.
+    RateLimited,
+    /// The claim service's operator has paused payouts.
+    FaucetPaused,
+    /// The claim service could not be reached or answered with a server
+    /// failure. Nothing was recorded there, so a repeat is safe.
+    ClaimApiUnavailable,
     SolveTimeout,
     SolveAttemptLimit,
     StaleChallengeExhausted,
@@ -57,7 +65,10 @@ impl ErrorCode {
     pub const fn retryable(self) -> bool {
         matches!(
             self,
-            Self::NetworkUnavailable | Self::RpcTimeout | Self::SolveTimeout
+            Self::NetworkUnavailable
+                | Self::RpcTimeout
+                | Self::SolveTimeout
+                | Self::ClaimApiUnavailable
         )
     }
 }
@@ -161,6 +172,31 @@ impl ApiError {
         }
     }
 
+    /// Map a failed raw HTTP call to the sequencer onto the taxonomy.
+    ///
+    /// The v0.3 path speaks JSON-RPC over `reqwest` directly, so transport
+    /// failures arrive as `reqwest` errors rather than `ClientError`s. The
+    /// same distinction holds: a timeout, a connection failure and a body
+    /// the sequencer answered with are three different things.
+    pub fn from_http(context: &str, error: &reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::new(
+                ErrorCode::RpcTimeout,
+                format!("{context}: the LEZ testnet sequencer did not respond in time."),
+            )
+        } else if error.is_decode() || error.is_status() {
+            Self::new(
+                ErrorCode::InternalError,
+                format!("{context}: the LEZ testnet sequencer gave an unexpected answer."),
+            )
+        } else {
+            Self::new(
+                ErrorCode::NetworkUnavailable,
+                format!("{context}: the LEZ testnet sequencer could not be reached."),
+            )
+        }
+    }
+
     pub fn internal(context: impl Into<String>) -> Self {
         Self::new(ErrorCode::InternalError, context)
     }
@@ -185,6 +221,12 @@ mod tests {
         let rendered = |code: ErrorCode| serde_json::to_value(code).unwrap();
         assert_eq!(rendered(ErrorCode::OutcomeUnknown), "outcome_unknown");
         assert_eq!(rendered(ErrorCode::PoolDepleted), "pool_depleted");
+        assert_eq!(rendered(ErrorCode::RateLimited), "rate_limited");
+        assert_eq!(rendered(ErrorCode::FaucetPaused), "faucet_paused");
+        assert_eq!(
+            rendered(ErrorCode::ClaimApiUnavailable),
+            "claim_api_unavailable"
+        );
         assert_eq!(
             rendered(ErrorCode::InvalidPublicAccountId),
             "invalid_public_account_id"
@@ -214,9 +256,18 @@ mod tests {
             ErrorCode::IdempotencyConflict,
             ErrorCode::DropInProgress,
             ErrorCode::Cancelled,
+            // The service said no under a cap or a pause; repeating the same
+            // request immediately is exactly what it asked us not to do.
+            ErrorCode::RateLimited,
+            ErrorCode::FaucetPaused,
         ] {
             assert!(!code.retryable(), "{code:?} must not be retryable");
         }
+    }
+
+    #[test]
+    fn an_unreachable_claim_service_is_retryable_because_nothing_was_recorded() {
+        assert!(ErrorCode::ClaimApiUnavailable.retryable());
     }
 
     #[test]

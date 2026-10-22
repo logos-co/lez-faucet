@@ -1,8 +1,8 @@
 {
   "name": "lez_faucet",
   "display_name": "LEZ Faucet",
-  "version": "0.4.0",
-  "description": "Request one fixed 150 LEZ testnet drop for a public account you already own. Stateless: no wallet, no key material, no stored files.",
+  "version": "0.5.0",
+  "description": "Request one fixed testnet LEZ drop for a public account you already own, on the LEZ legacy testnet (150 LEZ, Piñata) or the LEZ v0.3 testnet (0.1 LEZ, via the hosted claim service). Stateless: no wallet, no key material, no stored files.",
   "author": "Logos",
   "type": "core",
   "category": "blockchain",

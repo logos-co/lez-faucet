@@ -24,6 +24,7 @@ namespace {
 #define CHECK(expression) ((expression) ? static_cast<void>(0) : failCheck(#expression, __LINE__))
 
 constexpr const char* kUrl = "https://testnet-legacy.lez.logos.co";
+constexpr const char* kV03Url = "https://testnet.lez.logos.co";
 constexpr const char* kAddress = "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r";
 constexpr const char* kKey = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 constexpr const char* kOtherKey = "9c1b0a77-5d2e-4f61-8a0b-1c2d3e4f5a6b";
@@ -134,6 +135,52 @@ void configureValidatesAndIsRejectedWhileAJobIsLive()
     MockLezFaucetFfi::setInfoDelayMs(0);
     configure(module);
     CHECK(MockLezFaucetFfi::destroyCalls() == 1);
+}
+
+void switchingNetworksIsRefusedWhileAJobIsLiveAndAllowedWhenIdle()
+{
+    // The UI's network selector is `configure()` with the other row's
+    // sequencer URL. The module has no network table of its own: the Rust
+    // client pins the hosts, and the module's only job is to never swap the
+    // handle out from under a worker. That rule has to hold for a *read* job
+    // too, not just a drop, because a read is inside the FFI all the same.
+    MockLezFaucetFfi::reset();
+    LezFaucetModule module;
+    configure(module);
+    CHECK(MockLezFaucetFfi::lastSequencerUrl() == kUrl);
+
+    MockLezFaucetFfi::setInspectDelayMs(120);
+    const std::string started = module.inspectRecipient(kAddress);
+    CHECK(has(started, "\"ok\":true"));
+    const std::string refused = module.configure(kV03Url);
+    CHECK(codeIs(refused, "drop_in_progress"));
+    // The refusal changed nothing: no new client, nothing destroyed, and the
+    // live job still answers from the original handle.
+    CHECK(MockLezFaucetFfi::clientNewCalls() == 1);
+    CHECK(MockLezFaucetFfi::destroyCalls() == 0);
+    CHECK(MockLezFaucetFfi::lastSequencerUrl() == kUrl);
+    CHECK(statusIs(startAndWait(module, started), "succeeded"));
+
+    // Idle: the switch is a fresh client for the other network, the old one
+    // freed exactly once, and the next read goes to the new handle.
+    MockLezFaucetFfi::setInspectDelayMs(0);
+    const std::string switched = module.configure(kV03Url);
+    CHECK(has(switched, "\"ok\":true"));
+    CHECK(has(switched, "\"sequencer_url\":\"https://testnet.lez.logos.co\""));
+    CHECK(MockLezFaucetFfi::clientNewCalls() == 2);
+    CHECK(MockLezFaucetFfi::destroyCalls() == 1);
+    CHECK(MockLezFaucetFfi::lastSequencerUrl() == kV03Url);
+    CHECK(statusIs(startAndWait(module, module.getFaucetInfo()), "succeeded"));
+    CHECK(!MockLezFaucetFfi::destroyWhileCallActive());
+
+    // And back again, after a drop has completed on the second network: a
+    // terminal job is not a live one.
+    CHECK(statusIs(startAndWait(module, module.requestDrop(kAddress, kKey)), "succeeded"));
+    const std::string back = module.configure(kUrl);
+    CHECK(has(back, "\"ok\":true"));
+    CHECK(MockLezFaucetFfi::clientNewCalls() == 3);
+    CHECK(MockLezFaucetFfi::destroyCalls() == 2);
+    CHECK(MockLezFaucetFfi::lastSequencerUrl() == kUrl);
 }
 
 void startersReturnImmediatelyUnderASlowFfi()
@@ -887,6 +934,7 @@ void metadataAndVersionAgree()
 int main()
 {
     configureValidatesAndIsRejectedWhileAJobIsLive();
+    switchingNetworksIsRefusedWhileAJobIsLiveAndAllowedWhenIdle();
     startersReturnImmediatelyUnderASlowFfi();
     readsDoNotQueueBehindADrop();
     terminalResultsReplayUntilAcknowledged();

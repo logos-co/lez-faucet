@@ -1,6 +1,6 @@
 [package]
 name = "lez-faucet-ffi"
-version = "0.4.0"
+version = "0.5.0"
 rust-version = "1.98"
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,7 @@ anyhow.workspace = true
 common.workspace = true
 lee.workspace = true
 programs.workspace = true
+reqwest.workspace = true
 sequencer_service_rpc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,6 +21,9 @@ sha2.workspace = true
 system_accounts.workspace = true
 tokio.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+httpmock.workspace = true
 
 [build-dependencies]
 cbindgen.workspace = true

@@ -1,5 +1,5 @@
 {
-  description = "LEZ legacy-testnet faucet Basecamp module";
+  description = "LEZ testnet faucet Basecamp module (legacy and v0.3 testnets)";
 
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
@@ -313,7 +313,7 @@
         in
         rustPlatform.buildRustPackage {
           pname = "lez-faucet-ffi";
-          version = "0.4.0";
+          version = "0.5.0";
           src = faucetFfiSource;
           # `cargoDeps` rather than `cargoHash` so vendoring goes through the
           # patched fetcher above. The value is not affected by that patch: it
@@ -339,11 +339,13 @@
           # History: 0.3.1 moved it by repinning LEZ v0.2.0 -> v0.2.2 (every LEZ
           # git checkout in the vendored set changed); 0.3.2 moved it by the
           # version bump alone; 0.4.0 moved it by repinning LEZ v0.2.2 ->
-          # v0.2.4-lez-legacy, which also moved logos-blockchain to 0.3.1.
+          # v0.2.4-lez-legacy, which also moved logos-blockchain to 0.3.1;
+          # 0.5.0 moved it by adding `reqwest` (rustls) and the `httpmock`
+          # dev-dependency for the v0.3 claim-service path.
           cargoDeps = fetchCargoVendorPatched {
-            name = "lez-faucet-ffi-0.4.0";
+            name = "lez-faucet-ffi-0.5.0";
             src = faucetFfiSource;
-            hash = "sha256-mybD0Z1o7XYnzr/XxD5T0aQ6qWwVf0xCXuy+AjCd3mA=";
+            hash = "sha256-H3sego2jKlkp2lTbkW6vtGA6/PfQP60STTyj7dL4Pfc=";
           };
           cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
           doCheck = false;

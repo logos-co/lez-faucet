@@ -2,25 +2,29 @@
 
 ## Network contract
 
-LEZ Faucet targets the **LEZ legacy testnet**, and only that network:
+LEZ Faucet claims on two networks. The app opens on the first and has a
+selector for the second; nothing persists the choice.
 
-| Item | Value |
-| --- | --- |
-| Network id | `lez-legacy-testnet` |
-| Sequencer RPC | `https://testnet-legacy.lez.logos.co` |
-| Explorer | `https://explorer.testnet-legacy.lez.logos.co` |
-| LEZ source tag | `v0.2.4-lez-legacy` |
-| LEZ source commit | `399793b4f99b836e40694cea34fa02790912e18e` |
-| Claim mechanism | Piñata (unsigned `PublicNoSign` claim) |
-| Pinata account | `EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7` |
-| Claim value | 150 testnet LEZ |
+| Item | LEZ legacy testnet | LEZ v0.3 testnet |
+| --- | --- | --- |
+| Network id | `lez-legacy-testnet` | `lez-v03-testnet` |
+| Sequencer RPC | `https://testnet-legacy.lez.logos.co` | `https://testnet.lez.logos.co` |
+| Explorer | `https://explorer.testnet-legacy.lez.logos.co` | `https://explorer.testnet.lez.logos.co` |
+| LEZ source tag | `v0.2.4-lez-legacy` | `v0.3.1` |
+| LEZ source commit | `399793b4f99b836e40694cea34fa02790912e18e` | `1a003bfbfb89fcf987f62975cd08a401169e1b8c` |
+| Claim mechanism | Piñata (unsigned `PublicNoSign` claim) | Claim API (hosted `claimd`, see below) |
+| Pool | Pinata account `EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7` | the service's hot account |
+| Unit | whole LEZ (0 decimals) | lepta, 10^9 per LEZ (9 decimals) |
+| Claim value | 150 LEZ | 100,000,000 lepta = 0.1 LEZ |
+| Fingerprint | compiled `authenticated_transfer` + `pinata` ImageIDs | `privacy_preserving_circuit` ImageID, as data |
 
-That table is one row of the network table in `lez-faucet-ffi/src/network.rs`,
+Each column is one row of the network table in `lez-faucet-ffi/src/network.rs`,
 which is the copy the build reads: the sequencer host the client will accept,
-the explorer it links receipts to, the LEZ tag it is pinned to, the ImageIDs it
-expects, and how a claim is made there. `faucet-ui/src/FaucetBackend.cpp`
-carries the display half of the same row. Moving the app to a different
-sequencer means changing the table, not a URL.
+the explorer it links receipts to, the LEZ tag it runs, the fingerprint it
+expects, the unit and the prize, and how a claim is made there.
+`faucet-ui/src/FaucetBackend.cpp` carries the display half of the same table,
+and the core-contract test holds the two to each other. Moving the app to a
+different sequencer means changing the table, not a URL.
 
 ### Why legacy, and what happened to the main testnet
 
@@ -42,17 +46,43 @@ fingerprint check against it: an account on one testnet is not an account on
 the other, and a window that *looked* pointed at the main testnet would be
 worse than one that says where it is. The UI states the network it is on.
 
-### Adding a second network (v0.3.x, later 0.4)
+### The v0.3 testnet and why a hosted service
 
-The network table is the extension point, and it is deliberately not yet a
-user-facing choice: there is one enabled network. Supporting the v0.3.x
-testnet needs more than a row, and the module docs in `network.rs` spell it
-out — v0.3 has no Piñata, so it needs a new `ClaimMechanism` variant and a
-client path for it, and it runs a different LEZ revision than this crate
-links, so the compiled-ImageID gate as written cannot serve both from one
-binary. When that mechanism exists, add a `Network` constant, add it to
-`network::ENABLED`, mirror it in the backend's table, and the host pin, the
-UI's network line and the fingerprint watchdog all follow.
+LEZ Faucet 0.5.0 adds the v0.3 testnet as a second row. v0.3 has no Piñata and,
+more fundamentally, no fee-less public transaction: every user transaction has
+to be signed by a funded fee payer. A keyless client cannot produce one. So on
+v0.3 the claim is made by **`claimd`**, a small service the team runs, which
+signs one native transfer from its own hot account and pays the fee. Its HTTP
+contract, policy and operations are in [`claimd/README.md`](../claimd/README.md);
+the public root is `https://rog-devbox.tail957e2.ts.net:8443`.
+
+What the app does on v0.3, in order: verify the sequencer's
+`privacy_preserving_circuit` ImageID against the row; read the recipient's
+balance with `getAccountBalance`; `POST /v1/claim` with the recipient and the
+same request key it uses for its own idempotency; then poll
+`GET /v1/claim/{key}` for the transaction hash while reading `getTransaction`
+and the balance itself, until it has seen **its** transaction on chain and the
+balance at exactly `before + 100,000,000`. The service's own `included` is
+never taken as proof. There is no initialization step on v0.3 — any valid
+32-byte base58 id can receive a native transfer, and an unseen one reads as
+balance 0 — so the uninitialized/wrong-owner states and the init command do
+not exist on that network.
+
+**Trust statement.** The app is as keyless on v0.3 as on legacy: it holds no
+key, signs nothing, and stores nothing. What it adds is a dependency on one
+service, which it treats as a counterparty rather than an oracle — every
+receipt is still the app's own two reads. The service holds only a small hot
+balance (topped up from the team's mined supply when it drops below
+300,000,000 lepta) and never loads the treasury key. It caps claims at one per
+recipient per day, two per client IP per day, and 3/hour, 10/day overall; a
+refusal arrives as `rate_limited` (with `details.retry_after_seconds`),
+`faucet_paused` or `pool_depleted`, and records nothing, so the app offers no
+retry on the first two and a fresh attempt is honest on `claim_api_unavailable`
+(the service could not be reached and has no record of the request).
+
+Adding a further network is the same shape: a `Network` constant with its own
+`ClaimMechanism` and `NetworkFingerprint`, added to `network::ENABLED`, and a
+mirrored row in the backend's table.
 
 ### History
 
@@ -69,7 +99,8 @@ UI's network line and the fingerprint watchdog all follow.
 The pin is a protocol requirement, not a convenience. Builtin program IDs are
 derived from program ELFs embedded in the client. A client built from a
 different LEZ revision may serialize a transaction that the sequencer accepts
-but does not execute as intended.
+but does not execute as intended. (The v0.3 row escapes this only because the
+app builds no transaction there: the service does, from its own v0.3.1 build.)
 
 The backend performs a runtime fingerprint check against `getProgramIds` before
 creating transactions. At the pinned deployment, the relevant program IDs are
@@ -80,6 +111,17 @@ creating transactions. At the pinned deployment, the relevant program IDs are
 | --- | --- |
 | `authenticated_transfer` | `fe96c4228babbe8bc578e3e25b884cacb07f8c86541f27ed676789875eef875a` |
 | `pinata` | `fc52f17a60f8b5e8de28e1a8c3133c012485011a36aef985ce24d69ff4f3528c` |
+
+The v0.3 testnet reports exactly one program. This build compiles nothing for
+v0.3, so its ImageID is data in the network row, compared live before every
+v0.3 claim. It is recorded here in both forms: the hex the row carries, and the
+raw words the sequencer returns, which the `v03` job of the fingerprint
+workflow compares with `curl` and `jq`:
+
+| Program | Value |
+| --- | --- |
+| `privacy_preserving_circuit` (hex) | `189513eb0a037edb638b3da824952e69894a4d11ab05c5956a5986181ab02721` |
+| `privacy_preserving_circuit` (words) | `[3943929112,3682468618,2822605667,1764660516,290278025,2512717227,411457898,556249114]` |
 
 The `Testnet fingerprint` workflow checks this daily, so that an upgrade is
 reported here before a user meets it as a red banner in the app. It runs two
@@ -111,6 +153,12 @@ curl -fsS -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"getProgramIds","params":[]}' \
   https://testnet-legacy.lez.logos.co | jq
 ```
+
+For v0.3, the same call against `https://testnet.lez.logos.co` returns only
+`privacy_preserving_circuit`, and the claim service's health is
+`curl -fsS https://rog-devbox.tail957e2.ts.net:8443/v1/info`. The `v03` job in
+`.github/workflows/testnet-fingerprint.yml` runs both daily; it needs no
+toolchain and opens the same `testnet-drift` issue on a circuit change.
 
 Do not update these values independently. A testnet upgrade requires updating
 the LEZ git pin, rebuilding the embedded programs, refreshing the expected
@@ -206,11 +254,17 @@ solution cannot be reused and all claimants race one global challenge.
 
 ## Live verification
 
-Read-only checks against the public testnet are safe at any time:
+Read-only checks against the public testnets are safe at any time:
 
 ```sh
 cargo test -p lez-faucet-ffi --test live_public_testnet -- --ignored --nocapture
+cargo test -p lez-faucet-ffi --test live_v03_testnet -- --ignored --nocapture
 ```
+
+The v0.3 file asserts the circuit ImageID matches the row, that the claim
+service's `/v1/info` reports the row's prize and decimals, and that any public
+id is eligible with a balance. `LEZ_FAUCET_CLAIM_API_URL` points it at a
+service under test; the sequencer stays pinned.
 
 They assert the pinned program fingerprint matches the deployed one, that the
 pool balance is a whole multiple of the 150 prize, that `claims_remaining` is
@@ -247,8 +301,27 @@ credited `Public/AwTjnoBMZZ7KQCKxYYkcv3npTXZqXyYnFwwHkdw7Az5i` from 0 to 150.
 That chain continues as the legacy testnet, so the transaction still resolves
 in the legacy explorer.
 
-The destination must already be initialized under authenticated-transfer. A
-public account ID alone cannot authorize initialization; the owner runs
+The v0.3 write test asks the service for one 0.1 LEZ drop and is gated the
+same way. Use a fresh throwaway id — the service pays each recipient once a
+day — and the release profile is not required, since there is no
+proof-of-work:
+
+```sh
+LEZ_FAUCET_LIVE_RECIPIENT=Public/<fresh-account-id> \
+  cargo test --release -p lez-faucet-ffi --test live_v03_testnet \
+  one_authorized_claim_credits_exactly_the_prize \
+  -- --ignored --exact --nocapture
+```
+
+It has not yet been run against the public service: at the time of the 0.5.0
+change the Funnel hostname did not resolve from outside the tailnet, and the
+read-only `faucet_info` test failed with `claim_api_unavailable` while the
+circuit check against `testnet.lez.logos.co` passed. Record the first claim
+here when it lands.
+
+The destination on the **legacy** testnet must already be initialized under
+authenticated-transfer. A public account ID alone cannot authorize
+initialization; the owner runs
 `wallet auth-transfer init --account-id Public/<account-id>` in their own wallet
 context. The faucet copies that command for them and never requests a recovery
 phrase or private key. Private account IDs are not accepted: private funding

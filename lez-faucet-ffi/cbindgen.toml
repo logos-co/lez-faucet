@@ -25,8 +25,9 @@ include = [
 exclude = [
   "Network",
   "ClaimMechanism",
-  "ExpectedPrograms",
+  "NetworkFingerprint",
   "LEZ_LEGACY_TESTNET",
+  "LEZ_V03_TESTNET",
   "ENABLED",
   "DEFAULT",
 ]

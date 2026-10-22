@@ -36,16 +36,6 @@ typedef struct LezFaucetClientOutput {
   char *result_json;
 } LezFaucetClientOutput;
 
-/**
- * The exact prize the deployed Piñata guest pays per successful claim.
- *
- * Every enabled network claims through the Piñata program compiled into this
- * build, so there is one prize; `network::tests` holds each network to it.
- * A literal rather than `network::DEFAULT.prize()` so cbindgen keeps emitting
- * it into the C header.
- */
-#define PRIZE 150
-
 
 
 /**
