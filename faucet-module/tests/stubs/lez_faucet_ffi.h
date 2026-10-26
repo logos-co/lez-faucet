@@ -15,7 +15,6 @@
 
 #define CHALLENGE_LEN 33
 #define MAX_SUPPORTED_DIFFICULTY 3
-#define PRIZE 150
 
 #ifdef __cplusplus
 extern "C" {

@@ -1,5 +1,5 @@
 {
-  description = "LEZ public-testnet faucet Basecamp module";
+  description = "LEZ testnet faucet Basecamp module (legacy and v0.3 testnets)";
 
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
@@ -30,7 +30,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     logos-execution-zone = {
-      url = "github:logos-blockchain/logos-execution-zone/d6e4ae694e7419f5906b340c232704466a1917b7";
+      url = "github:logos-blockchain/logos-execution-zone/399793b4f99b836e40694cea34fa02790912e18e";
       flake = false;
     };
     faucet-source = {
@@ -56,7 +56,7 @@
       # "supported", not a preference.
       #
       # x86_64-darwin is absent on purpose. rapidsnark v0.0.8 ships a macOS
-      # x86_64 archive but logos-blockchain-circuits v0.5.3 does not, so there
+      # x86_64 archive but logos-blockchain-circuits v0.5.7 does not, so there
       # is nothing to point LBC_ROOT_DIR at. The three entries below are exactly
       # the release variants darwin-arm64, linux-amd64, and linux-arm64.
       #
@@ -81,19 +81,19 @@
       prebuilt = {
         aarch64-darwin = {
           circuitsPlatform = "macos-aarch64";
-          circuitsHash = "0w3i0phgzjswsk1q2k6cr3001jjc55a82z79zw9w5p3x9hwaqljq";
+          circuitsHash = "1rcqihjh66wcic8nd49yf6afgwq6g5z11fm29vrl1s8qjcf873jj";
           rapidsnarkUrl = "${iden3Base}/rapidsnark-macOS-arm64-${rapidsnarkVersion}.zip";
           rapidsnarkHash = "1600dzr7hjg6lc5r0cdh189l7019djvy4cz2qyn75z5vrac4qs0f";
         };
         x86_64-linux = {
           circuitsPlatform = "linux-x86_64";
-          circuitsHash = "1mwy3g9dyjvlwykzs62gzf79rrnm20sy7c587nv26c1y9bm71wfv";
+          circuitsHash = "19jqcfdy1mi6f5mn122wlmjccpb80ncwh7awcyapmlwq5r8nq08w";
           rapidsnarkUrl = "${picBase}/rapidsnark-linux-x86_64-pic-${rapidsnarkVersion}.zip";
           rapidsnarkHash = "07qdnh4lm99alkmmg3av916bma7s86s616s56y0j4q4h82897kzk";
         };
         aarch64-linux = {
           circuitsPlatform = "linux-aarch64";
-          circuitsHash = "14r4vghipk66k8g22kymy2gpfa1ghwwa74v57a230yk0pm9zvgp7";
+          circuitsHash = "0vmsargcvpcslxbayfn6lbdyhny9idzxn5scyjpa1s09vqxqi07n";
           rapidsnarkUrl = "${picBase}/rapidsnark-linux-aarch64-pic-${rapidsnarkVersion}.zip";
           rapidsnarkHash = "15f4iqy2szqpp84v8584s5b86vw8rfz60wx7h7ylp34r0m7qii4i";
         };
@@ -124,17 +124,24 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
-          rustToolchain = pkgs.rust-bin.stable."1.93.0".default;
+          # LEZ v0.2.4-lez-legacy builds against logos-blockchain 0.3.1, which
+          # uses `usize::bit_width` in a const fn; that needs Rust 1.98. Kept
+          # equal to upstream's own rust-toolchain.toml at the pinned commit.
+          # The rust-overlay input has to be at least as new as the toolchain
+          # (1.98.1 is 2026-09-01); an older lock fails evaluation with
+          # `attribute '"1.98.1"' missing`, so a toolchain bump here means
+          # `nix flake lock --update-input rust-overlay` as well.
+          rustToolchain = pkgs.rust-bin.stable."1.98.1".default;
           rustPlatform = pkgs.makeRustPlatform {
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
 
-          # This tree's Cargo.lock pins logos-blockchain-circuits at v0.5.3.
+          # This tree's Cargo.lock pins logos-blockchain-circuits at v0.5.7.
           # Its build scripts consume this prebuilt tree through LBC_ROOT_DIR
           # and cannot download it from inside a pure Nix build.
           circuits = pkgs.fetchzip {
-            url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.5.3/logos-blockchain-circuits-v0.5.3-${artifacts.circuitsPlatform}.tar.gz";
+            url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.5.7/logos-blockchain-circuits-v0.5.7-${artifacts.circuitsPlatform}.tar.gz";
             sha256 = artifacts.circuitsHash;
           };
 
@@ -306,7 +313,7 @@
         in
         rustPlatform.buildRustPackage {
           pname = "lez-faucet-ffi";
-          version = "0.3.2";
+          version = "0.5.0";
           src = faucetFfiSource;
           # `cargoDeps` rather than `cargoHash` so vendoring goes through the
           # patched fetcher above. The value is not affected by that patch: it
@@ -331,23 +338,32 @@
           #
           # History: 0.3.1 moved it by repinning LEZ v0.2.0 -> v0.2.2 (every LEZ
           # git checkout in the vendored set changed); 0.3.2 moved it by the
-          # version bump alone.
+          # version bump alone; 0.4.0 moved it by repinning LEZ v0.2.2 ->
+          # v0.2.4-lez-legacy, which also moved logos-blockchain to 0.3.1;
+          # 0.5.0 moved it by adding `reqwest` (rustls) and the `httpmock`
+          # dev-dependency for the v0.3 claim-service path.
           cargoDeps = fetchCargoVendorPatched {
-            name = "lez-faucet-ffi-0.3.2";
+            name = "lez-faucet-ffi-0.5.0";
             src = faucetFfiSource;
-            hash = "sha256-UrkOG94buY+lNIrkoY1DcZif2eA7VTk2JgTF3uXXhss=";
+            hash = "sha256-H3sego2jKlkp2lTbkW6vtGA6/PfQP60STTyj7dL4Pfc=";
           };
           cargoBuildFlags = [ "-p" "lez-faucet-ffi" ];
           doCheck = false;
 
           # pyo3-ffi performs a python3 probe during its build.
-          nativeBuildInputs = [ pkgs.python3 ];
+          #
+          # bindgenHook sets LIBCLANG_PATH for librocksdb-sys, which arrived
+          # with LEZ v0.2.4-lez-legacy: its `common` crate depends on
+          # logos-blockchain-common-http-client 0.3.1, which now reaches
+          # rocksdb through chain-service -> storage-service. The faucet never
+          # opens a database; the crate is linked, not used.
+          nativeBuildInputs = [ pkgs.python3 pkgs.rustPlatform.bindgenHook ];
           LBC_ROOT_DIR = circuits;
           RAPIDSNARK_LIB_DIR = "${rapidsnark}/lib";
 
           # build_utils resolves ../artifacts relative to its vendored manifest,
           # so stage the builtin-program artifacts from the pinned upstream LEZ
-          # v0.2.2 revision beside it.
+          # v0.2.4-lez-legacy revision beside it.
           postPatch = ''
             cp -R ${logos-execution-zone}/artifacts "$cargoDepsCopy/artifacts"
           '';

@@ -36,10 +36,7 @@ typedef struct LezFaucetClientOutput {
   char *result_json;
 } LezFaucetClientOutput;
 
-/**
- * The exact prize the deployed Piñata guest pays per successful claim.
- */
-#define PRIZE 150
+
 
 /**
  * Create a faucet client for `sequencer_url`.

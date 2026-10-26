@@ -13,11 +13,12 @@
 //      program is allowed to branch on.
 //   3. A request key is minted in exactly one place, `beginCreditAttempt`, and
 //      every re-send reuses it.
+//   4. The prize, the unit and the shape of a claim come from the selected
+//      network's row, never from a constant here. The legacy testnet pays 150
+//      whole LEZ through Piñata; the v0.3 testnet pays 100,000,000 lepta
+//      (0.1 LEZ) through a hosted claim service. One file has to read both.
 
 var maxU128 = "340282366920938463463374607431768211455"
-
-// The protocol fixes the prize; the view never asks for an amount.
-var prizeAmount = "150"
 
 // A public account id is 32 bytes of base58 and so never exceeds 64
 // characters. The bound is applied before the string is handed to the core,
@@ -26,9 +27,6 @@ var prizeAmount = "150"
 var maxAccountIdLength = 64
 
 // ---- exact decimal arithmetic ----------------------------------------------
-
-// The exact prize the deployed Piñata guest pays per claim.
-var PRIZE_AMOUNT = "150"
 
 function normalizedDecimal(value) {
     var text = String(value === undefined || value === null ? "" : value)
@@ -104,6 +102,102 @@ function groupDigits(value) {
             grouped = "," + grouped
     }
     return grouped
+}
+
+// How many decimal places a network's unit has, as a small non-negative
+// integer, or -1 for anything unusable. A count is not a balance, but this
+// file still never calls Number(): a two-digit string is read off its digits.
+function decimalPlaces(decimals) {
+    if (typeof decimals === "number")
+        return decimals >= 0 && decimals <= 38 && Math.floor(decimals) === decimals ? decimals : -1
+    var text = String(decimals === undefined || decimals === null ? "" : decimals).trim()
+    if (!/^[0-9]{1,2}$/.test(text))
+        return -1
+    var places = text.charCodeAt(text.length - 1) - 48
+    if (text.length === 2)
+        places += (text.charCodeAt(0) - 48) * 10
+    return places <= 38 ? places : -1
+}
+
+// Render an exact smallest-unit integer as LEZ with `decimals` places.
+//
+// String surgery again: the digits are split, the whole part grouped, and
+// trailing zeros of the fraction dropped, so "100000000" at 9 places is "0.1"
+// and "150" at 0 places is "150". Nothing is divided. Anything that is not a
+// plain run of digits, or a decimals count this build cannot place, renders
+// as "" rather than as a number that was never on the chain.
+function formatAmount(value, decimals) {
+    var text = normalizedDecimal(value)
+    var places = decimalPlaces(decimals)
+    if (text === "" || places < 0)
+        return ""
+    if (places === 0)
+        return groupDigits(text)
+    while (text.length <= places)
+        text = "0" + text
+    var whole = text.slice(0, text.length - places)
+    var fraction = text.slice(text.length - places).replace(/0+$/, "")
+    return fraction === "" ? groupDigits(whole) : groupDigits(whole) + "." + fraction
+}
+
+// ---- networks --------------------------------------------------------------
+//
+// The backend publishes its network table as JSON; one row is one enabled
+// network. The row is the view's source for the prize, the unit and the claim
+// mechanism, because those are what the backend configured the core for.
+
+function networkView(row) {
+    var payload = row && typeof row === "object" ? row : {}
+    var mechanism = String(payload.mechanism || "")
+    return {
+        id: String(payload.id || ""),
+        name: String(payload.name || ""),
+        sequencerUrl: String(payload.sequencerUrl || ""),
+        explorerUrl: String(payload.explorerUrl || ""),
+        lezVersion: String(payload.lezVersion || ""),
+        prize: normalizedDecimal(payload.prize),
+        decimals: decimalPlaces(payload.decimals) < 0 ? 0 : decimalPlaces(payload.decimals),
+        mechanism: mechanism,
+        isClaimApi: mechanism === "claim_api",
+        claimApiUrl: String(payload.claimApiUrl || "")
+    }
+}
+
+function parseNetworks(json) {
+    var rows
+    try {
+        rows = JSON.parse(String(json === undefined || json === null ? "[]" : json))
+    } catch (parseFailure) {
+        return []
+    }
+    if (!Array.isArray(rows))
+        return []
+    var views = []
+    for (var index = 0; index < rows.length; index += 1) {
+        var view = networkView(rows[index])
+        if (view.id !== "" && view.prize !== "")
+            views.push(view)
+    }
+    return views
+}
+
+function findNetwork(networks, id) {
+    var rows = Array.isArray(networks) ? networks : []
+    var wanted = String(id === undefined || id === null ? "" : id)
+    for (var index = 0; index < rows.length; index += 1) {
+        if (rows[index].id === wanted)
+            return rows[index]
+    }
+    return null
+}
+
+// What one press costs and what it pays, for the row, as a person reads it.
+function mechanismSentence(mechanism) {
+    if (String(mechanism) === "claim_api")
+        return "A hosted faucet service sends the transfer; this app holds no key and checks the credit on chain itself."
+    if (String(mechanism) === "pinata")
+        return "One unsigned proof-of-work claim; no key needed."
+    return ""
 }
 
 // ---- address input ---------------------------------------------------------
@@ -250,17 +344,38 @@ function cancelAvailable(status, phase, cancelRequested) {
 }
 
 // ---- phases ----------------------------------------------------------------
+//
+// The core reports the same phase names on both networks, but they mean
+// different work: on the legacy testnet `submitting` sends a proof-of-work
+// claim this app built, on the v0.3 testnet it asks the faucet service. So the
+// sentences and the rail are chosen per mechanism. "pinata" is the default so
+// that a caller who does not say is read as the legacy flow.
 
 var phaseSentences = {
-    "queued": "Waiting for a free slot…",
-    "validating_input": "Checking the account ID…",
-    "verifying_programs": "Checking that this app matches the deployed testnet…",
-    "inspecting_recipient": "Reading the recipient account…",
-    "fetching_challenge": "Reading the faucet's current challenge…",
-    "solving": "Solving the proof-of-work challenge. This can take a while.",
-    "refreshing_challenge": "Re-checking the challenge before sending anything…",
-    "submitting": "Sending the claim to the testnet…",
-    "reconciling": "Confirming that the claim actually credited the account. This can take a few minutes."
+    "pinata": {
+        "queued": "Waiting for a free slot…",
+        "validating_input": "Checking the account ID…",
+        "verifying_programs": "Checking that this app matches the deployed testnet…",
+        "inspecting_recipient": "Reading the recipient account…",
+        "fetching_challenge": "Reading the faucet's current challenge…",
+        "solving": "Solving the proof-of-work challenge. This can take a while.",
+        "refreshing_challenge": "Re-checking the challenge before sending anything…",
+        "submitting": "Sending the claim to the testnet…",
+        "reconciling": "Confirming that the claim actually credited the account. This can take a few minutes."
+    },
+    "claim_api": {
+        "queued": "Waiting for a free slot…",
+        "validating_input": "Checking the account ID…",
+        "verifying_programs": "Checking the network…",
+        "inspecting_recipient": "Reading your balance…",
+        "submitting": "Asking the faucet service for a drop…",
+        "reconciling": "Waiting for the transfer to be included and the balance to move. This can take a few minutes."
+    }
+}
+
+function mechanismKey(mechanism) {
+    var key = String(mechanism === undefined || mechanism === null ? "" : mechanism)
+    return phaseSentences[key] ? key : "pinata"
 }
 
 // Map a phase onto a sentence.
@@ -269,37 +384,67 @@ var phaseSentences = {
 // state machine label, not something a person asked to read. The fallback is
 // deliberately generic so that a phase this build has not heard of degrades to
 // a sentence rather than leaking the enum.
-function phaseSentence(phase) {
+function phaseSentence(phase, mechanism) {
     var key = String(phase === undefined || phase === null ? "" : phase)
-    return phaseSentences[key] || "Working on your request…"
+    return phaseSentences[mechanismKey(mechanism)][key] || "Working on your request…"
 }
 
-// The three stages a person is shown, and the phase each core phase belongs to.
+// The stages a person is shown, and the lamp each core phase belongs to.
 //
-// The view draws a rail of three lamps because "solve, submit, confirm" is what
-// actually happens to a claim, and because the third one can take five minutes
-// and must be visible before the button is pressed rather than after. The core
-// reports nine phases; folding them onto three is a presentation decision and
-// so it lives here with the sentences.
+// The legacy rail is three lamps because "solve, submit, confirm" is what
+// actually happens to a Piñata claim, and because the third one can take five
+// minutes and must be visible before the button is pressed rather than after.
+// The v0.3 rail is four: there is no proof-of-work, and the step that was
+// "submit" is now a request to the faucet service, which is worth naming as
+// its own thing. The core reports nine phases; folding them onto a few is a
+// presentation decision and so it lives here with the sentences.
 //
 // An unrecognised phase maps to -1 and lights nothing. That is deliberate and
 // matches phaseSentence's fallback: a phase this build has not heard of must
 // degrade to an unlit rail, never to a confidently wrong lamp.
-var stageOfPhase = {
-    "queued": 0,
-    "validating_input": 0,
-    "verifying_programs": 0,
-    "inspecting_recipient": 0,
-    "fetching_challenge": 0,
-    "solving": 0,
-    "refreshing_challenge": 0,
-    "submitting": 1,
-    "reconciling": 2
+var stageRails = {
+    "pinata": [
+        { title: "Solve", detail: "Proof-of-work, usually seconds" },
+        { title: "Submit", detail: "One unsigned claim, no key needed" },
+        { title: "Confirm", detail: "Up to five minutes. Keep the app open." }
+    ],
+    "claim_api": [
+        { title: "Checking the network", detail: "The deployed programs match this app" },
+        { title: "Reading your balance", detail: "The baseline the receipt is measured from" },
+        { title: "Asking the faucet service", detail: "It sends one transfer; no key leaves this app" },
+        { title: "Waiting for inclusion", detail: "Up to five minutes. Keep the app open." }
+    ]
 }
 
-function phaseStage(phase) {
+var stageOfPhase = {
+    "pinata": {
+        "queued": 0,
+        "validating_input": 0,
+        "verifying_programs": 0,
+        "inspecting_recipient": 0,
+        "fetching_challenge": 0,
+        "solving": 0,
+        "refreshing_challenge": 0,
+        "submitting": 1,
+        "reconciling": 2
+    },
+    "claim_api": {
+        "queued": 0,
+        "validating_input": 0,
+        "verifying_programs": 0,
+        "inspecting_recipient": 1,
+        "submitting": 2,
+        "reconciling": 3
+    }
+}
+
+function stagesFor(mechanism) {
+    return stageRails[mechanismKey(mechanism)]
+}
+
+function phaseStage(phase, mechanism) {
     var key = String(phase === undefined || phase === null ? "" : phase)
-    var stage = stageOfPhase[key]
+    var stage = stageOfPhase[mechanismKey(mechanism)][key]
     return stage === undefined ? -1 : stage
 }
 
@@ -312,10 +457,10 @@ function phaseStage(phase) {
 // end state is stated here rather than falling out of the poller stopping,
 // which would darken the rail at the exact moment it has the most to say. A
 // failure or an unproven outcome is not a finished run and does not earn it.
-function railStage(panel, live, phase, lampCount) {
+function railStage(panel, live, phase, lampCount, mechanism) {
     if (String(panel) === "receipt")
         return lampCount
-    return live ? phaseStage(phase) : -1
+    return live ? phaseStage(phase, mechanism) : -1
 }
 
 // ---- errors ----------------------------------------------------------------
@@ -383,6 +528,26 @@ var errorPresentations = {
     "pool_depleted": {
         title: "The pool is empty right now",
         guidance: "The pool is a finite shared resource. Nothing more can be claimed from it until it is refilled.",
+        newAttempt: false
+    },
+    "rate_limited": {
+        title: "The faucet service is limiting claims right now",
+        guidance: "It pays each account once a day and only a few claims an hour in total. Nothing was sent; try again later.",
+        newAttempt: false
+    },
+    "faucet_paused": {
+        title: "The faucet service is paused",
+        guidance: "Its operator has paused payouts for now. Nothing was sent.",
+        newAttempt: false
+    },
+    "claim_api_unavailable": {
+        title: "Could not reach the faucet service",
+        guidance: "Nothing was sent. Check your connection and request again.",
+        newAttempt: true
+    },
+    "unknown_network": {
+        title: "This build does not know that network",
+        guidance: "Pick one of the networks listed.",
         newAttempt: false
     },
     "recipient_balance_overflow": {
@@ -486,7 +651,10 @@ function errorPresentation(error) {
         message: String(structured.message || ""),
         newAttempt: known ? known.newAttempt : false,
         recognized: Boolean(known),
-        initializationCommand: String(details.initialization_command || "")
+        initializationCommand: String(details.initialization_command || ""),
+        // Seconds until the faucet service will accept another claim, as the
+        // service said it; "" when it did not say.
+        retryAfterSeconds: normalizedDecimal(details.retry_after_seconds)
     }
 }
 
@@ -498,9 +666,11 @@ function errorPresentation(error) {
 // is shown only when the core has handed back a transaction hash and two
 // balances that differ by exactly the prize — re-checked here in exact decimal
 // arithmetic, because this is the one claim the app makes that a user will act
-// on.
-function receiptView(result) {
+// on. `expectedAmount` is the selected network's prize; a receipt for any other
+// figure, or for an unknown prize, is not a receipt this app will show.
+function receiptView(result, expectedAmount) {
     var payload = result && typeof result === "object" ? result : {}
+    var prize = normalizedDecimal(expectedAmount)
     var recipient = payload.recipient && typeof payload.recipient === "object"
         ? payload.recipient : {}
     var address = String(recipient.address || "")
@@ -516,11 +686,11 @@ function receiptView(result) {
         return null
     if (addDecimals(before, amount) !== after)
         return null
-    // The prize is fixed by the protocol, so a receipt claiming any other
+    // The prize is fixed by the network, so a receipt claiming any other
     // figure is not a receipt this app is willing to show. Defence in depth:
-    // the core already sends only the constant, and this is the one number a
-    // user will act on.
-    if (amount !== PRIZE_AMOUNT)
+    // the core already sends only its row's prize, and this is the one number
+    // a user will act on.
+    if (prize === "" || amount !== prize)
         return null
 
     var retries = normalizedDecimal(payload.stale_challenge_retries)
@@ -581,25 +751,39 @@ function inspectionView(result) {
 
 var blockedReasons = {
     "pool_depleted": "The pool is empty. Nothing can be claimed until someone refills it.",
-    "unsupported_difficulty": "The pool's challenge is harder than this build can solve. Update the app."
+    "unsupported_difficulty": "The pool's challenge is harder than this build can solve. Update the app.",
+    "faucet_paused": "The faucet service is paused by its operator. Nothing can be claimed until it resumes.",
+    "prize_mismatch": "The faucet service pays a different amount than this build expects. Update the app."
 }
 
 // Summarize the pool.
 //
 // The pool is finite, shared and permissionless: anyone on the testnet draws
 // from the same balance. `claims_remaining` is therefore a reading taken at a
-// moment, not an allowance reserved for this user, and the copy says so.
+// moment, not an allowance reserved for this user, and the copy says so. On a
+// claim-service network the service's hot balance plays the pool's part and
+// the same reading applies.
 function poolView(info) {
     var payload = info && typeof info === "object" ? info : {}
     var balance = normalizedDecimal(payload.pool_balance)
     var remaining = normalizedDecimal(payload.claims_remaining)
     var reason = String(payload.blocked_reason || "")
+    var mechanism = String(payload.claim_mechanism || "")
+    var places = decimalPlaces(payload.decimals)
     return {
         known: balance !== "",
         network: String(payload.network || ""),
+        networkName: String(payload.network_name || ""),
+        lezVersion: String(payload.lez_version || ""),
+        explorerUrl: String(payload.explorer_url || ""),
+        mechanism: mechanism,
+        isClaimApi: mechanism === "claim_api",
+        claimApiUrl: String(payload.claim_api_url || ""),
+        decimals: places < 0 ? 0 : places,
+        paused: payload.paused === true,
         poolBalance: balance,
         claimsRemaining: remaining,
-        prizeAmount: normalizedDecimal(payload.prize_amount) || prizeAmount,
+        prizeAmount: normalizedDecimal(payload.prize_amount),
         difficultyBits: normalizedDecimal(payload.effective_difficulty_bits),
         poolAddress: payload.pinata_account && typeof payload.pinata_account === "object"
             ? String(payload.pinata_account.address || "") : "",
@@ -608,4 +792,17 @@ function poolView(info) {
         blockedSentence: reason === "" ? ""
             : (blockedReasons[reason] || "The faucet is not accepting claims right now.")
     }
+}
+
+// The explorer page for one transaction, or "" when either half is unusable.
+//
+// Only an https explorer root and a 64-hex-digit hash produce a link: this
+// string is handed to the clipboard as something to open, so it must never be
+// assembled out of whatever an envelope happened to carry.
+function explorerTransactionUrl(explorerUrl, txHash) {
+    var base = String(explorerUrl || "").trim().replace(/\/+$/, "")
+    var hash = String(txHash || "").trim()
+    if (!/^https:\/\/[A-Za-z0-9.-]+$/.test(base) || !/^[0-9a-f]{64}$/.test(hash))
+        return ""
+    return base + "/transaction/" + hash
 }

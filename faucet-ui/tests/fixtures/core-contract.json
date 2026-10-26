@@ -1,4 +1,17 @@
 {
+  "default_network": "lez-legacy-testnet",
+  "error_claim_api_unavailable": {
+    "code": "claim_api_unavailable",
+    "message": "The faucet service could not be reached and has no record of this request. Nothing was sent.",
+    "phase": "submitting",
+    "retryable": true
+  },
+  "error_faucet_paused": {
+    "code": "faucet_paused",
+    "message": "The faucet service is paused by its operator. Nothing was sent.",
+    "phase": "submitting",
+    "retryable": false
+  },
   "error_outcome_unknown": {
     "code": "outcome_unknown",
     "details": {
@@ -15,6 +28,15 @@
     "phase": "reconciling",
     "retryable": false
   },
+  "error_rate_limited": {
+    "code": "rate_limited",
+    "details": {
+      "retry_after_seconds": 86000
+    },
+    "message": "The faucet service is limiting claims right now. Try again in about 24 hours.",
+    "phase": "submitting",
+    "retryable": false
+  },
   "error_uninitialized": {
     "code": "recipient_uninitialized",
     "message": "not initialized",
@@ -23,10 +45,16 @@
   },
   "faucet_info": {
     "can_claim": true,
+    "claim_mechanism": "pinata",
     "claims_remaining": "9846",
+    "decimals": 0,
     "difficulty_bytes": 3,
     "effective_difficulty_bits": 24,
-    "network": "lez-public-testnet",
+    "explorer_url": "https://explorer.testnet-legacy.lez.logos.co",
+    "lez_version": "v0.2.4-lez-legacy",
+    "network": "lez-legacy-testnet",
+    "network_name": "LEZ legacy testnet",
+    "paused": false,
     "pinata_account": {
       "account_id": "EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7",
       "address": "Public/EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7"
@@ -36,6 +64,24 @@
     "program_fingerprint": {
       "authenticated_transfer": "dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc",
       "pinata": "e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6"
+    },
+    "sequencer_url": "https://testnet-legacy.lez.logos.co/"
+  },
+  "faucet_info_v03": {
+    "can_claim": true,
+    "claim_api_url": "https://rog-devbox.tail957e2.ts.net:8443",
+    "claim_mechanism": "claim_api",
+    "claims_remaining": "7",
+    "decimals": 9,
+    "explorer_url": "https://explorer.testnet.lez.logos.co",
+    "lez_version": "v0.3.1",
+    "network": "lez-v03-testnet",
+    "network_name": "LEZ v0.3 testnet",
+    "paused": false,
+    "pool_balance": "1234567890",
+    "prize_amount": "100000000",
+    "program_fingerprint": {
+      "privacy_preserving_circuit": "1818181818181818181818181818181818181818181818181818181818181818"
     },
     "sequencer_url": "https://testnet.lez.logos.co/"
   },
@@ -56,10 +102,54 @@
       "address": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
     }
   },
+  "inspection_v03": {
+    "balance": "0",
+    "eligibility": "eligible",
+    "recipient": {
+      "account_id": "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
+      "address": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
+    }
+  },
+  "networks": [
+    {
+      "claimApiUrl": null,
+      "decimals": 0,
+      "explorerUrl": "https://explorer.testnet-legacy.lez.logos.co",
+      "id": "lez-legacy-testnet",
+      "lezVersion": "v0.2.4-lez-legacy",
+      "mechanism": "pinata",
+      "name": "LEZ legacy testnet",
+      "prize": "150",
+      "sequencerUrl": "https://testnet-legacy.lez.logos.co"
+    },
+    {
+      "claimApiUrl": "https://rog-devbox.tail957e2.ts.net:8443",
+      "decimals": 9,
+      "explorerUrl": "https://explorer.testnet.lez.logos.co",
+      "id": "lez-v03-testnet",
+      "lezVersion": "v0.3.1",
+      "mechanism": "claim_api",
+      "name": "LEZ v0.3 testnet",
+      "prize": "100000000",
+      "sequencerUrl": "https://testnet.lez.logos.co"
+    }
+  ],
   "receipt": {
     "amount": "150",
     "balance_after": "6150",
     "balance_before": "6000",
+    "recipient": {
+      "account_id": "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
+      "address": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"
+    },
+    "request_key": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+    "stale_challenge_retries": 0,
+    "tx_hash": "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f"
+  },
+  "receipt_v03": {
+    "amount": "100000000",
+    "balance_after": "350000000",
+    "balance_before": "250000000",
     "recipient": {
       "account_id": "CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r",
       "address": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r"

@@ -1,15 +1,50 @@
 # LEZ Faucet
 
-LEZ Faucet is a small Basecamp app that funds one public account on the Logos
-Execution Zone public testnet. Its entire user input is one public LEZ address,
-and its entire action is one button:
+LEZ Faucet is a small Basecamp app that funds one public account on a Logos
+Execution Zone testnet. Its entire user input is a network, one public LEZ
+address, and one button:
 
 ```text
+Network  [ LEZ legacy testnet ▾ ]
 Public LEZ address
 [ Request 150 LEZ ]
 ```
 
-One press funds one eligible account by exactly 150 testnet LEZ.
+One press funds one eligible account by exactly the selected network's prize.
+
+## Which network
+
+The app claims on two testnets and opens on the first:
+
+| | LEZ legacy testnet | LEZ v0.3 testnet |
+| --- | --- | --- |
+| Sequencer | `https://testnet-legacy.lez.logos.co` | `https://testnet.lez.logos.co` |
+| Explorer | `https://explorer.testnet-legacy.lez.logos.co` | `https://explorer.testnet.lez.logos.co` |
+| LEZ | `v0.2.4-lez-legacy` | `v0.3.1` |
+| Prize | 150 LEZ | 0.1 LEZ (100,000,000 lepta) |
+| How | an unsigned proof-of-work claim against the on-chain Piñata | a request to the team's hosted claim service, `claimd` |
+
+An address on one is not an address on the other. The selector under the title
+switches between the rows; it is disabled while a request is running, and the
+choice is not remembered between runs.
+
+On the **legacy** testnet the app builds and submits one unsigned `PublicNoSign`
+transaction itself; nothing there needs a key. The **v0.3** testnet has no
+Piñata and no fee-less transaction — every public transaction needs a funded,
+signing fee payer — so a keyless client cannot claim on it alone. There the app
+asks `claimd`, a small service the team runs
+(`https://rog-devbox.tail957e2.ts.net:8443`, contract in
+[`claimd/README.md`](claimd/README.md)), which sends one native transfer from a
+small hot account. The app still proves the credit itself: it reads the balance
+before, watches for the service's transaction hash with `getTransaction`, and
+shows a receipt only once the balance is at exactly `before + prize`. The
+service's word is never a receipt.
+
+Networks are a table, not a URL: `lez-faucet-ffi/src/network.rs` holds the
+sequencer, explorer, LEZ pin, fingerprint, unit, prize and claim mechanism for
+every network the build will connect to, and `faucet-ui/src/FaucetBackend.cpp`
+mirrors it. There is no setting, variable or field through which any other
+host can be reached. `docs/testnet.md` carries the full contract.
 
 ## It is a faucet client, not a wallet
 
@@ -36,8 +71,9 @@ Consequences worth stating plainly:
 ### What "success" means here
 
 A receipt is shown only when the app has observed **its own** transaction
-included on chain **and** the recipient's balance up by exactly 150. Having
-submitted a transaction is never reported as success.
+included on chain **and** the recipient's balance up by exactly the prize.
+Having submitted a transaction — or, on v0.3, having been told by the service
+that it did — is never reported as success.
 
 Where that cannot be proven within the deadline, the app says the outcome is
 unknown, shows the address, the pre-claim balance and the transaction hash, and
@@ -46,10 +82,15 @@ two credits.
 
 ## The pool is finite and shared
 
-The Piñata pool started at 1,500,000 testnet LEZ and pays 150 per claim. It is
-**permissionless and repeatedly claimable, not unlimited**: every claim is a
-proof-of-work race against every other claimant for one global challenge, and
+The legacy Piñata pool started at 1,500,000 testnet LEZ and pays 150 per claim.
+It is **permissionless and repeatedly claimable, not unlimited**: every claim is
+a proof-of-work race against every other claimant for one global challenge, and
 the pool stops paying when it can no longer subtract 150.
+
+On v0.3 the service's hot balance plays the pool's part. It is topped up from
+the team's mined supply and the service caps claims — one per recipient per
+day, a few per hour overall — so a refusal there is the service's policy, not
+this app's; the app shows it as such and offers no retry.
 
 The deployed program enforces no cooldown, no per-address quota and no rate
 limit. This app's internal bounds are there to keep it well behaved on your
@@ -59,13 +100,13 @@ and nothing client-side could be.
 ## Version lock
 
 All LEZ client crates and build inputs are pinned to
-`logos-blockchain/logos-execution-zone` tag `v0.2.2`, commit:
+`logos-blockchain/logos-execution-zone` tag `v0.2.4-lez-legacy`, commit:
 
 ```text
-d6e4ae694e7419f5906b340c232704466a1917b7
+399793b4f99b836e40694cea34fa02790912e18e
 ```
 
-This must match the software running at `https://testnet.lez.logos.co`.
+This must match the software running at `https://testnet-legacy.lez.logos.co`.
 Before sending transactions the backend compares the sequencer's
 `getProgramIds` response with the locally compiled authenticated-transfer and
 pinata ImageIDs. A mismatch is a hard error, not a warning: version-skewed
@@ -128,7 +169,10 @@ owning wallet and are never needed by the faucet.
 
 ## Development
 
-Prerequisites are Nix with flakes, Rust, and the logos-scaffold CLI at 0.1.1
+Prerequisites are Nix with flakes, Rust 1.98 or newer (the pinned LEZ pulls in
+`logos-blockchain` 0.3.1, which needs it; `lez-faucet-ffi/Cargo.toml` says so in
+`rust-version`), `libclang` for the `rocksdb` bindings that dependency drags in,
+and the logos-scaffold CLI at 0.1.1
 (`lgs --version` prints `logos-scaffold 0.1.1`). Do not read the `version =
 "0.2.0"` at the top of `scaffold.toml` as a tool version: that field is the
 `scaffold.toml` schema version, and CLI 0.1.1 is what reads schema 0.2.0. The
@@ -138,7 +182,7 @@ way to know which one you have.
 
 Releases carry three variants: `darwin-arm64`, `linux-amd64`, and `linux-arm64`.
 Intel macOS is not one of them, and not by omission: logos-blockchain-circuits
-v0.5.3 publishes no macOS x86_64 archive, so the core module has nothing to link
+v0.5.7 publishes no macOS x86_64 archive, so the core module has nothing to link
 against there. `faucet-module/flake.nix` therefore exposes exactly those three
 systems and no more, which is what makes the release variant list a consequence
 of the flake rather than a preference restated in a workflow. (`faucet-ui` is
@@ -166,18 +210,21 @@ Scaffold localnet uses the fixed port `3040`. Run at most one localnet at a time
 across Conductor workspaces or other checkouts of this repository to avoid a
 port collision.
 
-Read-only tests against the public testnet are safe to run at any time:
+Read-only tests against either testnet are safe to run at any time:
 
 ```sh
 cargo test -p lez-faucet-ffi --test live_public_testnet -- --ignored --nocapture
+cargo test -p lez-faucet-ffi --test live_v03_testnet -- --ignored --nocapture
 ```
 
 There is exactly one write test. It spends 150 LEZ from a finite shared pool,
-so it runs only when a destination is named explicitly, and skips otherwise:
+so it runs only when a destination is named explicitly, and skips otherwise.
+Run it in the release profile: the claim's 24-bit proof-of-work has a 60-second
+solve deadline, and an unoptimized build misses it before anything is sent.
 
 ```sh
 LEZ_FAUCET_LIVE_RECIPIENT=Public/<account-id> \
-  cargo test -p lez-faucet-ffi --test live_public_testnet \
+  cargo test --release -p lez-faucet-ffi --test live_public_testnet \
   one_authorized_claim_credits_exactly_the_prize \
   -- --ignored --exact --nocapture
 ```
@@ -204,9 +251,12 @@ balance without rounding. To query a compatible localnet or a different
 sequencer:
 
 ```sh
-LEZ_FAUCET_SEQUENCER_URL=https://sequencer.example.test \
+LEZ_FAUCET_SEQUENCER_URL=http://127.0.0.1:3040 \
   ./scripts/lez-balance.sh Public/<account-id>
 ```
+
+(The script queries any sequencer; the app itself accepts only the hosts in
+its network table, plus loopback.)
 
 If you already have the pinned LEZ wallet CLI and a configured wallet home, the
 equivalent read-only command uses `jq` to select its JSON balance:
@@ -219,9 +269,11 @@ LEE_WALLET_HOME_DIR=/path/to/wallet \
 
 The CLI wallet is only the network-client context for this query and need not
 own the account being checked. Its `wallet_config.json` must point at the same
-sequencer. Upstream LEZ v0.2.2 — the pinned protocol revision, not this app's
-version — uses `LEE_WALLET_HOME_DIR`; the older `NSSA_WALLET_HOME_DIR` name is
-not read by this pinned wallet.
+sequencer — and note the wallet's own `testnet` preset points at the v0.3 main
+testnet, not legacy, so write the legacy URL into the config by hand
+(`docs/testnet.md` shows the file). Upstream LEZ `v0.2.4-lez-legacy` — the
+pinned protocol revision, not this app's version — uses `LEE_WALLET_HOME_DIR`;
+the older `NSSA_WALLET_HOME_DIR` name is not read by this pinned wallet.
 
 A wallet home created before v0.2.2 will not open: `WalletConfig` replaced
 `sequencer_addr` with a `sequencers` list and added `calibration_limit`, with no
@@ -231,34 +283,37 @@ the `sequencers` field is missing. Create a fresh home, or reshape the file.
 
 ## Install and release
 
-This tree builds **LEZ Faucet 0.3.2**: `lez_faucet` 0.3.2 and `lez_faucet_ui`
-0.3.2, per each module's `metadata.json`. Three unrelated version numbers appear
+This tree builds **LEZ Faucet 0.5.0**: `lez_faucet` 0.5.0 and `lez_faucet_ui`
+0.5.0, per each module's `metadata.json`. Three unrelated version numbers appear
 around this app, so name the subject every time:
 
 | Subject | Version |
 | --- | --- |
-| LEZ Faucet (this repository, both packages) | 0.3.2 |
+| LEZ Faucet (this repository, both packages) | 0.5.0 |
 | Logos Basecamp (the host app it installs into) | 0.2.1 |
-| Upstream LEZ (the pinned protocol revision) | `v0.2.2` |
+| Upstream LEZ (the pinned protocol revision the client links) | `v0.2.4-lez-legacy` |
 
-0.3.2 is a patch: it makes the core module's `shutdown` reversible, so closing
-the app window no longer disables the faucet for the rest of the Basecamp
-session. 0.3.1 before it was also a patch, moving the LEZ pin to match the
-upgraded testnet. Its predecessor 0.3.0 was a breaking release — the core module's
-C++ ABI changed, the UI's Qt Remote Objects interface changed, and the entire
-wallet and key-material flow was removed. Under semver a 0.x breaking change
-bumps the minor, which is why that one was 0.3.0 and not 0.2.1. `CHANGELOG.md`
+0.5.0 adds the v0.3 testnet through the hosted claim service and a network
+selector. It is a minor bump because the UI's Qt Remote Objects interface grew
+(`networks`, `selectedNetworkId`, `selectNetwork`) and the core's
+`getFaucetInfo` envelope changed shape (`claim_mechanism`, `decimals`,
+`paused`, `claim_api_url`; the Piñata-only fields are now absent on v0.3), and
+because the `PRIZE` constant left the C header: a 0.5.0 UI on a 0.4.0 core runs
+but has no selector to offer. 0.4.0 moved the app to the legacy testnet and
+repinned it to `v0.2.4-lez-legacy`; 0.3.2 made the core module's `shutdown`
+reversible; 0.3.1 moved the LEZ pin to `v0.2.2`; 0.3.0 was the breaking release
+that removed the wallet flow and changed both module interfaces. `CHANGELOG.md`
 records what moved.
 
 For a new installation, install `lez_faucet_ui`; Basecamp should resolve its
-`lez_faucet` core dependency from the same catalog. When upgrading an existing
-0.1.0 or 0.2.0 installation, upgrade or install `lez_faucet` 0.3.2 first, then
-`lez_faucet_ui` 0.3.2. The UI dependency is currently unversioned, so installing
-the new UI alone may leave an older core in place — and against a 0.3.x UI that
-is not a degraded app but a broken one, because the 0.2.x core does not
-implement the slots it calls. Rolling back to 0.3.0 or earlier is possible but
-pointless against the current testnet: those builds are pinned to LEZ `v0.2.0`
-and refuse every claim. See [Community installation](docs/community-install.md).
+`lez_faucet` core dependency from the same catalog. When upgrading, upgrade or
+install `lez_faucet` 0.5.0 first, then `lez_faucet_ui` 0.5.0. The UI dependency
+is currently unversioned, so installing the new UI alone may leave an older
+core in place — against a 0.3.x core that is a faucet still pointed at the v0.3
+main testnet, which refuses every claim with "This app does not match the
+deployed testnet"; against a 0.4.0 core the legacy row works and the v0.3 row
+is refused as an unknown sequencer. See
+[Community installation](docs/community-install.md).
 
 Release workflows are present for both modules. The crates.io HTTP 403 that
 blocked every Nix build of the core module is fixed in this tree:

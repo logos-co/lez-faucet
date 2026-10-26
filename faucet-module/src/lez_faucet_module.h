@@ -17,10 +17,16 @@ extern "C" {
 //
 // This module owns no wallet, no key material and no files. It accepts one
 // public account address and, per explicit user action, requests exactly one
-// fixed 150 LEZ credit. There is no password, mnemonic, recovery phrase or
-// account-creation surface anywhere in this class, and there must never be:
-// the underlying claim transaction names both accounts as unsigned public
-// participants, so there is nothing to sign with.
+// fixed credit — the prize of whichever network the client was configured
+// for. There is no password, mnemonic, recovery phrase or account-creation
+// surface anywhere in this class, and there must never be: on the legacy
+// testnet the claim transaction names both accounts as unsigned public
+// participants, and on the v0.3 testnet a hosted claim service does the
+// signing, so in neither case is there anything here to sign with.
+//
+// Which network is a matter of the sequencer URL given to configure(). The
+// Rust client pins the accepted hosts; configure() is refused while any job is
+// live and otherwise swaps the client, which is how the UI switches networks.
 //
 // getFaucetInfo/inspectRecipient/requestDrop start a worker job and return
 // immediately. Call jobStatus(job_id) until the status is one of succeeded,

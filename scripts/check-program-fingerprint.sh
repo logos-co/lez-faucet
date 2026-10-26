@@ -24,7 +24,8 @@ CI runs both, and the workflow treats that test as the gate.
 
 Environment:
   LEZ_FAUCET_SEQUENCER_URL  Sequencer JSON-RPC URL
-                            (default: https://testnet.lez.logos.co)
+                            (default: https://testnet-legacy.lez.logos.co,
+                            the LEZ legacy testnet this build targets)
 EOF
 }
 
@@ -58,7 +59,7 @@ contract=$script_dir/../docs/testnet.md
 [ -f "$contract" ] ||
     fail "cannot find docs/testnet.md at $contract"
 
-sequencer_url=${LEZ_FAUCET_SEQUENCER_URL:-https://testnet.lez.logos.co}
+sequencer_url=${LEZ_FAUCET_SEQUENCER_URL:-https://testnet-legacy.lez.logos.co}
 
 if ! response=$(
     curl -fsS \
@@ -79,7 +80,9 @@ import sys
 
 # The two programs this client builds transactions against. The sequencer
 # reports others (amm, token, privacy_preserving_circuit); drift in those
-# cannot affect the faucet, so it is not an error here.
+# cannot affect the faucet, so it is not an error here. A sequencer that
+# reports neither -- the LEZ v0.3.x main testnet ships no pinata at all -- is
+# reported as drift, because it is one: no build of this app can claim there.
 WATCHED = ("authenticated_transfer", "pinata")
 
 
@@ -92,7 +95,8 @@ def expected_ids(path):
     """Read the ImageID table out of docs/testnet.md.
 
     First match wins, deliberately. The document already records history (the
-    2026-08-05 reset), and a later section listing superseded IDs -- a
+    2026-08-05 reset, the 2026-10 move to the legacy testnet), and a later
+    section listing superseded IDs -- a
     "Historical" table, say -- must not override the live contract and turn a
     healthy testnet red. A false red on a daily cron is how a check earns the
     right to be ignored.
